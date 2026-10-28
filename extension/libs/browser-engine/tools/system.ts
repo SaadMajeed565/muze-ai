@@ -145,7 +145,23 @@ export const systemToolHandlers: RegisteredTool[] = [
             const truncated = pageResult.truncated ?? pageText.length > 100_000;
             return { text: truncated ? pageText.slice(0, 100_000) : pageText, truncated };
           }
-        } catch {
+        } catch (fallbackError) {
+          // Retest4 note, code change (not a new read path): the old
+          // catch swallowed every fallback failure into the generic
+          // both-paths focus error, including the common case where
+          // the ACTIVE tab itself is a restricted page (chrome://,
+          // Extensions, dashboard) after a reload. That case is not
+          // "the window is unfocused" — it is "no scriptable tab is
+          // active at all" — and it needs its own instruction, or
+          // the user keeps focusing the same restricted window and
+          // retrying to no effect. A genuinely unfocused window
+          // still falls through to the focus error below.
+          if (ToolErrorException.is(fallbackError) && fallbackError.code === "RESTRICTED_PAGE") {
+            throw new ToolErrorException(
+              "INTERNAL",
+              "Clipboard read failed: the active tab is a restricted page (for example chrome://, Extensions, or the Cloudflare dashboard) and cannot run a page-context clipboard read. Click a normal, non-restricted browser tab so it becomes the active tab, then retry. No clipboard content was read.",
+            );
+          }
           // Fall through to the honest focus-required error below.
         }
         throw new ToolErrorException(

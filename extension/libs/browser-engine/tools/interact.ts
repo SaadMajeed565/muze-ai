@@ -487,7 +487,28 @@ export const interactToolHandlers: RegisteredTool[] = [
       }
       const [from, to] = boxes as { viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }[];
       if (!from.crossOrigin && !to.crossOrigin) {
-        await ctx.cdp!.drag(tab.id!, from.viewportX + from.width / 2, from.viewportY + from.height / 2, to.viewportX + to.width / 2, to.viewportY + to.height / 2);
+        let cdpTimedOut = false;
+        try {
+          await ctx.cdp!.drag(tab.id!, from.viewportX + from.width / 2, from.viewportY + from.height / 2, to.viewportX + to.width / 2, to.viewportY + to.height / 2);
+        } catch (error) {
+          // Retest4: CDP drag still stalls (15s TIMEOUT) on pages where
+          // click/hover/moveTo pass, i.e. the drag stream itself, not
+          // the mouse path in general. A timed-out CDP drag leaves no
+          // usable drag behind, and the synthetic page-agent drag
+          // (DragEvent dragstart/dragover/drop) is the established
+          // fallback for pages without CDP — so on TIMEOUT only, run
+          // it for real below instead of failing outright. Other
+          // errors (stale refs, validation, restricted pages) are
+          // rethrown: they are not drag-stream stalls and must not
+          // be masked. dom.drag's strict output schema has no method
+          // field, so the fallback is not advertised in the result;
+          // this comment is the record of it.
+          if (!(ToolErrorException.is(error) && error.code === "TIMEOUT")) throw error;
+          cdpTimedOut = true;
+        }
+        if (cdpTimedOut) {
+          await runPageOp<{ dragged: true }>(ctx, tab.id!, { op: "drag", fromRef: data.fromRef, toRef: data.toRef }, data.frameId, signal);
+        }
         // dom.drag's strict output schema has no method/hardware fields.
         return { dragged: true as const, fromRef: data.fromRef, toRef: data.toRef };
       }
@@ -511,8 +532,18 @@ export const interactToolHandlers: RegisteredTool[] = [
     const to = await mapScreenshotCoords(ctx, tab.id!, data.x2, data.y2, data.coordinateSpace, data.frameId, signal);
     await assertViewportCoords(ctx, tab.id!, [from, to], data.frameId, signal);
     if (isTopFrameCdp(ctx, data.frameId)) {
-      await ctx.cdp!.drag(tab.id!, from.x, from.y, to.x, to.y);
-      return { dragged: true as const, x1: from.x, y1: from.y, x2: to.x, y2: to.y, method: "cdp" as const };
+      try {
+        await ctx.cdp!.drag(tab.id!, from.x, from.y, to.x, to.y);
+        return { dragged: true as const, x1: from.x, y1: from.y, x2: to.x, y2: to.y, method: "cdp" as const };
+      } catch (error) {
+        // Same TIMEOUT-only synthetic fallback as dom.drag above:
+        // a stalled CDP drag stream must not mask other failures, and
+        // the result honestly reports method "synthetic" when the
+        // fallback ran, never "cdp".
+        if (!(ToolErrorException.is(error) && error.code === "TIMEOUT")) throw error;
+      }
+      await runPageOp<{ dragged: true }>(ctx, tab.id!, { op: "dragAt", x1: from.x, y1: from.y, x2: to.x, y2: to.y }, data.frameId, signal);
+      return { dragged: true as const, x1: from.x, y1: from.y, x2: to.x, y2: to.y, method: "synthetic" as const };
     }
     await runPageOp<{ dragged: true }>(ctx, tab.id!, { op: "dragAt", x1: from.x, y1: from.y, x2: to.x, y2: to.y }, data.frameId, signal);
     return { dragged: true as const, x1: from.x, y1: from.y, x2: to.x, y2: to.y, method: "synthetic" as const };

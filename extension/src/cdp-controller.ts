@@ -276,24 +276,34 @@ export class ChromeCdpCapability implements CdpCapability {
         buttons: 1,
         clickCount: 1,
       });
-      // The old sequence fired press and all drag moves back to back
-      // with no timing gap: a renderer that starts a native drag on
-      // dragstart can still be dispatching it when the next
-      // sendCommand arrives. One short settle gap after press, and one
-      // before release, matches the click path's dwell/hold timing.
-      await delay(30);
-      const steps = 5;
-      for (let i = 1; i <= steps; i++) {
-        const curX = fromX + ((toX - fromX) * i) / steps;
-        const curY = fromY + ((toY - fromY) * i) / steps;
-        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: Math.round(curX),
-          y: Math.round(curY),
-          buttons: 1,
-        });
-      }
-      await delay(30);
+      // Retest4 drag finding: drag was the LAST remaining interpolated
+      // path. The retest3 fix removed interpolation from moveInside
+      // (every move is a single mouseMoved, like a first move), and
+      // click/hover/moveTo/setRadio/setChecked then passed as second
+      // sequences — but drag still sent 5 interpolated mouseMoved
+      // events with buttons:1, and drag/dragAt still hit the 15s bound
+      // on fresh refs, with no stale-ref error. A pressed-button move
+      // stream is exactly the stream a renderer turns into a native
+      // drag: each interpolated step can start/extend a native
+      // drag session, re-render hover targets, or select text, and a
+      // sendCommand inside that drag session can stall until the
+      // drag ends — which never happens while more moves keep coming.
+      // So drag now mirrors the passing click path: one single
+      // mouseMoved straight to the destination, with longer settles
+      // (100ms) after press and before release so a dragstart, if the
+      // page starts one, finishes dispatching before the next event.
+      // The 15s bound is unchanged. If this CDP stream still stalls
+      // on a page, the dom.drag/dom.dragAt handlers fall back to the
+      // synthetic page-agent drag (DragEvent dispatch) on TIMEOUT
+      // only — see tools/interact.ts — rather than failing outright.
+      await delay(100);
+      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: Math.round(toX),
+        y: Math.round(toY),
+        buttons: 1,
+      });
+      await delay(100);
       await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
         type: "mouseReleased",
         x: Math.round(toX),

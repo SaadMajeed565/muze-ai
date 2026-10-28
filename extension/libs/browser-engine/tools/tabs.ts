@@ -22,7 +22,31 @@ import {
   windowsUpdate,
 } from "../../tool-contracts/index.js";
 import { defineTool, type RegisteredTool } from "../registry.js";
+import type { BrowserContext, RawWindow } from "../context.js";
 import { raceWithAbort, toTabInfo, toWindowInfo, validateUrlInput } from "./helpers.js";
+
+/**
+ * Retest4 tabCount fallback: a RawWindow without a populated tabs list
+ * (as chrome-context used to produce for create/update, and as any
+ * non-populating context still can) must not report tabCount 0. When
+ * tabs are absent, count the window's tabs via listTabs; when tabs
+ * are present, use them as-is. A listTabs failure must not fail the
+ * window call itself — it degrades to the unpopulated count (0),
+ * exactly as before, rather than breaking list/create/update.
+ */
+async function withTabCount(
+  ctx: BrowserContext,
+  win: RawWindow,
+  signal?: AbortSignal,
+): Promise<RawWindow> {
+  if (win.tabs !== undefined || typeof win.id !== "number") return win;
+  try {
+    const tabs = await raceWithAbort(ctx.listTabs({ windowId: win.id }), signal);
+    return { ...win, tabs };
+  } catch {
+    return win;
+  }
+}
 
 export const tabsToolHandlers: RegisteredTool[] = [
   defineTool(tabsList, async (input, { ctx, signal }) => {
@@ -182,14 +206,15 @@ export const tabsToolHandlers: RegisteredTool[] = [
 
   defineTool(windowsList, async (_input, { ctx, signal }) => {
     const windows = await raceWithAbort(ctx.listWindows(), signal);
-    return { windows: windows.map(toWindowInfo) };
+    const enriched = await Promise.all(windows.map((win) => withTabCount(ctx, win, signal)));
+    return { windows: enriched.map(toWindowInfo) };
   }),
 
   defineTool(windowsCreate, async (input, { ctx, signal }) => {
     const data = input as { url?: string; focused: boolean; incognito: boolean };
     const url = data.url ? validateUrlInput(data.url) : undefined;
     const window = await raceWithAbort(ctx.createWindow({ url, focused: data.focused, incognito: data.incognito }), signal);
-    return { window: toWindowInfo(window) };
+    return { window: toWindowInfo(await withTabCount(ctx, window, signal)) };
   }),
 
   defineTool(windowsUpdate, async (input, { ctx, signal }) => {
@@ -210,7 +235,7 @@ export const tabsToolHandlers: RegisteredTool[] = [
       left: data.left,
       top: data.top,
     }), signal);
-    return { window: toWindowInfo(window) };
+    return { window: toWindowInfo(await withTabCount(ctx, window, signal)) };
   }),
 
   defineTool(windowsClose, async (input, { ctx, signal }) => {

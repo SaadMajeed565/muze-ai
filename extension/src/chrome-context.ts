@@ -58,6 +58,30 @@ const TAB_COMPLETE_POLL_MS = 25;
 /** Full-page capture: settle/paint wait between scrolled slices (named, not magic). */
 const FULL_PAGE_SLICE_SETTLE_MS = 120;
 
+/**
+ * Retest4 fullPage findings, two failure modes on two pages:
+ * - Wiki: MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota, twice, even
+ *   after a 20s wait. The previous fix's bounded partial only covered a
+ *   pre-capture canvas cap — a quota failure DURING the slice loop
+ *   threw the whole capture away, so no partial ever appeared.
+ * - Selenium: 30s executor timeout, with no quota error at all.
+ * Both are addressed the same honest way: throttle slices so the
+ * capture rate itself cannot hit the quota, retry a quota hit with
+ * backoff, and never let a mid-capture failure or a slow page hang
+ * to the executor limit — return the slices captured so far as a
+ * partial instead, with the reason. If zero slices were captured,
+ * there is no partial to return and the original error still throws.
+ */
+const FULL_PAGE_SLICE_MIN_INTERVAL_MS = 500;
+const FULL_PAGE_QUOTA_RETRIES = 3;
+const FULL_PAGE_QUOTA_BACKOFF_MS = [1_000, 2_000, 4_000];
+const FULL_PAGE_CAPTURE_BUDGET_MS = 20_000;
+
+export function isCaptureQuotaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|quota/i.test(message);
+}
+
 interface PageMetrics {
   scrollHeight: number;
   viewportHeight: number;
@@ -134,12 +158,19 @@ function toRawTab(tab: chrome.tabs.Tab): RawTab {
 }
 
 function toRawWindow(window: chrome.windows.Window): RawWindow {
+  // Retest4 tabCount anomaly: listWindows already called getAll with
+  // populate:true, but this conversion dropped window.tabs entirely,
+  // so toWindowInfo always saw tabs === undefined and reported
+  // tabCount 0 for every window, including the main window holding
+  // several tabs. Preserve the populated tabs here; create/update
+  // re-fetch with populate:true below for the same reason.
   return {
     id: window.id,
     focused: window.focused,
     state: window.state,
     type: window.type,
     alwaysOnTop: window.alwaysOnTop,
+    ...(window.tabs ? { tabs: window.tabs.map(toRawTab) } : {}),
   };
 }
 
@@ -291,11 +322,28 @@ export class ChromeBrowserContext implements BrowserContext {
   async createWindow(options: CreateWindowOptions): Promise<RawWindow> {
     const window = await chrome.windows.create({ url: options.url, focused: options.focused, incognito: options.incognito });
     if (!window) throw new ToolErrorException("INTERNAL", "Failed to create window");
+    // chrome.windows.create does not guarantee a populated tabs list,
+    // so re-fetch with populate:true; if that fails, the created
+    // window itself is still returned (tabCount may then be 0, and
+    // the windows-list handler's listTabs fallback covers it).
+    try {
+      const populated = await chrome.windows.get(window.id!, { populate: true });
+      if (populated) return toRawWindow(populated);
+    } catch {
+      // fall through to the created window below
+    }
     return toRawWindow(window);
   }
 
   async updateWindow(windowId: number, properties: UpdateWindowProperties): Promise<RawWindow> {
-    return toRawWindow(await chrome.windows.update(windowId, properties));
+    const updated = await chrome.windows.update(windowId, properties);
+    try {
+      const populated = await chrome.windows.get(windowId, { populate: true });
+      if (populated) return toRawWindow(populated);
+    } catch {
+      // fall through to the updated window below
+    }
+    return toRawWindow(updated);
   }
 
   async closeWindow(windowId: number): Promise<void> {
@@ -575,8 +623,18 @@ export class ChromeBrowserContext implements BrowserContext {
     const originalScroll = metrics.scrollY;
     await this.executeInPage(tabId, hideStickyOp, { hidden: true });
     const slices: { dataUrl: string; docStart: number; docEnd: number; scrollY: number }[] = [];
+    let midCapturePartialReason: string | undefined;
+    const captureStartedAt = Date.now();
+    let lastCaptureStartedAt = 0;
     try {
       for (let i = 0; i < pages; i++) {
+        // Slow-page budget: if the loop is already past budget and at
+        // least one slice exists, stop and return a partial instead of
+        // hanging to the 30s executor timeout (the selenium failure).
+        if (slices.length > 0 && Date.now() - captureStartedAt > FULL_PAGE_CAPTURE_BUDGET_MS) {
+          midCapturePartialReason = `Full-page capture stopped after ${slices.length} of ${pages} slices: the ${FULL_PAGE_CAPTURE_BUDGET_MS}ms capture budget was reached. The image covers the top of the page; capture the visible viewport per section for the rest.`;
+          break;
+        }
         // The last slice is pulled back to the bottom of the page, so it
         // overlaps the previous one. The overlap is cut off when the images
         // are stitched together.
@@ -586,7 +644,42 @@ export class ChromeBrowserContext implements BrowserContext {
         // Named constant (FULL_PAGE_SLICE_SETTLE_MS): slice waits are kept
         // deliberately, because scrolling does not synchronously repaint.
         await new Promise((r) => setTimeout(r, FULL_PAGE_SLICE_SETTLE_MS));
-        const dataUrl = await this.captureVisibleDataUrlUnlocked(tabId, { format: options.format, quality: options.quality });
+        // Throttle: Chrome rate-limits captureVisibleTab per second, and
+        // the old loop fired a capture every ~120ms plus capture time —
+        // several per second on a tall page, which is exactly the wiki
+        // quota error. Enforce a minimum interval between capture
+        // starts so the rate itself cannot hit the quota.
+        const sinceLastCapture = Date.now() - lastCaptureStartedAt;
+        if (lastCaptureStartedAt > 0 && sinceLastCapture < FULL_PAGE_SLICE_MIN_INTERVAL_MS) {
+          await new Promise((r) => setTimeout(r, FULL_PAGE_SLICE_MIN_INTERVAL_MS - sinceLastCapture));
+        }
+        let dataUrl: string | undefined;
+        let quotaError: unknown;
+        for (let attempt = 0; attempt <= FULL_PAGE_QUOTA_RETRIES; attempt++) {
+          try {
+            lastCaptureStartedAt = Date.now();
+            dataUrl = await this.captureVisibleDataUrlUnlocked(tabId, { format: options.format, quality: options.quality });
+            quotaError = undefined;
+            break;
+          } catch (error) {
+            if (!isCaptureQuotaError(error) || attempt === FULL_PAGE_QUOTA_RETRIES) {
+              quotaError = error;
+              break;
+            }
+            // Quota retry with backoff, same slice (scroll position is
+            // unchanged). A retry after 20s in retest4 still hit the
+            // quota because it re-ran the whole rapid loop; throttling
+            // above plus backoff here is the combination that avoids it.
+            await new Promise((r) => setTimeout(r, FULL_PAGE_QUOTA_BACKOFF_MS[attempt] ?? 4_000));
+          }
+        }
+        if (dataUrl === undefined) {
+          if (slices.length > 0 && isCaptureQuotaError(quotaError)) {
+            midCapturePartialReason = `Full-page capture stopped after ${slices.length} of ${pages} slices: Chrome's capture quota (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND) was still exceeded after ${FULL_PAGE_QUOTA_RETRIES} retries. The image covers the top of the page; capture the visible viewport per section for the rest.`;
+            break;
+          }
+          throw quotaError;
+        }
         slices.push({
           dataUrl,
           docStart: i * viewportHeight,
@@ -601,9 +694,18 @@ export class ChromeBrowserContext implements BrowserContext {
         await chrome.tabs.update(previousActive.id, { active: true }).catch(() => undefined);
       }
     }
-
+    if (slices.length === 0) {
+      throw new ToolErrorException("INTERNAL", "Full-page capture produced no slices");
+    }
+    // A mid-capture partial covers only the slices actually captured:
+    // the stitched height is the last captured slice's end, not the
+    // pre-capture total, so the stitcher does not stretch early slices
+    // over the uncaptured remainder.
+    const effectiveHeight = midCapturePartialReason ? slices[slices.length - 1].docEnd : totalHeight;
+    const effectivePartial = partial || midCapturePartialReason !== undefined;
+    const effectivePartialReason = midCapturePartialReason ?? partialReason;
     const width = widthDev;
-    const height = Math.round(totalHeight * dpr);
+    const height = Math.round(effectiveHeight * dpr);
     const stitched = await this.offscreen.request<{ dataUrl: string; width: number; height: number; pages: number }>(
       "stitchImages",
       {
@@ -611,12 +713,12 @@ export class ChromeBrowserContext implements BrowserContext {
         width,
         height,
         viewportHeight,
-        documentHeight: totalHeight,
+        documentHeight: effectiveHeight,
         format: options.format,
         quality: options.quality,
       },
     );
-    return { ...stitched, ...(partial ? { partial: true as const, partialReason } : {}) };
+    return { ...stitched, pages: slices.length, ...(effectivePartial ? { partial: true as const, partialReason: effectivePartialReason } : {}) };
   }
 
   private createDownloads(): DownloadsCapability {
