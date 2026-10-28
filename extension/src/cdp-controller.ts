@@ -1,6 +1,24 @@
 import type { CdpCapability } from "../libs/browser-engine/index.js";
+import { ToolErrorException } from "../libs/tool-contracts/index.js";
 
 const CDP_VERSION = "1.3";
+
+/**
+ * Bound for one CDP input sequence. The 2026-10-28 retest saw dom.click,
+ * dom.hover and dom.setChecked time out at the 30s executor / 60s bridge
+ * limits on a Wikipedia searchbox, while CDP focus/type/clear/fill/press
+ * and clickAt on the same page succeeded — no code cause for a stall on
+ * that element type was found (the click/hover paths are the same
+ * attach → move → command → detach sequence as the passing paths, and
+ * settlePage is a no-op without waitMs/waitForNetworkIdle). A stalled
+ * debugger attach or sendCommand must therefore not hang until the
+ * executor limit: it fails fast with a diagnosable TIMEOUT, detaches,
+ * and leaves the caller free to retry or to use clickAt. This does NOT
+ * claim the underlying stall is fixed — a live retest on a different
+ * element is still needed to tell a page-specific stall from a CDP one.
+ */
+const CDP_SEQUENCE_TIMEOUT_MS = 15_000;
+const CDP_DETACH_TIMEOUT_MS = 2_000;
 
 /**
  * Enterprise hardware-level interaction via Chrome DevTools Protocol (CDP).
@@ -89,12 +107,33 @@ export class ChromeCdpCapability implements CdpCapability {
     await this.ensureAttached(tabId);
     this.inflight.set(tabId, (this.inflight.get(tabId) ?? 0) + 1);
     try {
-      return await fn();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          fn(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              reject(
+                new ToolErrorException(
+                  "TIMEOUT",
+                  `CDP input sequence did not complete within ${CDP_SEQUENCE_TIMEOUT_MS}ms (debugger attach or a command stalled). Detach was attempted; retry once, and if it repeats, check whether another debugger or DevTools session is attached to the tab.`,
+                ),
+              );
+            }, CDP_SEQUENCE_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     } finally {
       const remaining = (this.inflight.get(tabId) ?? 1) - 1;
       if (remaining <= 0) {
         this.inflight.delete(tabId);
-        await this.detach(tabId);
+        // Detach must not itself hang the call: cap it and ignore errors.
+        await Promise.race([
+          this.detach(tabId),
+          new Promise<void>((resolve) => setTimeout(resolve, CDP_DETACH_TIMEOUT_MS)),
+        ]).catch(() => undefined);
       } else {
         this.inflight.set(tabId, remaining);
       }

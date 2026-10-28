@@ -117,7 +117,12 @@ export const historySearch: ToolDefinition = {
   requiresApproval: false,
   input: z
     .object({
-      text: z.string().min(1).max(256),
+      // Empty text is a list-all query: the unified data history list
+      // dispatches here with no query, and Chrome's history.search with
+      // an empty string returns recent history. Making text optional
+      // with a default (instead of min(1)) is backward compatible: all
+      // existing callers that pass text keep working unchanged.
+      text: z.string().max(256).default(""),
       startTime: z.number().int().optional(),
       endTime: z.number().int().optional(),
       maxResults: z.number().int().min(1).max(500).default(50),

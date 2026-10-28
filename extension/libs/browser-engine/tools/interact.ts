@@ -270,9 +270,15 @@ export const interactToolHandlers: RegisteredTool[] = [
       // keys, then verify the value actually changed. Multiple selects
       // and unfindable options keep the DOM path / the not-selected
       // result, because arrow-key stepping cannot express them.
-      const before = await runPageOp<{ selectedIndex: number; optionIndex: number; value: string; multiple: boolean }>(
+      const before = await runPageOp<{ selectedIndex: number; optionIndex: number; value: string; multiple: boolean; notSelect?: boolean; tagName?: string }>(
         ctx, tab.id!, { op: "selectIndex", ref: data.ref, value: data.value, label: data.label }, data.frameId, signal,
       );
+      if (before.notSelect) {
+        throw new ToolErrorException(
+          "INVALID_INPUT",
+          `dom.select only works on a <select> element, but ref ${data.ref} is a <${(before.tagName ?? "unknown").toLowerCase()}> element. Use dom.fill/dom.type for text inputs, or find a <select> element first.`,
+        );
+      }
       if (!before.multiple && before.optionIndex >= 0 && before.optionIndex !== before.selectedIndex) {
         await runPageOp(ctx, tab.id!, { op: "focus", ref: data.ref }, data.frameId, signal);
         const key = before.optionIndex > before.selectedIndex ? "ArrowDown" : "ArrowUp";
@@ -610,7 +616,12 @@ export const interactToolHandlers: RegisteredTool[] = [
         } catch (error) {
           const code = (error as { code?: string }).code;
           if (code === "PERMISSION_DENIED") skipped.push({ field: field.ref, reason: "sensitive field is never filled" });
-          else skipped.push({ field: field.ref, reason: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+          else if (code === "STALE_ELEMENT" || /STALE_ELEMENT/.test(error instanceof Error ? error.message : String(error))) {
+            // Deliberately NOT re-resolved: a stale ref after a reload or
+            // navigation must not silently bind to a different element.
+            // The caller re-observes to get a fresh ref and retries.
+            skipped.push({ field: field.ref, reason: "stale ref after a reload/navigation — re-observe to get a fresh ref, then retry (refs are never silently re-resolved to a different element)" });
+          } else skipped.push({ field: field.ref, reason: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
         }
       }
       return { filled, skipped };

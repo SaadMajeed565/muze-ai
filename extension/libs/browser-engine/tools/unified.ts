@@ -269,6 +269,7 @@ export const unifiedToolHandlers: RegisteredTool[] = [
       case "zoom": return exec.invoke("tabs.setZoom", { tabId: data.tabId, zoom: data.zoom ?? data.level ?? 1 });
       case "group": return exec.invoke("tabs.group", { tabIds: data.tabIds ?? [], title: data.title });
       case "ungroup": return exec.invoke("tabs.ungroup", { tabIds: data.tabIds ?? [] });
+      case "reload": return exec.invoke("tabs.reload", { tabId: data.tabId, bypassCache: data.bypassCache ?? false });
       case "save_session": {
         if (!exec.approvalValidated) {
           const dry = await exec.invoke<{ requiresApproval?: boolean }>("workflows.saveSession", { name: data.title ?? "session", windowId: undefined }, { dryRun: true });
@@ -290,7 +291,7 @@ export const unifiedToolHandlers: RegisteredTool[] = [
         }
         return exec.invoke("workflows.organizeTabs", { strategy: data.strategy === "prefix" ? "titlePrefix" : (data.strategy ?? "domain"), windowId: undefined, maxGroups: data.maxGroups ?? 5 });
       }
-      default: throw new ToolErrorException("INVALID_INPUT", `Unknown tabs action "${action}". Valid: list, get, active, search, create, close, activate, duplicate, discard, move, pin, mute, zoom, group, ungroup, save_session, restore_session, organize`);
+      default: throw new ToolErrorException("INVALID_INPUT", `Unknown tabs action "${action}". Valid: list, get, active, search, create, close, activate, duplicate, discard, move, pin, mute, zoom, group, ungroup, reload, save_session, restore_session, organize`);
     }
   }),
 
@@ -407,7 +408,7 @@ export const unifiedToolHandlers: RegisteredTool[] = [
           timeoutMs: data.timeoutMs,
         });
       }
-      if (data.for === "network_idle") {
+      if (data.for === "network_idle" || data.for === "networkIdle") {
         return exec.invoke("page.networkIdle", { tabId, frameId: data.frameId, quietMs: data.quietMs, timeoutMs: data.timeoutMs });
       }
       if (data.for === "delay") {
@@ -620,7 +621,7 @@ export const unifiedToolHandlers: RegisteredTool[] = [
         timeoutMs: data.timeoutMs,
       });
     }
-    if (data.for === "network_idle") {
+    if (data.for === "network_idle" || data.for === "networkIdle") {
       return exec.invoke("page.networkIdle", { tabId, frameId: data.frameId, quietMs: data.quietMs, timeoutMs: data.timeoutMs });
     }
     if (data.for === "delay") {
@@ -654,8 +655,8 @@ export const unifiedToolHandlers: RegisteredTool[] = [
       }
       case "set_file": {
         assertUnifiedFileCaps(data.files, "forms.setFile");
-        await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, ref: data.ref, fileId: data.fileId }, "form.set_file");
-        return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, ref: data.ref, fileId: data.fileId });
+        await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId }, "form.set_file");
+        return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId, files: data.files });
       }
       case "submit": {
         await requireLegacyApproval(exec, "forms.submit", { tabId, frameId: data.frameId, formRef: data.formRef ?? data.ref, expectedAction: data.expectedAction }, "form.submit");
@@ -675,12 +676,12 @@ export const unifiedToolHandlers: RegisteredTool[] = [
     }
     if (data.action === "set_file") {
       assertUnifiedFileCaps(data.files, "forms.setFile");
-      await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, ref: data.ref, fileId: data.fileId }, "submit.set_file");
+      await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId }, "submit.set_file");
     }
     switch (data.action) {
       case "submit": return exec.invoke("forms.submit", { tabId, frameId: data.frameId, formRef: data.formRef, expectedAction: data.expectedAction });
       case "upload": return exec.invoke("forms.upload", { tabId, frameId: data.frameId, ref: data.ref, files: data.files ?? [] });
-      case "set_file": return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, ref: data.ref, fileId: data.fileId });
+      case "set_file": return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId, files: data.files });
       default: throw new ToolErrorException("INVALID_INPUT", `Unknown submit action "${data.action}". Valid: submit, upload, set_file`);
     }
   }),
@@ -767,6 +768,7 @@ export const unifiedToolHandlers: RegisteredTool[] = [
     }
     if (domain === "history") {
       switch (action) {
+        case "list": return exec.invoke("history.search", { text: data.text ?? data.query ?? "", startTime: data.startTime, endTime: data.endTime, maxResults: data.maxResults ?? data.limit ?? 50 });
         case "search": return exec.invoke("history.search", { text: data.text ?? data.query ?? "", startTime: data.startTime, endTime: data.endTime, maxResults: data.maxResults ?? data.limit ?? 50 });
         case "add": return exec.invoke("history.add", { url: data.url, title: data.title, transition: data.transition ?? "link" });
         case "delete": {

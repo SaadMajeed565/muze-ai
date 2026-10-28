@@ -111,6 +111,7 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("tabs", "create", "tabs.create", "reversible", false, "browser-state", { idempotent: false }),
   e("tabs", "close", "tabs.close", "reversible", false, "browser-state", { idempotent: false, note: "Destructive to that tab's content, but granular risk is reversible (recoverable via recently-closed tabs); no granular approval." }),
   e("tabs", "activate", "tabs.activate", "reversible", false, "browser-state", { idempotent: true }),
+  e("tabs", "reload", "tabs.reload", "reversible", false, "browser-state", { idempotent: true, note: "Unified tabs reload, added after the 2026-10-28 retest (tabs reload was not a unified action). Distinct from navigate reload, which maps to navigation.reload." }),
   e("tabs", "duplicate", "tabs.duplicate", "reversible", false, "browser-state", { idempotent: false }),
   e("tabs", "discard", "tabs.discard", "reversible", false, "browser-state", { idempotent: true }),
   e("tabs", "move", "tabs.move", "reversible", false, "browser-state", { idempotent: true, note: "Canonical input is {tabIds, windowId?, index?}; a single tabId is wrapped into tabIds by the handler." }),
@@ -311,6 +312,7 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("data", "update", "bookmarks.update", "reversible", false, "browser-state", { domain: "bookmarks", idempotent: false, note: "Overwrites the bookmark's title/url." }),
   e("data", "delete", "bookmarks.delete", "consequential", true, "destructive", { domain: "bookmarks", idempotent: false, note: "Unified handler dryRun-gates this through the granular bookmarks gate before executing." }),
   // history domain
+  e("data", "list", "history.search", "sensitive-read", false, "none", { domain: "history", idempotent: true, note: "Unified data history list, added after the 2026-10-28 retest (the handler had no list case). It is history.search with an empty query, not a separate granular tool." }),
   e("data", "search", "history.search", "sensitive-read", false, "none", { domain: "history", idempotent: true, note: "Granular predicate is false; the executor's sensitive-read policy gate still applies to the nested call (see header)." }),
   e("data", "add", "history.add", "reversible", false, "browser-state", { domain: "history", idempotent: false }),
   e("data", "delete", "history.delete", "consequential", true, "destructive", { domain: "history", idempotent: false, note: "Unified handler dryRun-gates this through the granular history gate before executing; deletes the given URLs from history." }),

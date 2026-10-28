@@ -14,7 +14,7 @@ const SIDE_EFFECTS = ["none", "browser-state", "external-visible", "destructive"
 /** Per-tool entry counts for the table as built (guards against dropped rows). */
 const EXPECTED_COUNTS: Record<string, number> = {
   browser: 5,
-  tabs: 18,
+  tabs: 19,
   windows: 4,
   navigate: 73,
   observe: 13,
@@ -23,7 +23,7 @@ const EXPECTED_COUNTS: Record<string, number> = {
   form: 6,
   submit: 3,
   devtools: 7,
-  data: 25,
+  data: 26,
   clipboard: 2,
   files: 2,
 };
@@ -48,6 +48,7 @@ const DATA_DISPATCHED: [string, string][] = [
   ["bookmarks", "move"],
   ["bookmarks", "update"],
   ["bookmarks", "delete"],
+  ["history", "list"],
   ["history", "search"],
   ["history", "add"],
   ["history", "delete"],
@@ -82,7 +83,9 @@ describe("unified per-action risk table", () => {
     const counts: Record<string, number> = {};
     for (const entry of UNIFIED_ACTION_RISK) counts[entry.unifiedTool] = (counts[entry.unifiedTool] ?? 0) + 1;
     expect(counts).toEqual(EXPECTED_COUNTS);
-    expect(UNIFIED_ACTION_RISK.length).toBe(175);
+    // 175 at the 2026-10-28 retest, + tabs.reload and data history list
+    // added by the retest fixes (see retest-fixes-2026-10-28.md).
+    expect(UNIFIED_ACTION_RISK.length).toBe(177);
   });
 
   it("has valid risk, sideEffect and requiresApproval on every entry", () => {

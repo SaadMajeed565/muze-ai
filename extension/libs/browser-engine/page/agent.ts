@@ -755,6 +755,10 @@ export function pageAgent(request: PageOp): any {
     case "select": {
       const el = resolve(request.ref) as HTMLSelectElement | null;
       if (!el) return { error: "STALE_ELEMENT" };
+      // A non-select element has no .options: Array.from(undefined) used
+      // to throw "undefined is not iterable" here, which surfaced as a
+      // confusing ok:false. Fail with a typed error instead.
+      if (el.tagName !== "SELECT" || !("options" in el)) return { error: "INVALID_INPUT" };
       const options = Array.from(el.options);
       let chosen: HTMLOptionElement | undefined;
       if (request.value !== undefined) chosen = options.find((o) => o.value === request.value);
@@ -800,6 +804,9 @@ export function pageAgent(request: PageOp): any {
     case "selectIndex": {
       const el = resolve(request.ref) as HTMLSelectElement | null;
       if (!el) return { error: "STALE_ELEMENT" };
+      if (el.tagName !== "SELECT" || !("options" in el)) {
+        return { selectedIndex: -1, optionIndex: -1, value: "", multiple: false, notSelect: true, tagName: el.tagName };
+      }
       const options = Array.from(el.options);
       let optionIndex = -1;
       if (request.value !== undefined) optionIndex = options.findIndex((o) => o.value === request.value);

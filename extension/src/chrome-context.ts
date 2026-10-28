@@ -312,11 +312,18 @@ export class ChromeBrowserContext implements BrowserContext {
       const result = await this.runPersistentPageAgent<Result>(tabId, arg, undefined);
       return result;
     }
+    // Chrome rejects an executeScript call whose args array contains an
+    // unserialisable value, and `undefined` counts: passing args:[undefined]
+    // for a no-argument function (frameProbe, diagnosticsHook,
+    // readDiagnosticsLog) produced "Error at property 'args': Error at
+    // index 0: Value is unserializable" for observe frames and for
+    // devtools console/errors. Omit args entirely when there is no arg;
+    // the function is still called with no arguments.
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       world: options?.world === "MAIN" ? "MAIN" : "ISOLATED",
       func: fn as unknown as (...args: unknown[]) => unknown,
-      args: [arg as unknown],
+      ...(arg === undefined ? {} : { args: [arg as unknown] }),
     });
     const first = results[0] as { result?: unknown; error?: unknown } | undefined;
     if (!first) throw new ToolErrorException("INTERNAL", "Script injection returned no result");
@@ -393,7 +400,9 @@ export class ChromeBrowserContext implements BrowserContext {
         target,
         world: options?.world === "MAIN" ? "MAIN" : "ISOLATED",
         func: fn as unknown as (...args: unknown[]) => unknown,
-        args: [arg as unknown],
+        // Same unserialisable-args rule as executeInPage: a no-argument
+        // frame probe must not be called with args:[undefined].
+        ...(arg === undefined ? {} : { args: [arg as unknown] }),
       });
     } catch (err) {
       // A sandboxed or otherwise uninjectable frame rejects the whole call in

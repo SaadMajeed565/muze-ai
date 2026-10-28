@@ -13,13 +13,8 @@ import {
   toToolDescriptor,
   toToolError,
   TOOL_SCHEMAS as FULL_TOOL_SCHEMAS,
-  UNIFIED_TOOL_SCHEMAS as TOOL_SCHEMAS,
   type ToolDescriptor,
 } from "../libs/tool-contracts/index.js";
-// Task tools are imported directly from their schema file (not via the
-// tool-contracts index) so the gateway needs no index change: the sync
-// script copies the whole tool-contracts tree, including schemas/tasks.ts.
-import { taskTools } from "../libs/tool-contracts/schemas/tasks.js";
 import { resolveUnifiedAction } from "../libs/tool-contracts/action-risk.js";
 import {
   UNIFIED_ACTION_RISK,
@@ -110,14 +105,22 @@ const MCP_INSTRUCTIONS =
   "- If an action requires confirmation, it is approved only through an elicitation dialog in your chat interface or a decision in the extension dashboard. A confirmation flag in tool input (\"confirmed\", \"userApproved\", \"approved\") is stripped by the gateway and never counts as approval — never send one expecting it to approve anything.\n" +
   "- Do not tell the user to open or look at the extension dashboard as a substitute for elicitation; approvals are decided in chat (elicitation) or on the dashboard, and the gateway records the decision as a real approval on the extension.\n";
 
-const ALL_TOOL_DESCRIPTORS: ToolDescriptor[] = [
-  ...TOOL_SCHEMAS.map((tool) => toToolDescriptor(tool)),
-  // Phase 0 task tools: additive descriptors so tasks.* are listed,
-  // discoverable, and scope-checked like any other tool. The gateway
-  // never executes a task step; it only forwards tasks.* to the bridge
-  // exactly like other tools, and never synthesises a TaskView.
-  ...taskTools.map((tool) => toToolDescriptor(tool)),
-];
+/**
+ * Gateway scope descriptors: the FULL registry, not just the unified
+ * surface. Before this fix the list was unified tools + task tools only,
+ * so descriptorForTool() returned undefined for every granular tool with
+ * no adaptLegacyToolCall case (tabs.pin, dom.read, screenshots.viewport,
+ * workflows.collectLinks, …) and assertScopeAllows() denied it with
+ * PERMISSION_DENIED risk "unknown" before it ever reached the bridge —
+ * even though the extension registers and executes those tools, and
+ * their unified equivalents passed. Scope is still enforced strictly:
+ * a granular tool is allowed only when its own registry risk is in the
+ * verified OAuth scope (read:tools for read-only, call:tools otherwise);
+ * unknown names still deny, and restricted tools still deny for all scopes.
+ * ListTools is unaffected: filterToCoreTools() still reduces this list to
+ * the core set unless MCP_SHOW_ALL_TOOLS is set.
+ */
+const ALL_TOOL_DESCRIPTORS: ToolDescriptor[] = FULL_TOOL_SCHEMAS.map((tool) => toToolDescriptor(tool));
 
 /** Every registered tool is advertised to clients; the extension authorizes each call. */
 export function listExposedDescriptors(): ToolDescriptor[] {
@@ -242,7 +245,12 @@ function resolveNavigate(d: Record<string, unknown>): UnifiedScopeResolution | n
     return entry ? entryToResolution(entry, "navigate", action) : null;
   }
   if (category === "sync" || forValue !== undefined) {
-    const domain = `sync:${forValue ?? "navigation"}`;
+    // networkIdle is accepted by the navigate/wait schemas as an alias for
+    // network_idle; scope resolution must use the canonical spelling or
+    // it falls back to the unified (reversible) risk and wrongly denies
+    // a read-only sync wait to read:tools clients.
+    const canonicalFor = forValue === "networkIdle" ? "network_idle" : forValue;
+    const domain = `sync:${canonicalFor ?? "navigation"}`;
     const entry = resolveUnifiedAction("navigate", "wait", domain);
     return entry ? entryToResolution(entry, "navigate", "wait") : null;
   }
@@ -663,8 +671,34 @@ function adaptLegacyToolCall(name: string, input: Record<string, unknown>): { na
       return { name: "navigate", input: { category: "sync", for: "element", by: input.by, selector: input.selector, value: input.value, role: input.role, name: input.name, timeoutMs: input.timeoutMs, tabId: input.tabId, frameId: input.frameId } };
     case "page.networkIdle":
       return { name: "navigate", input: { category: "sync", for: "network_idle", quietMs: input.quietMs, timeoutMs: input.timeoutMs, tabId: input.tabId, frameId: input.frameId } };
-    case "wait":
-      return { name: "navigate", input: { category: "sync", ...input } };
+    case "wait": {
+      // Canonical spelling is network_idle; accept the camelCase alias
+      // clients actually send (the retest's for="networkIdle" was rejected
+      // by both the wait and navigate schemas). Normalised here so the
+      // extension schemas only need the canonical value.
+      const out = { ...input };
+      if (out.for === "networkIdle") out.for = "network_idle";
+      return { name: "navigate", input: { category: "sync", ...out } };
+    }
+    case "form": {
+      // Legacy field aliases for the unified form tool: values -> fields,
+      // formId -> formRef, and field entries {name, value} -> {ref, value}.
+      // Anything else is left untouched so the extension's strict schema
+      // still rejects genuinely unknown keys with a clear error.
+      const out: Record<string, unknown> = { ...input };
+      if (out.values !== undefined && out.fields === undefined) out.fields = out.values;
+      if (out.formId !== undefined && out.formRef === undefined) out.formRef = out.formId;
+      if (Array.isArray(out.fields)) {
+        out.fields = out.fields.map((field) => {
+          if (field && typeof field === "object" && !Array.isArray(field)) {
+            const f = field as Record<string, unknown>;
+            if (typeof f.ref !== "string" && typeof f.name === "string") return { ...f, ref: f.name };
+          }
+          return field;
+        });
+      }
+      return { name: "form", input: out };
+    }
     case "forms.inspect":
       return { name: "form", input: { phase: "inspect", tabId: input.tabId, frameId: input.frameId } };
     case "forms.preview":
@@ -677,7 +711,7 @@ function adaptLegacyToolCall(name: string, input: Record<string, unknown>): { na
     case "forms.upload":
       return { name: "form", input: { phase: "upload", ref: input.ref, files: input.files, tabId: input.tabId, frameId: input.frameId } };
     case "forms.setFile":
-      return { name: "form", input: { phase: "set_file", ref: input.ref, fileId: input.fileId, tabId: input.tabId, frameId: input.frameId } };
+      return { name: "form", input: { phase: "set_file", ref: input.ref, selector: typeof input.selector === "string" ? input.selector : (typeof input.ref === "string" ? input.ref : undefined), fileId: input.fileId, files: input.files, tabId: input.tabId, frameId: input.frameId } };
     case "submit":
       return { name: "form", input: { phase: (input.action as any) ?? "submit", ...input } };
     case "history.search":
@@ -702,18 +736,29 @@ function adaptLegacyToolCall(name: string, input: Record<string, unknown>): { na
       return { name: "navigate", input: { category: "window", action: "close", windowId: input.windowId } };
     case "windows":
       return { name: "navigate", input: { category: "window", ...input } };
-    case "browser.info":
-      return { name: "data", input: { domain: "devtools", action: "status" } };
-    case "browser.capabilities":
-      return { name: "data", input: { domain: "devtools", action: "capabilities" } };
-    case "browser.permissions":
-      return { name: "data", input: { domain: "devtools", action: "permissions" } };
-    case "browser.diagnostics":
-      return { name: "data", input: { domain: "devtools", action: "diagnostics" } };
+    // browser.* and the unified "browser" tool are forwarded under their
+    // own names (the old mapping sent them to data/navigation.search,
+    // whose schemas reject browser action fields, so every browser call
+    // failed validation). The extension registers both the granular
+    // browser.* tools and the unified browser handler, which dispatches
+    // status/capabilities/permissions/diagnostics/search to those
+    // granular tools. Only legacy field aliases are normalised here;
+    // scope is still checked against each tool's own registry descriptor
+    // (see ALL_TOOL_DESCRIPTORS), so this routing change widens nothing.
     case "browser.search":
-      return { name: "navigate", input: { action: "search", query: input.text ?? input.query } };
-    case "browser":
-      return { name: "data", input: { domain: "devtools", action: input.action ?? "status" } };
+      return {
+        name: "browser.search",
+        input: {
+          ...input,
+          query: typeof input.query === "string" ? input.query : (typeof input.text === "string" ? input.text : ""),
+          ...(typeof input.maxResults === "number" && typeof input.limit !== "number" ? { limit: input.maxResults } : {}),
+        },
+      };
+    case "browser": {
+      const out = { ...input };
+      if (out.action === "search" && typeof out.query !== "string" && typeof out.text === "string") out.query = out.text;
+      return { name: "browser", input: out };
+    }
     case "devtools":
       return { name: "data", input: { domain: "devtools", ...input } };
     case "screenshots.visible":

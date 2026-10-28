@@ -83,7 +83,23 @@ export const systemToolHandlers: RegisteredTool[] = [
 
   defineTool(clipboardRead, async (_input, { ctx, signal }) => {
     if (!ctx.clipboard) throw new ToolErrorException("UNSUPPORTED", "Clipboard capability is not enabled");
-    const text = await raceWithAbort(ctx.clipboard.read(), signal);
+    let text: string;
+    try {
+      text = await raceWithAbort(ctx.clipboard.read(), signal);
+    } catch (error) {
+      // navigator.clipboard in the offscreen document requires a focused
+      // document; Chrome reports this as "Document is not focused". That
+      // is a focus requirement, not a permission denial and not a
+      // clipboard write — surface it as such so the caller can focus a
+      // browser window and retry, instead of a bare INTERNAL error.
+      if (/not focused/i.test(error instanceof Error ? error.message : String(error))) {
+        throw new ToolErrorException(
+          "INTERNAL",
+          "Clipboard read failed: Chrome requires a focused document for navigator.clipboard.readText, and the offscreen document is not focused. Click a browser window to focus it and retry. No clipboard content was read.",
+        );
+      }
+      throw error;
+    }
     const truncated = text.length > 100_000;
     return { text: truncated ? text.slice(0, 100_000) : text, truncated };
   }),
@@ -91,7 +107,17 @@ export const systemToolHandlers: RegisteredTool[] = [
   defineTool(clipboardWrite, async (input, { ctx, signal }) => {
     if (!ctx.clipboard) throw new ToolErrorException("UNSUPPORTED", "Clipboard capability is not enabled");
     const { text } = input as { text: string };
-    await raceWithAbort(ctx.clipboard.write(text), signal);
+    try {
+      await raceWithAbort(ctx.clipboard.write(text), signal);
+    } catch (error) {
+      if (/not focused/i.test(error instanceof Error ? error.message : String(error))) {
+        throw new ToolErrorException(
+          "INTERNAL",
+          "Clipboard write failed: Chrome requires a focused document for navigator.clipboard.writeText, and the offscreen document is not focused. Click a browser window to focus it and retry. No clipboard content was written.",
+        );
+      }
+      throw error;
+    }
     return { written: true as const, chars: text.length };
   }),
 
