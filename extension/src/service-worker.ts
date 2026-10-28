@@ -520,9 +520,9 @@ function gatewayInfo(settings: BridgeSettings): GatewayInfo {
     mcpUrl: gatewayMcpUrl(GATEWAY_URL),
     signedIn: Boolean(settings.gatewayToken),
     email: settings.gatewayAccountEmail,
-    // Masked display only. The full token/session id never leave the service
-    // worker except via the audited "muze/gateway/token" reveal request.
-    tokenMasked: maskSecret(settings.gatewayToken),
+    // No token value leaves the service worker to the dashboard, masked
+    // or otherwise. The session id is shown masked only; it is a routing
+    // identifier, not a credential on its own.
     sessionIdMasked: maskSecret(settings.gatewaySessionId),
     connected: settings.gatewayEnabled && (manager?.isConnected() ?? false),
     authRequired: gatewayAuthRequired,
@@ -710,19 +710,6 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
       });
       await connectGateway(activeSettings);
       return { ok: true, state: dashboardState() };
-    }
-    case "muze/gateway/token": {
-      // Explicit, audited reveal only. Masked display is the default; this
-      // path exists for advanced users and is the ONLY dashboard route that
-      // returns the full token. The audit event records that a reveal
-      // happened — never the token value itself.
-      if (!activeSettings.gatewayToken) return { ok: false, error: "Not signed in" };
-      audit.record({
-        kind: "token.reveal",
-        decision: "allowed",
-        details: { gateway: GATEWAY_URL },
-      });
-      return { ok: true, token: activeSettings.gatewayToken };
     }
     case "muze/gateway/rotate": {
       if (!activeSettings.gatewayToken) return { ok: false, error: "Not signed in" };

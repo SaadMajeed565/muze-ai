@@ -24,7 +24,6 @@ const KIND_LABEL: Record<AuditEvent["kind"], string> = {
   "client.disconnect": "Client disconnected",
   approval: "Approval",
   "kill-switch": "Emergency stop",
-  "token.reveal": "Token revealed",
   "token.rotate": "Token rotated",
 };
 
@@ -36,7 +35,6 @@ const KIND_ICON: Record<AuditEvent["kind"], IconName> = {
   "client.disconnect": "close",
   approval: "alert",
   "kill-switch": "power",
-  "token.reveal": "key",
   "token.rotate": "refresh",
 };
 

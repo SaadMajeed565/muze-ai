@@ -223,12 +223,7 @@ export function App(): preact.JSX.Element {
         signedIn={state.gateway.signedIn}
         email={state.gateway.email}
         mcpUrl={state.gateway.mcpUrl}
-        tokenMasked={state.gateway.tokenMasked}
         toolCount={state.snapshot.toolCount}
-        onRevealToken={async () => {
-          const response = await sendRequest({ type: "muze/gateway/token" });
-          return response.ok && response.token ? response.token : null;
-        }}
         connectedClients={state.snapshot.connectedClients}
         onStep={setStep}
         onModeChange={(mode: PermissionMode) => void request({ type: "muze/policy/mode", mode })}

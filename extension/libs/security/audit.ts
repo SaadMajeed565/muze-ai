@@ -7,7 +7,7 @@ export type AuditOutcome = "success" | "failure" | "cancelled" | "timeout";
 export interface AuditEvent {
   id: string;
   at: string;
-  kind: "tool.call" | "tool.result" | "policy.change" | "client.connect" | "client.disconnect" | "approval" | "kill-switch" | "token.reveal" | "token.rotate";
+  kind: "tool.call" | "tool.result" | "policy.change" | "client.connect" | "client.disconnect" | "approval" | "kill-switch" | "token.rotate";
   tool?: string;
   client?: ClientIdentity;
   risk?: RiskLevel;

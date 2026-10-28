@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useRef } from "preact/hooks";
 import type { PermissionMode } from "../libs/security/index.js";
 import { ONBOARDING_STEPS, clampStep, onboardingProgress } from "./logic.js";
 import { Icon } from "./components/Icon.js";
@@ -13,12 +13,8 @@ export interface OnboardingProps {
   signedIn: boolean;
   email: string;
   mcpUrl: string;
-  /** Masked device token for display only; the full token is never a prop. */
-  tokenMasked: string;
   /** Derived from dashboard state (snapshot.toolCount), never hardcoded. */
   toolCount: number;
-  /** Audited explicit reveal (service worker "muze/gateway/token"); null on failure. */
-  onRevealToken: () => Promise<string | null>;
   connectedClients: number;
   onStep: (step: number) => void;
   onModeChange: (mode: PermissionMode) => void;
@@ -55,9 +51,7 @@ export function Onboarding({
   signedIn,
   email,
   mcpUrl,
-  tokenMasked,
   toolCount,
-  onRevealToken,
   connectedClients,
   onStep,
   onModeChange,
@@ -69,9 +63,6 @@ export function Onboarding({
   // step used to index ONBOARDING_STEPS[step - 1] directly and could crash
   // rendering. safeStep is the only step value the render below uses.
   const safeStep = clampStep(step);
-  const [revealedToken, setRevealedToken] = useState<string | null>(null);
-  const [revealError, setRevealError] = useState<string | null>(null);
-  const [revealing, setRevealing] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const progress = onboardingProgress(safeStep);
 
@@ -81,18 +72,6 @@ export function Onboarding({
 
   const back = (): void => onStep(Math.max(1, safeStep - 1));
   const next = (): void => onStep(Math.min(ONBOARDING_STEPS.length, safeStep + 1));
-
-  const reveal = async (): Promise<void> => {
-    setRevealing(true);
-    setRevealError(null);
-    try {
-      const token = await onRevealToken();
-      if (token) setRevealedToken(token);
-      else setRevealError("Could not reveal the token. Try signing in again.");
-    } finally {
-      setRevealing(false);
-    }
-  };
 
   const footer = (
     <footer class="onboarding-foot">
@@ -224,32 +203,12 @@ export function Onboarding({
                   <li>Add it to your MCP client as a remote server.</li>
                   <li>Sign in and authorise the client when it asks — the client is approved through your account, not by pasting a token.</li>
                 </ol>
-                <div class="credential">
-                  <span class="credential-label">Device token (advanced)</span>
-                  <div class="credential-value">
-                    <code>{revealedToken ?? tokenMasked}</code>
-                    {revealedToken ? (
-                      <>
-                        <Button variant="ghost" size="sm" icon="eye-off" ariaLabel="Hide token" onClick={() => setRevealedToken(null)}>
-                          Hide
-                        </Button>
-                        <CopyButton value={revealedToken} label="Copy" />
-                      </>
-                    ) : (
-                      <Button variant="ghost" size="sm" icon="eye" ariaLabel="Reveal token" busy={revealing} onClick={() => void reveal()}>
-                        Reveal
-                      </Button>
-                    )}
-                  </div>
-                  <p class="hint">Masked by default. Revealing is audited and only needed if a client cannot use sign-in authorisation.</p>
-                  {revealError ? <Callout tone="danger">{revealError}</Callout> : null}
-                </div>
               </div>
             ) : (
               <EmptyState
                 icon="link"
                 title="Connect an account first"
-                description="Your token is created when you link this browser to a Muze account."
+                description="Link this browser to a Muze account first."
                 action={
                   <Button variant="primary" icon="link" busy={busy} onClick={onSignIn}>
                     Sign in / Create account

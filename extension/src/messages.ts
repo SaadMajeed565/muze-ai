@@ -48,12 +48,11 @@ export interface GatewayInfo {
   signedIn: boolean;
   email: string;
   /**
-   * Masked display forms only (bullet mask + last 4 characters, same
-   * algorithm as the dashboard's `maskToken`). The full token and session id
-   * are never included in dashboard state; use the audited
-   * "muze/gateway/token" request for an explicit reveal.
+   * Masked session id only (bullet mask + last 4 characters). No device
+   * token value, masked or otherwise, is ever sent to the dashboard:
+   * the token stays inside the service worker and is only used for
+   * bridge authentication. There is no dashboard route that reveals it.
    */
-  tokenMasked: string;
   sessionIdMasked: string;
   connected: boolean;
   /** The stored token was rejected and must be replaced by signing in again. */
@@ -84,16 +83,6 @@ export type DashboardRequest =
   | { type: "muze/gateway/sign-in" }
   | { type: "muze/gateway/sign-out" }
   | { type: "muze/gateway/rotate" }
-  | {
-      type: "muze/gateway/token";
-      /**
-       * Explicit reveal request. The service worker returns the full token
-       * ONLY for this request, and audits it. Masked display is the default
-       * everywhere else; this exists for advanced users who need to paste a
-       * token manually, not as the primary MCP-client flow (which is now
-       * sign-in-and-authorise via the MCP URL).
-       */
-    }
   | { type: "muze/onboarding/set"; patch: Partial<OnboardingState> }
   | { type: "muze/files/attach"; file: { name: string; mimeType: string; dataBase64: string } }
   | { type: "muze/files/list" }
@@ -115,8 +104,6 @@ export interface DashboardResponse {
   state?: DashboardState;
   audit?: AuditEvent[];
   data?: unknown;
-  /** Full device token, present ONLY in response to "muze/gateway/token". */
-  token?: string;
   /** Task progress views, present ONLY in response to "muze/tasks.*". Sanitised views only, never step inputs. */
   tasks?: TaskView[];
   task?: TaskView;

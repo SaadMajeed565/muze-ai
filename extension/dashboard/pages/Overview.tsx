@@ -1,7 +1,6 @@
-import { useState } from "preact/hooks";
 import type { DashboardState } from "../../src/messages.js";
 import type { Appearance, TabId } from "../logic.js";
-import { sendRequest, setupChecklist, setupRemaining } from "../logic.js";
+import { setupChecklist, setupRemaining } from "../logic.js";
 import { Icon } from "../components/Icon.js";
 import { Badge, Button, Card, Chip, EmptyState, Segmented, Switch } from "../components/primitives.js";
 
@@ -52,26 +51,9 @@ export function OverviewPage({
     connectedClients: snapshot.connectedClients,
     onboardingStep: onboarding.step,
   });
-  // Masked by default: gateway.tokenMasked is the only token value this
-  // page ever receives unprompted. The full token arrives only through the
-  // audited reveal request, is held in local state, and is cleared on Hide.
-  const [revealedToken, setRevealedToken] = useState<string | null>(null);
-  const [revealError, setRevealError] = useState<string | null>(null);
-  const [revealing, setRevealing] = useState(false);
-
-  const revealToken = async (): Promise<void> => {
-    setRevealing(true);
-    setRevealError(null);
-    const response = await sendRequest({ type: "muze/gateway/token" });
-    if (response.ok && response.token) setRevealedToken(response.token);
-    else setRevealError(response.error ?? "Could not reveal the token.");
-    setRevealing(false);
-  };
-
   const rotateToken = (): void => {
-    const ok = confirm("Rotate the device token? The current token stops working and this browser reconnects with a new one. Any client using the old token will need to sign in again.");
+    const ok = confirm("Rotate the device token? The current token stops working and this browser reconnects with a new one.");
     if (ok) {
-      setRevealedToken(null);
       onRotateToken();
     }
   };
@@ -145,7 +127,7 @@ export function OverviewPage({
       </Card>
 
       {!gateway.signedIn ? (
-        <Card title="Connect your browser" description="Sign in to create the endpoint and token your AI client uses.">
+        <Card title="Connect your browser" description="Sign in to create the endpoint your AI client uses.">
           <Button variant="primary" block icon="link" disabled={busy} onClick={onSignIn}>
             Sign in / Create account
           </Button>
@@ -171,43 +153,6 @@ export function OverviewPage({
                   onClick={() => void navigator.clipboard.writeText(gateway.mcpUrl)}
                 />
               </div>
-            </div>
-            <div class="credential">
-              <span class="credential-label">Token</span>
-              <div class="credential-value">
-                <code>{revealedToken ?? gateway.tokenMasked}</code>
-                {revealedToken ? (
-                  <>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon="eye-off"
-                      ariaLabel="Hide token"
-                      onClick={() => setRevealedToken(null)}
-                    />
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon="copy"
-                      ariaLabel="Copy token"
-                      disabled={busy}
-                      onClick={() => void navigator.clipboard.writeText(revealedToken)}
-                    />
-                  </>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    icon="eye"
-                    ariaLabel="Reveal token"
-                    disabled={busy || revealing}
-                    onClick={() => void revealToken()}
-                  >
-                    Reveal
-                  </Button>
-                )}
-              </div>
-              {revealError ? <p class="hint">{revealError}</p> : null}
             </div>
             <div class="row-inline">
               <Button variant="secondary" size="sm" disabled={busy} onClick={rotateToken}>

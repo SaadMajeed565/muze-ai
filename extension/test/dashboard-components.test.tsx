@@ -200,9 +200,7 @@ describe("Onboarding", () => {
     signedIn: false,
     email: "",
     mcpUrl: "https://gateway.test/mcp",
-    tokenMasked: "••••••••1234",
     toolCount: 129,
-    onRevealToken: vi.fn(async () => null),
     connectedClients: 0,
     onStep: vi.fn(),
     onModeChange: vi.fn(),
@@ -222,30 +220,16 @@ describe("Onboarding", () => {
     expect(onStep).toHaveBeenCalledWith(2);
   });
 
-  it("reaches the credential step and keeps the token masked", () => {
-    const { getByText, queryByText } = (getQueries(mount(<Onboarding {...base} step={4} signedIn email="a@b.c" />)));
+  it("reaches the credential step and shows no token at all", () => {
+    const { container, getByText, queryByText } = (getQueries(mount(<Onboarding {...base} step={4} signedIn email="a@b.c" />)));
 
     expect(getByText("Point your AI client here.")).toBeTruthy();
-    expect(queryByText("muze_live_abcdefgh1234")).toBeNull();
-    expect(getByText("••••••••1234")).toBeTruthy();
     expect(getByText("MCP endpoint")).toBeTruthy();
+    // No token credential, masked or otherwise, and no way to reveal one.
+    expect(queryByText("Device token (advanced)")).toBeNull();
+    expect([...container.querySelectorAll("button")].find((b) => b.textContent === "Reveal")).toBeUndefined();
     // The primary flow is sign-in authorisation, not a token paste.
     expect(getByText("Sign in and authorise the client when it asks — the client is approved through your account, not by pasting a token.")).toBeTruthy();
-  });
-
-  it("reveals the token only through the audited reveal callback", async () => {
-    const onRevealToken = vi.fn(async () => "muze_live_abcdefgh1234");
-    const { container, queryByText } = (getQueries(mount(
-      <Onboarding {...base} step={4} signedIn email="a@b.c" onRevealToken={onRevealToken} />,
-    )));
-    expect(queryByText("muze_live_abcdefgh1234")).toBeNull();
-    const reveal = [...container.querySelectorAll("button")].find((b) => b.textContent === "Reveal") ?? null;
-    await click(reveal);
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(onRevealToken).toHaveBeenCalledTimes(1);
-    expect(queryByText("muze_live_abcdefgh1234")).not.toBeNull();
   });
 
   it("clamps an out-of-range persisted step in render instead of crashing", () => {
@@ -254,7 +238,7 @@ describe("Onboarding", () => {
   });
 
   it("asks for an account before showing credentials", () => {
-    const { getByText } = (getQueries(mount(<Onboarding {...base} step={4} tokenMasked="" />)));
+    const { getByText } = (getQueries(mount(<Onboarding {...base} step={4} />)));
     expect(getByText("Connect an account first")).toBeTruthy();
   });
 

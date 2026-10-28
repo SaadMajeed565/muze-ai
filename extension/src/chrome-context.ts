@@ -325,14 +325,24 @@ export class ChromeBrowserContext implements BrowserContext {
   }
 
   private async runPersistentPageAgent<Result>(tabId: number, op: unknown, frameId?: number): Promise<Result> {
+    // Frame targeting fix (Facebook fbsbx case, 2026-10-28): the manifest
+    // loads the page agent in ALL frames, and chrome.tabs.sendMessage
+    // with no frameId broadcasts to every frame, so the first frame to
+    // answer wins. On Facebook a lightweight fbsbx maw_proxy_page
+    // iframe answered before the heavy main frame, so observe returned
+    // that iframe's bootloader text, 0 accessibility nodes and a 0x0
+    // viewport instead of the profile. A call with no frameId means
+    // the main frame, and the main frame is always frame 0 in Chrome,
+    // so target it explicitly. Explicit subframe calls are unchanged.
+    const targetFrameId = frameId ?? 0;
     const send = async (): Promise<{ ok?: boolean; result?: Result; error?: string }> =>
-      chrome.tabs.sendMessage(tabId, { type: "muze/page-op", op }, frameId !== undefined ? { frameId } : {});
+      chrome.tabs.sendMessage(tabId, { type: "muze/page-op", op }, { frameId: targetFrameId });
     const ensure = async (): Promise<{ ok?: boolean; result?: Result; error?: string }> => {
       try {
         return await send();
       } catch (error) {
         if (!/Receiving end does not exist|Could not establish connection/i.test(String(error))) throw error;
-        const key = typeof frameId === "number" ? tabId * 1000 + frameId : tabId;
+        const key = tabId * 1000 + targetFrameId;
         const previous = this.injectionLocks.get(key) ?? Promise.resolve();
         let release!: () => void;
         const lock = new Promise<void>((resolve) => { release = resolve; });
@@ -340,7 +350,7 @@ export class ChromeBrowserContext implements BrowserContext {
         await previous.catch(() => undefined);
         try {
           await chrome.scripting.executeScript({
-            target: typeof frameId === "number" ? { tabId, frameIds: [frameId] } : { tabId },
+            target: { tabId, frameIds: [targetFrameId] },
             files: [PAGE_AGENT_FILE],
             world: "ISOLATED",
           });
