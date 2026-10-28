@@ -20,15 +20,25 @@ function riskGroups(toolName: string): Record<string, string[]> {
   return groups;
 }
 
+/**
+ * Phase A: this generator renders ONLY the descriptors it is given.
+ * Callers must pass the mode-visible set, never the full registry, when
+ * the text is for a mode-filtered client — otherwise a read-mode client
+ * would pay context for, and be told about, tools it cannot see in
+ * ListTools. The core line, the unified lines, and the suggestions are
+ * all filtered to the given set, so the text cannot leak a hidden tool.
+ */
 export function generateToolSelectionInstructions(descriptors: ToolDescriptor[]): string {
   const byName = new Map(descriptors.map((d) => [d.name, d]));
   const core = ["observe", "act", "navigate", "form", "data", "tools.batch", "tools.discover", "tasks.create", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
+  const corePresent = core.filter((name) => byName.has(name));
   const lines: string[] = [];
   lines.push("## GENERATED TOOL SELECTION (from the registry; this section is generated, not hand-written)");
-  void byName;
-  lines.push(`Registry tools: ${descriptors.length}. Core set: ${core.join(", ")}.`);
+  lines.push(`Visible tools: ${descriptors.length}. Visible core set: ${corePresent.length ? corePresent.join(", ") : "(none)"}.`);
   lines.push("Prefer tools.batch for independent reads. Prefer a unified tool for simple actions and the granular tool for a precise action. Always re-observe after navigation. Always preview before submit (form.preview before form.submit).");
-  lines.push("Deprecated actions (still working in 2.x, removed in registry 3.0): navigate tab/window actions — use tabs.* / windows.* instead; data devtools/clipboard domains — use devtools.* / clipboard.* instead. Never use a deprecated action for a new flow.");
+  if (byName.has("navigate") || byName.has("data")) {
+    lines.push("Deprecated actions (still working in 2.x, removed in registry 3.0): navigate tab/window actions — use tabs.* / windows.* instead; data devtools/clipboard domains — use devtools.* / clipboard.* instead. Never use a deprecated action for a new flow.");
+  }
   const unified = ["browser", "tabs", "windows", "navigate", "observe", "act", "wait", "form", "submit", "devtools", "data", "clipboard", "files"];
   for (const name of unified) {
     const descriptor = byName.get(name);
@@ -40,6 +50,10 @@ export function generateToolSelectionInstructions(descriptors: ToolDescriptor[])
     }
     lines.push(`- \`${name}\` (${descriptor.category}, unified risk ${descriptor.risk}): ${parts.join(" | ")}`);
   }
-  lines.push("Task-type suggestions (suggestions only, never restrictions): research → observe, browser.search, tools.batch; form → form inspect, fill, preview, submit; organise → tabs, workflows.organizeTabs, tabs.group.");
+  const suggestions: string[] = [];
+  if (byName.has("observe") || byName.has("tools.batch")) suggestions.push("research → observe, tools.batch");
+  if (byName.has("form")) suggestions.push("form → form inspect, fill, preview, submit");
+  if (byName.has("tabs")) suggestions.push("organise → tabs, workflows.organizeTabs, tabs.group");
+  if (suggestions.length) lines.push(`Task-type suggestions (suggestions only, never restrictions): ${suggestions.join("; ")}.`);
   return lines.join("\n");
 }

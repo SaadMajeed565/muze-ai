@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
-import { sanitizeTaskView, type TaskStatus, type TaskView } from "../../src/task-dashboard.js";
+import { deriveLoopStatus, sanitizeTaskView, type TaskStatus, type TaskView } from "../../src/task-dashboard.js";
 import { sendRequest } from "../logic.js";
 import { Badge, Button, Callout, Card, EmptyState, Skeleton } from "../components/primitives.js";
 
@@ -94,10 +94,28 @@ export function TasksPage(): preact.JSX.Element {
 
   useEffect(() => {
     void load();
+    // Phase D push-first: the service worker already sends a
+    // `muze/event` message on every runner progress checkpoint
+    // (task.progress via the runner's progress callback), and App.tsx
+    // already listens for it — the Tasks page now does too, so an open
+    // page reloads on the push instead of waiting for the next poll
+    // tick. The interval stays as fallback (per plan, polling stays as
+    // fallback, not as the design) for events missed while the page
+    // was hidden or before the listener attached. The onMessage guard
+    // is for environments where the dashboard runs without a runtime
+    // message channel; in the real extension it is always present.
+    const onEvent = (message: { type?: string }): void => {
+      if (message?.type === "muze/event" || message?.type === "uabb/event") void load();
+    };
+    const onMessage = chrome.runtime.onMessage;
+    if (onMessage?.addListener) onMessage.addListener(onEvent);
     // Poll ONLY while this page is open: the interval is created on
     // mount and cleared on unmount, so a closed Tasks page polls nothing.
     const timer = window.setInterval(() => void load(), TASKS_POLL_MS);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      if (onMessage?.removeListener) onMessage.removeListener(onEvent);
+    };
   }, [load]);
 
   const act = async (task: TaskView, action: "pause" | "resume" | "cancel" | "approvePlan"): Promise<void> => {
@@ -176,6 +194,18 @@ export function TasksPage(): preact.JSX.Element {
                   <p class="approval-card-summary">
                     step {task.doneSteps.length} of {task.totalSteps}
                   </p>
+                  {(() => {
+                    // Loop status is derived from the runner-written
+                    // view (status / pauseReason / final report), never
+                    // set by the dashboard itself.
+                    const loop = deriveLoopStatus(task);
+                    return (
+                      <p class="approval-card-meta">
+                        Loop: {loop.loop} · Mode: {loop.mode}
+                        {loop.child ? " · Child task" : null}
+                      </p>
+                    );
+                  })()}
                   {(() => {
                     const current = currentStep(task);
                     return current ? (

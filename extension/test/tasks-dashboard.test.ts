@@ -3,6 +3,7 @@ import { act } from "preact/test-utils";
 import { h, render } from "preact";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  deriveLoopStatus,
   handleTaskDashboardRequest,
   sanitizeTaskView,
   type TaskDashboardPort,
@@ -321,5 +322,116 @@ describe("TasksPage", () => {
     await flush();
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "muze/tasks.cancel" }));
     confirmSpy.mockRestore();
+  });
+});
+
+describe("Phase D deriveLoopStatus", () => {
+  // Views are built through the real sanitiser from runner-shaped
+  // records, so the derivation is tested against what the runner
+  // actually writes — never against a hand-set dashboard field.
+  function view(overrides: Record<string, unknown> = {}) {
+    return sanitizeTaskView(rawTask(overrides));
+  }
+
+  it("maps a running task to running with act as the default mode", () => {
+    expect(deriveLoopStatus(view())).toEqual({ loop: "running", child: false, mode: "act" });
+  });
+
+  it("maps paused + verify-failed to verify-failed, and other pauses to paused", () => {
+    expect(deriveLoopStatus(view({ status: "paused", pauseReason: "verify-failed" })).loop).toBe("verify-failed");
+    expect(deriveLoopStatus(view({ status: "paused", pauseReason: "policy-changed" })).loop).toBe("paused");
+  });
+
+  it("maps terminal tasks with the runner's budget markers to budget-terminal only", () => {
+    expect(
+      deriveLoopStatus(view({ status: "partial", resultSummary: "Total budget exhausted." })).loop,
+    ).toBe("budget-terminal");
+    expect(
+      deriveLoopStatus(
+        view({
+          status: "failed",
+          finalReport: {
+            done: [],
+            undone: [0],
+            failed: [],
+            compensations: [],
+            manualCleanup: ["Step 0 (tabs.list) not run: total budget exhausted — manual cleanup may be required"],
+          },
+        }),
+      ).loop,
+    ).toBe("budget-terminal");
+    expect(deriveLoopStatus(view({ status: "partial", resultSummary: "Some steps failed." })).loop).toBe("partial");
+  });
+
+  it("marks a child task via the sanitiser boolean without exposing the parent id", () => {
+    const child = view({ parentId: "task_parent", mode: "explore" });
+    expect("parentId" in child).toBe(false);
+    expect(deriveLoopStatus(child)).toEqual({ loop: "running", child: true, mode: "explore" });
+  });
+
+  it("maps waiting_approval through unchanged", () => {
+    expect(deriveLoopStatus(view({ status: "waiting_approval" })).loop).toBe("waiting_approval");
+  });
+});
+
+describe("Phase D TasksPage push reload", () => {
+  let root: HTMLElement | null = null;
+
+  async function flush(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {});
+  }
+
+  afterEach(() => {
+    if (root) {
+      render(null, root);
+      root.remove();
+    }
+    root = null;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("reloads on a muze/event push and ignores unrelated messages (poll stays as fallback)", async () => {
+    const listeners: ((message: { type?: string }) => void)[] = [];
+    const sendMessage = vi.fn(async (message: { type: string; taskId?: string }) => {
+      const { port } = fakePort();
+      const response = await handleTaskDashboardRequest(
+        { type: message.type, taskId: message.taskId },
+        port,
+      );
+      return { ok: response.ok, error: response.error, tasks: response.tasks, task: response.task };
+    });
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage,
+        onMessage: {
+          addListener: (fn: (message: { type?: string }) => void) => {
+            listeners.push(fn);
+          },
+          removeListener: (fn: (message: { type?: string }) => void) => {
+            const at = listeners.indexOf(fn);
+            if (at >= 0) listeners.splice(at, 1);
+          },
+        },
+      },
+    });
+    root = document.createElement("div");
+    document.body.appendChild(root);
+    render(h(TasksPage, {}), root);
+    await flush();
+    await flush();
+    expect(listeners.length).toBe(1);
+    expect(root.textContent).toContain("Loop: running");
+
+    const baseline = sendMessage.mock.calls.length;
+    listeners[0]!({ type: "muze/event" });
+    await flush();
+    expect(sendMessage.mock.calls.length).toBeGreaterThan(baseline);
+
+    const afterPush = sendMessage.mock.calls.length;
+    listeners[0]!({ type: "something-else" });
+    await flush();
+    expect(sendMessage.mock.calls.length).toBe(afterPush);
   });
 });

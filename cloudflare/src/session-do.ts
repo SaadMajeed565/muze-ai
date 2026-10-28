@@ -176,6 +176,11 @@ interface PersistedMcpSession {
    * scope enforcement does not silently become "missing scope denies all"
    * after hibernation. */
   scope?: string;
+  /** Phase A agent mode for this MCP session, restored on cold-DO rebuild
+   * so a restart does not silently reset a read/plan client back to act. */
+  mode?: string;
+  /** Phase A discovered tools for this MCP session, restored the same way. */
+  discovered?: string[];
 }
 
 /**
@@ -538,7 +543,13 @@ export class SessionDO implements DurableObject {
       const stored = await this.loadSessions();
       const record = stored[headerSession];
       if (!record) return text("Session not found", 404);
-      transport = await this.buildTransport(headerSession, record.params, record.client, undefined, record.scope);
+      transport = await this.buildTransport(headerSession, record.params, record.client, undefined, record.scope, {
+        initialMode: record.mode,
+        initialDiscovered: record.discovered,
+        onSessionStateChange: (state) => {
+          void this.persistSessionState(headerSession, state).catch(() => undefined);
+        },
+      });
       this.registerSession(headerSession, transport, record.client?.id);
     }
     return transport.handleRequest(request);
@@ -548,12 +559,18 @@ export class SessionDO implements DurableObject {
     const client = this.clientFromHeaders(request);
     const scope = this.scopeFromHeaders(request);
     let generated: string | undefined;
+    let openSessionId: string | undefined;
     const transport = await this.buildTransport(undefined, undefined, client, () => {
       generated ??= `${this.state.id.toString()}:${crypto.randomUUID()}`;
       return generated;
-    }, scope);
+    }, scope, {
+      onSessionStateChange: (state) => {
+        if (openSessionId) void this.persistSessionState(openSessionId, state).catch(() => undefined);
+      },
+    });
     const response = await transport.handleRequest(request);
     const sessionId = response.headers.get("mcp-session-id") ?? generated;
+    openSessionId = sessionId;
     if (sessionId) {
       this.registerSession(sessionId, transport, client?.id);
       await this.persistSession(sessionId, { params, ...(client ? { client } : {}), ...(scope ? { scope } : {}) });
@@ -655,6 +672,21 @@ export class SessionDO implements DurableObject {
     await this.state.storage.put(MCP_SESSIONS_KEY, stored);
   }
 
+  /** Phase A: merge a mode/discovered update into the persisted session
+   * record without touching params, client, or scope. Best-effort: a
+   * storage failure never breaks the tool call that produced the change. */
+  private async persistSessionState(sessionId: string, state: { mode: string; discovered: string[] }): Promise<void> {
+    try {
+      const stored = await this.loadSessions();
+      const record = stored[sessionId];
+      if (!record) return;
+      stored[sessionId] = { ...record, mode: state.mode, discovered: [...state.discovered] };
+      await this.state.storage.put(MCP_SESSIONS_KEY, stored);
+    } catch {
+      // ignore: persistence is best-effort, never call-breaking
+    }
+  }
+
   private clientFromHeaders(request: Request): ClientIdentity | undefined {
     // 0.3.0 internal prefix is x-muze-*. The old x-uabb-* names are NOT
     // accepted: the Worker strips client-supplied headers and sets these
@@ -678,6 +710,11 @@ export class SessionDO implements DurableObject {
     client?: ClientIdentity,
     generator?: () => string,
     oauthScope?: string,
+    sessionState?: {
+      initialMode?: string;
+      initialDiscovered?: string[];
+      onSessionStateChange?: (state: { mode: string; discovered: string[] }) => void;
+    },
   ): Promise<WebStandardStreamableHTTPServerTransport> {
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: generator ?? (() => fixedSessionId ?? `${this.state.id.toString()}:${crypto.randomUUID()}`),
@@ -691,8 +728,14 @@ export class SessionDO implements DurableObject {
     const mirroringBridge = new TaskMirrorBridge(this.slot, (entry, clientId) => this.recordTaskMirror(entry, clientId));
     // Client type is recorded only if the client declared it in initialize
     // (initParams.clientInfo.name); otherwise it stays "unknown".
+    const initialMode = sessionState?.initialMode;
     const server = createGatewayMcpServer(mirroringBridge, client, this.env, oauthScope, {
       clientType: initParams?.clientInfo?.name,
+      ...(initialMode && ["read", "act", "plan", "explore", "summary", "compaction"].includes(initialMode)
+        ? { initialMode: initialMode as "read" | "act" | "plan" | "explore" | "summary" | "compaction" }
+        : {}),
+      ...(sessionState?.initialDiscovered ? { initialDiscovered: sessionState.initialDiscovered } : {}),
+      ...(sessionState?.onSessionStateChange ? { onSessionStateChange: sessionState.onSessionStateChange } : {}),
     });
     await server.connect(transport);
     if (initParams) await replayInitialize(transport, initParams);

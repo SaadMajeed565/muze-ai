@@ -580,7 +580,7 @@ describe("policy, client and scope re-checks on resume", () => {
 });
 
 describe("budget and cancel", () => {
-  it("pauses with budget-exceeded when elapsed time passes the total budget before a step", async () => {
+  it("ends partial with a final report when elapsed time passes the total budget before a step (Phase B: budget exhaustion is terminal, never a dead-end pause)", async () => {
     const { runner, calls } = makeRunner({
       executor: async (_tool, _input, ctx: { stepIndex: number }) => {
         nowVal += 400;
@@ -592,11 +592,14 @@ describe("budget and cancel", () => {
       { goal: "budgeted", clientId: CLIENT, browserSessionId: SESSION, steps: readSteps(10), totalBudgetMs: 1000 },
       snapshot,
     );
-    const paused = await runner.runTask(created.id, CLIENT);
-    expect(paused.status).toBe("paused");
-    expect(paused.pauseReason).toBe("budget-exceeded");
-    expect(doneIndices(paused)).toEqual([0, 1, 2]);
+    const ended = await runner.runTask(created.id, CLIENT);
+    expect(ended.status).toBe("partial");
+    expect(doneIndices(ended)).toEqual([0, 1, 2]);
     expect(calls).toHaveLength(3);
+    expect(ended.finalReport?.done).toEqual([0, 1, 2]);
+    expect(ended.finalReport?.undone).toEqual([3, 4, 5, 6, 7, 8, 9]);
+    expect(ended.finalReport?.failed).toEqual([]);
+    expect(ended.finalReport?.manualCleanup.length).toBeGreaterThan(0);
   });
 
   it("cancel at step 7 reports done 0-5 and undone 6-9 with compensations, never throwing on compensation failure", async () => {

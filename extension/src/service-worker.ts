@@ -245,7 +245,75 @@ function getTaskRunner(): TaskRunner {
       if (clientId !== undefined && record.client.id !== clientId) return false;
       return approvals.markUsed(tokenId);
     },
-    preStepObserve: async (step) => {
+    // Phase B per-iteration tool resolution: existence + live policy
+    // (the runner already applied its mode gate). Approval is NOT
+    // decided here — the executor still enforces approval per step.
+    resolveTool: (tool, context) => {
+      const definition = registry.get(tool);
+      if (!definition) return { allowed: false, reason: `tool "${tool}" does not exist` };
+      if ((context.mode === "read" || context.mode === "explore") && definition.risk !== "read-only") {
+        return { allowed: false, reason: `tool "${tool}" is not read-only and not allowed in mode "${context.mode}"` };
+      }
+      const stepInput = context.step.input as Record<string, unknown>;
+      const targetUrl = typeof stepInput.url === "string" ? stepInput.url : undefined;
+      const decision = policy.decide(definition, { id: context.clientId, name: context.clientId, transport: "remote" }, targetUrl ? { url: targetUrl } : {});
+      return decision.allowed ? { allowed: true } : { allowed: false, reason: decision.reason || `tool "${tool}" is denied by policy` };
+    },
+    // Phase B snapshot checkpoint: bounded observe (no screenshot),
+    // counts + URL only — never node text or page content.
+    captureSnapshot: async (step, signal) => {
+      const input = step.input as Record<string, unknown>;
+      const tabId = typeof input.tabId === "number" ? input.tabId : undefined;
+      const observed = await executor.execute({
+        tool: "observe",
+        input: { ...(tabId !== undefined ? { tabId } : {}), include: ["metadata", "a11y", "forms"], maxNodes: 200 },
+        client: { id: "task-runner", name: "task-runner", transport: "native" },
+        ctx: context,
+        ...(signal ? { signal } : {}),
+      });
+      const out = observed.result as Record<string, unknown>;
+      const metadata = out.metadata as { title?: string; url?: string } | undefined;
+      const nodes = Array.isArray(out.nodes) ? out.nodes : [];
+      const forms = Array.isArray(out.forms) ? (out.forms as { fields?: unknown[] }[]) : [];
+      const fieldCount = forms.reduce((total, form) => total + (Array.isArray(form.fields) ? form.fields.length : 0), 0);
+      return {
+        url: metadata?.url ?? null,
+        a11ySummary: `${nodes.length} accessibility nodes observed`,
+        formSummary: `${forms.length} forms, ${fieldCount} fields observed`,
+      };
+    },
+    // Phase B post-step verify observation: same observe machinery as
+    // preStepObserve, run after the step. The runner evaluates the
+    // step's generic verify condition against url/targetPresent.
+    postStepObserve: async (step, signal) => {
+      const input = step.input as Record<string, unknown>;
+      const tabId = typeof input.tabId === "number" ? input.tabId : undefined;
+      const observed = await executor.execute({
+        tool: "observe",
+        input: { ...(tabId !== undefined ? { tabId } : {}), include: ["metadata", "a11y"], maxNodes: 200 },
+        client: { id: "task-runner", name: "task-runner", transport: "native" },
+        ctx: context,
+        ...(signal ? { signal } : {}),
+      });
+      const out = observed.result as Record<string, unknown>;
+      const metadata = out.metadata as { title?: string; url?: string } | undefined;
+      const summary = metadata?.title ? `${metadata.title} (${metadata.url ?? ""})` : "Tab observed after step.";
+      let targetPresent: boolean | null = null;
+      if (step.verify?.kind === "element-present") {
+        const ref = typeof step.verify.value === "string" ? step.verify.value : typeof input.ref === "string" ? input.ref : undefined;
+        if (ref !== undefined) {
+          const nodes = Array.isArray(out.nodes) ? (out.nodes as { ref?: string }[]) : [];
+          const forms = Array.isArray(out.forms) ? (out.forms as { fields?: { ref?: string }[] }[]) : [];
+          targetPresent =
+            nodes.some((node) => node.ref === ref) ||
+            forms.some((form) => (form.fields ?? []).some((field) => field.ref === ref));
+        }
+        // No ref anywhere to check: null = unconfirmed, and the runner
+        // fails the verify fail-closed instead of guessing.
+      }
+      return { url: metadata?.url ?? null, targetPresent, summary };
+    },
+    preStepObserve: async (step, signal) => {
       // Real re-observation via the executor (read-only observe, no
       // screenshot): if the step carries a dom ref, that ref must still
       // appear in the accessibility tree or forms; selector-only and
@@ -259,6 +327,7 @@ function getTaskRunner(): TaskRunner {
           input: { ...(tabId !== undefined ? { tabId } : {}), include: ["metadata", "a11y"], maxNodes: 200 },
           client: { id: "task-runner", name: "task-runner", transport: "native" },
           ctx: context,
+          ...(signal ? { signal } : {}),
         });
         const out = observed.result as Record<string, unknown>;
         const metadata = out.metadata as { title?: string; url?: string } | undefined;

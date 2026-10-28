@@ -42,12 +42,19 @@ import {
   extractDomainsFromInput,
   isNavigateTool,
   isScopeAtLeastAsStrong,
+  parseAgentMode,
+  parseChildMode,
   planDomains,
+  taskParentId,
   stableStringify,
   summarizeInput,
+  taskMode,
   toTaskView,
   truncateSummary,
+  type AgentMode,
+  type ChildMode,
   type CompensationKind,
+  type PageSnapshotCheckpoint,
   type PinnedTab,
   type PlanApproval,
   type PlanApprovalSource,
@@ -58,7 +65,15 @@ import {
   type TaskStep,
   type TaskStore,
   type TaskView,
+  type VerifyCondition,
 } from "./types.js";
+import {
+  buildCompactedView,
+  pruneTaskOutputs,
+  type CompactedTaskView,
+  type CompactedViewOptions,
+  type PruneTaskOutputsOptions,
+} from "./compaction.js";
 
 export interface StepContext {
   clientId: string;
@@ -109,6 +124,59 @@ export interface PreStepObservation {
 }
 
 /**
+ * Phase B per-iteration tool resolution (OpenCode resolveTools per
+ * iteration, adapted): re-resolve the step's tool against the current
+ * policy snapshot, the task's pinned mode, and scope, instead of
+ * trusting the tool set cached at creation. `allowed: false` pauses
+ * the task (policy-changed), it never executes the step.
+ */
+export interface ToolResolution {
+  allowed: boolean;
+  reason?: string;
+}
+
+export interface ToolResolutionContext {
+  mode: AgentMode;
+  policySnapshot: PolicySnapshot;
+  clientId: string;
+  step: TaskStep;
+}
+
+/**
+ * Phase B post-step verify observation (same machinery family as
+ * preStepObserve, run after the step). `targetPresent` is the wiring's
+ * answer for the step's verify target (verify value, else the step
+ * input's ref); null when the step has no ref target to check.
+ */
+export interface PostStepObservation {
+  url: string | null;
+  targetPresent: boolean | null;
+  summary: string;
+}
+
+/** Evaluate a step's generic verify condition against an observation. */
+export function evaluateVerifyCondition(
+  condition: VerifyCondition | null,
+  observed: PostStepObservation,
+): { pass: boolean; detail: string } {
+  if (!condition) return { pass: true, detail: "no verify condition; observation recorded" };
+  if (condition.kind === "url-equals") {
+    return observed.url === condition.value
+      ? { pass: true, detail: "URL matches the verify condition" }
+      : { pass: false, detail: `verify failed: URL does not equal the expected URL` };
+  }
+  if (condition.kind === "url-contains") {
+    return observed.url !== null && condition.value !== undefined && observed.url.includes(condition.value)
+      ? { pass: true, detail: "URL contains the verify substring" }
+      : { pass: false, detail: `verify failed: URL does not contain the expected substring` };
+  }
+  // element-present
+  if (observed.targetPresent === true) return { pass: true, detail: "verify target is present" };
+  if (observed.targetPresent === null) return { pass: false, detail: "verify failed: target presence could not be confirmed" };
+  return { pass: false, detail: "verify failed: target is not present" };
+}
+
+/**
  * The working-tab group a task's tabs are moved into while it runs.
  * Structural only, so the runner never imports the browser engine:
  * the service worker supplies the real ChromeWorkingTabGroup, and
@@ -155,7 +223,23 @@ export interface RunnerDeps {
   /** Canonical-param validation for dry-run previews; returns error strings, empty when valid. */
   validateStepInput?: (tool: string, input: Record<string, unknown>) => string[];
   /** Phase 3 grounding: re-observe before consequential steps. Absent = no re-observation (Phase 0 behaviour). */
-  preStepObserve?: (step: TaskStep) => Promise<PreStepObservation>;
+  preStepObserve?: (step: TaskStep, signal?: AbortSignal) => Promise<PreStepObservation>;
+  /**
+   * Phase B loop wiring (all optional; absent = Phase 0 behaviour for
+   * that check, recorded as verifyOutcome "skipped" for verify):
+   * - resolveTool: per-iteration re-resolution against current
+   *   policy/mode/scope. Runner-native mode gating runs first, so a
+   *   missing dep still denies out-of-mode consequential steps.
+   * - captureSnapshot: bounded page snapshot before consequential
+   *   steps, stored on the step record for verify comparison and
+   *   resolveUnknown — never for automatic revert.
+   * - postStepObserve: verify observation after consequential steps.
+   *   Every call receives the run's AbortSignal, so a task cancel
+   *   interrupts a pending verify observation as well as the step.
+   */
+  resolveTool?: (tool: string, context: ToolResolutionContext) => ToolResolution | Promise<ToolResolution>;
+  captureSnapshot?: (step: TaskStep, signal?: AbortSignal) => Promise<PageSnapshotCheckpoint>;
+  postStepObserve?: (step: TaskStep, signal?: AbortSignal) => Promise<PostStepObservation>;
   /**
    * Phase 1: verifies a broker approval token id for tasks.approvePlan.
    * Required when the source is "broker-token"; without it, broker-token
@@ -172,6 +256,8 @@ export interface CreateStepInput {
   /** Phase 3: parallel batch membership; null = sequential. */
   independent?: boolean;
   parallelGroup?: number | null;
+  /** Phase B: generic verify condition (see types.ts); absent = no expectation. */
+  verify?: VerifyCondition;
 }
 
 export interface CreateTaskInput {
@@ -183,6 +269,55 @@ export interface CreateTaskInput {
   start?: boolean;
   /** Phase 1: plan bounds supplied at creation; approval still comes via tasks.approvePlan. */
   planBounds?: PlanBounds;
+  /**
+   * Phase B: agent mode pinned at creation (read/act/plan/explore/
+   * summary/compaction). Omitted = "act" (previous behaviour). An
+   * unknown value is rejected, never guessed. There is no API to
+   * change a task's mode afterwards.
+   */
+  mode?: AgentMode;
+}
+
+/**
+ * Phase C child-task creation input. A child is created by the runner
+ * (internal to the task system, not a new MCP tool at first): its goal
+ * and step list are supplied by the caller, its browser session is
+ * inherited from the parent (one account = one browser session), and
+ * it inherits NOTHING else — no parent steps, no parent step inputs,
+ * no parent policy snapshot, no parent plan approval, and no parent
+ * plan bounds unless explicitly supplied here. Its mode must be a
+ * child mode (explore or summary); anything else is rejected.
+ */
+export interface CreateChildInput {
+  goal: string;
+  steps: CreateStepInput[];
+  totalBudgetMs?: number;
+  mode: ChildMode;
+  start?: boolean;
+  planBounds?: PlanBounds;
+}
+
+/** Isolated child-task context: the child's own record only. It never
+ * carries the parent's goal, steps, step inputs, or policy — a child
+ * sees only its own steps/inputs (plus its parentId link). */
+export interface ChildTaskContext {
+  id: string;
+  parentId: string;
+  goal: string;
+  mode: string;
+  status: TaskStatus;
+  steps: TaskView["steps"];
+  finalReport: TaskView["finalReport"];
+  resultSummary: string;
+}
+
+/** Phase C prune result as returned to callers (summary view only). */
+export interface PruneTaskResult {
+  view: TaskView;
+  prunedStepIndices: number[];
+  reclaimedChars: number;
+  applied: boolean;
+  reason: string | null;
 }
 
 /** One step of a dry-run preview: validation only, never execution. */
@@ -580,6 +715,11 @@ export class TaskRunner {
     }
     const boundsErrors = this.validateCreationBounds(input.steps, input.planBounds);
     if (boundsErrors.length > 0) throw new Error(`task creation rejected: ${boundsErrors.join("; ")}`);
+    // Phase B: mode is pinned at creation and validated, never guessed.
+    const mode = input.mode === undefined ? "act" : parseAgentMode(input.mode);
+    if (mode === null) {
+      throw new Error(`task creation rejected: unknown mode "${String(input.mode)}"`);
+    }
 
     const now = this.now();
     const id = this.generateId();
@@ -608,6 +748,22 @@ export class TaskRunner {
           description: typeof raw.compensation.description === "string" ? raw.compensation.description : "",
         };
       }
+      // Phase B: verify conditions are generic only; a malformed one
+      // is a creation error, never silently dropped.
+      let verify: VerifyCondition | null = null;
+      if (raw.verify !== undefined && raw.verify !== null) {
+        const condition = raw.verify as VerifyCondition;
+        if (condition.kind !== "url-equals" && condition.kind !== "url-contains" && condition.kind !== "element-present") {
+          throw new Error(`task creation rejected: step ${index} verify kind must be url-equals, url-contains, or element-present`);
+        }
+        if (condition.kind !== "element-present" && (typeof condition.value !== "string" || condition.value === "")) {
+          throw new Error(`task creation rejected: step ${index} verify ${condition.kind} requires a non-empty value`);
+        }
+        if (condition.value !== undefined && typeof condition.value !== "string") {
+          throw new Error(`task creation rejected: step ${index} verify value must be a string`);
+        }
+        verify = { kind: condition.kind, ...(condition.value !== undefined ? { value: condition.value } : {}) };
+      }
       const canonical = canonicalizeInput(raw.input);
       steps.push({
         index,
@@ -627,6 +783,10 @@ export class TaskRunner {
         parallelGroup: typeof raw.parallelGroup === "number" ? raw.parallelGroup : null,
         observationSummary: "",
         outsideBoundsReason: null,
+        verify,
+        preStepSnapshot: null,
+        verifySummary: "",
+        verifyOutcome: null,
       });
     }
 
@@ -643,9 +803,13 @@ export class TaskRunner {
 
     const task: TaskRecord = {
       id,
+      // Phase C: top-level creation; createChildTask patches parentId
+      // on the child record after creation (never on the parent).
+      parentId: null,
       goal,
       clientId,
       browserSessionId,
+      mode,
       status: "created",
       steps,
       totalBudgetMs,
@@ -802,6 +966,15 @@ export class TaskRunner {
       if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_STEP_TIMEOUT_MS) {
         stepErrors.push(`step ${index} timeoutMs must be between 1 and ${MAX_STEP_TIMEOUT_MS}`);
       }
+      // Phase B: preview validates verify conditions like creation does.
+      const rawVerify = (raw as CreateStepInput | undefined)?.verify;
+      if (rawVerify !== undefined && rawVerify !== null) {
+        if (rawVerify.kind !== "url-equals" && rawVerify.kind !== "url-contains" && rawVerify.kind !== "element-present") {
+          stepErrors.push(`step ${index} verify kind must be url-equals, url-contains, or element-present`);
+        } else if (rawVerify.kind !== "element-present" && (typeof rawVerify.value !== "string" || rawVerify.value === "")) {
+          stepErrors.push(`step ${index} verify ${rawVerify.kind} requires a non-empty value`);
+        }
+      }
       if (this.deps.toolExists && draft.tool !== "" && !this.deps.toolExists(draft.tool)) {
         stepErrors.push(`step ${index} tool ${draft.tool} does not exist`);
       }
@@ -846,6 +1019,154 @@ export class TaskRunner {
     return toTaskView(task);
   }
 
+  // -- Phase C: child tasks, compaction, pruning -----------------------
+
+  /**
+   * Create a child task under a parent task (OpenCode subagent
+   * analogue, Phase C). Rules, all fail-closed:
+   * - The parent must exist and belong to the same client.
+   * - A child may NOT create a child: when the named parent is itself
+   *   a child task (parentId !== null), creation is denied with a
+   *   clear error and nothing is created (mirroring OpenCode's
+   *   `task: deny` for subagents) — the parent is unaffected.
+   * - The child mode must be explore or summary; other modes are
+   *   rejected, never guessed.
+   * - The parent record is NEVER mutated: creation only appends the
+   *   child, so a child cannot change its parent's mode, policy, or
+   *   plan. The child gets a fresh policy snapshot supplied by the
+   *   caller (not the parent's snapshot), no plan approval (never
+   *   inherited — a child step's approval is bound to the child's own
+   *   task id), and the parent's browser session (shared-session
+   *   constraint; per-tab serialisation is shared because the
+   *   runner's per-tab chains are instance-wide).
+   * - Isolation: the child record contains only the supplied goal and
+   *   steps. Parent steps and step inputs are never copied in; see
+   *   getChildContext(), which returns the child's own record only.
+   * - A summary-mode child has no browser tools (existing Phase B
+   *   mode gating) and an explore-mode child never runs consequential
+   *   steps (existing read/explore gating), so a child cannot act
+   *   beyond its mode even though it shares the parent's browser.
+   */
+  async createChildTask(
+    parentId: string,
+    clientId: string,
+    input: CreateChildInput,
+    policySnapshotAtCreation: PolicySnapshot,
+  ): Promise<TaskView> {
+    const all = await this.loadAll();
+    const parent = this.findOrThrow(all, parentId);
+    this.assertClient(parent, clientId);
+    if (taskParentId(parent) !== null) {
+      throw new Error(
+        `child task creation denied: task ${parentId} is itself a child task and cannot create children (task:deny)`,
+      );
+    }
+    const childMode = parseChildMode(input.mode);
+    if (childMode === null) {
+      throw new Error(`child task creation rejected: child mode must be explore or summary, got "${String(input.mode)}"`);
+    }
+    const created = await this.createTask(
+      {
+        goal: input.goal,
+        clientId,
+        browserSessionId: parent.browserSessionId,
+        steps: input.steps,
+        ...(input.totalBudgetMs !== undefined ? { totalBudgetMs: input.totalBudgetMs } : {}),
+        start: false,
+        ...(input.planBounds !== undefined ? { planBounds: input.planBounds } : {}),
+        mode: childMode,
+      },
+      policySnapshotAtCreation,
+    );
+    // Patch parentId onto the child record only. The parent object is
+    // never written to; the store save below replaces only the child.
+    const freshAll = await this.loadAll();
+    const child = this.findOrThrow(freshAll, created.id);
+    const patched: TaskRecord = { ...child, parentId: parent.id, planApproval: null };
+    const next = freshAll.map((task) => (task.id === patched.id ? patched : task));
+    const saved = await this.saveList(next, patched, {
+      kind: "task.created",
+      taskId: patched.id,
+      stepIndex: -1,
+      tool: "",
+      decision: "created",
+      outcome: "child",
+    });
+    if (input.start === true) return this.runTask(patched.id, clientId);
+    return toTaskView(saved);
+  }
+
+  /**
+   * Isolated child context: the child's own goal, steps, status, and
+   * final report — and nothing from the parent. A non-child id is
+   * rejected, so this can never be used to read a parent's history
+   * through a child id.
+   */
+  async getChildContext(id: string, clientId: string): Promise<ChildTaskContext> {
+    const all = await this.loadAll();
+    const task = this.findOrThrow(all, id);
+    this.assertClient(task, clientId);
+    const parentId = taskParentId(task);
+    if (parentId === null) throw new Error(`task ${id} is not a child task`);
+    const view = toTaskView(task);
+    return {
+      id: view.id,
+      parentId,
+      goal: view.goal,
+      mode: view.mode,
+      status: view.status,
+      steps: view.steps,
+      finalReport: view.finalReport,
+      resultSummary: view.resultSummary,
+    };
+  }
+
+  /**
+   * Phase C compacted view (view-only): summary records in place of
+   * the full old step list. No store write — the underlying step
+   * records are untouched.
+   */
+  async compactTaskView(id: string, clientId: string, options: CompactedViewOptions = {}): Promise<CompactedTaskView> {
+    const all = await this.loadAll();
+    const task = this.findOrThrow(all, id);
+    this.assertClient(task, clientId);
+    return buildCompactedView(task, options);
+  }
+
+  /**
+   * Phase C output-only pruning: clears old completed step outputs
+   * (see compaction.ts for the protected-record rules). When pruning
+   * does not act (below the reclaim threshold) no store write happens
+   * and the task is returned unchanged. Pruning never changes a
+   * step's state, outcome, or verify result, and never changes the
+   * task's status, policy snapshot, or plan approval.
+   */
+  async pruneTask(id: string, clientId: string, options: PruneTaskOutputsOptions = {}): Promise<PruneTaskResult> {
+    const all = await this.loadAll();
+    const task = this.findOrThrow(all, id);
+    this.assertClient(task, clientId);
+    const result = pruneTaskOutputs(task, options);
+    if (!result.applied) {
+      return { view: toTaskView(task), prunedStepIndices: [], reclaimedChars: result.reclaimedChars, applied: false, reason: result.reason };
+    }
+    const next = all.map((entry) => (entry.id === id ? result.task : entry));
+    const saved = await this.saveList(next, result.task, {
+      kind: "task.pruned",
+      taskId: id,
+      stepIndex: -1,
+      tool: "",
+      decision: "pruned",
+      outcome: `${result.prunedStepIndices.length} steps`,
+    });
+    return {
+      view: toTaskView(saved),
+      prunedStepIndices: result.prunedStepIndices,
+      reclaimedChars: result.reclaimedChars,
+      applied: true,
+      reason: null,
+    };
+  }
+
   async listTasks(clientId: string, browserSessionId?: string): Promise<TaskView[]> {
     const all = await this.loadAll();
     return all
@@ -877,7 +1198,11 @@ export class TaskRunner {
     const task = this.findOrThrow(all, id);
     this.assertClient(task, clientId);
     if (isTerminal(task.status)) return toTaskView(task);
-    this.controllers.get(id)?.abort();
+    // Phase B abort ordering: persist the pause FIRST, then abort.
+    // Aborting first let the in-flight step's abort checkpoint race the
+    // pause save and resurrect a "running" status; with the pause
+    // durable first, the step's abort checkpoint merges onto it and
+    // the run loop observes the paused status.
     task.status = "paused";
     task.pauseReason = reason;
     task.updatedAt = this.now();
@@ -890,6 +1215,7 @@ export class TaskRunner {
       decision: "paused",
       outcome: reason,
     });
+    this.controllers.get(id)?.abort();
     return toTaskView(saved);
   }
 
@@ -900,12 +1226,25 @@ export class TaskRunner {
     if (task.status === "cancelled" || task.status === "done" || task.status === "failed" || task.status === "partial") {
       return toTaskView(task);
     }
-    this.controllers.get(id)?.abort();
+    // Phase B abort ordering (see pauseTask): persist the cancelled
+    // status FIRST, then abort the in-flight step/verify, then run
+    // compensations and persist the final report. The in-flight step's
+    // abort checkpoint merges onto the durable cancelled status
+    // instead of racing it back to "running".
     task.status = "cancelled";
     task.pauseReason = null;
     task.resumeAfterMs = null;
     task.completedAt = this.now();
     task.updatedAt = task.completedAt;
+    await this.persistOnly(all, task, {
+      kind: "task.cancelled",
+      taskId: id,
+      stepIndex: -1,
+      tool: "",
+      decision: "cancelled",
+      outcome: "success",
+    });
+    this.controllers.get(id)?.abort();
 
     // Best-effort compensations, done steps in reverse order. A failing
     // compensation never throws out of cancel: it is listed as manual.
@@ -1152,6 +1491,10 @@ export class TaskRunner {
     this.running.add(id);
     const controller = new AbortController();
     this.controllers.set(id, controller);
+    // Phase B: the mode pinned at run start is the mode for the whole
+    // run. There is no resume/change-mode API; if the stored mode
+    // differs on a later reload, the run pauses instead of adopting it.
+    const pinnedMode = taskMode(task);
     try {
       // Re-check policy at run start (plan 8.1.7): a version/mode change
       // pauses with 'policy-changed' instead of running under a stale plan.
@@ -1236,11 +1579,12 @@ export class TaskRunner {
         }
         task = fresh;
 
-        // Total budget: elapsed since creation, checked before every step.
-        // A plan approval may narrow the budget further (Phase 1).
-        if (this.now() - task.createdAt > this.effectiveBudgetMs(task)) {
+        // Phase B: mode pinning, re-checked on every reload. A stored
+        // mode change mid-run pauses (fail closed); it is never adopted
+        // mid-task, and a later run pins whatever is stored then.
+        if (taskMode(task) !== pinnedMode) {
           task.status = "paused";
-          task.pauseReason = "budget-exceeded";
+          task.pauseReason = "mode-changed";
           task.updatedAt = this.now();
           this.refreshSummary(task);
           const saved = await this.persistOnly(freshAll, task, {
@@ -1249,6 +1593,38 @@ export class TaskRunner {
             stepIndex: -1,
             tool: "",
             decision: "paused",
+            outcome: "mode-changed",
+          });
+          return toTaskView(saved);
+        }
+
+        // Total budget: elapsed since creation, checked before every step.
+        // A plan approval may narrow the budget further (Phase 1).
+        // Phase B: budget exhaustion is terminal, not a pause — elapsed
+        // time only grows, so a pause here could never resume into
+        // success, and a silent dead-end pause is exactly what the
+        // OpenCode MAX_STEPS synthetic finish replaces. The task ends
+        // partial (something done) or failed (nothing done) with a
+        // final report (done/undone/failed + manual cleanup), never a
+        // silent loop and never an unbounded retry.
+        if (this.now() - task.createdAt > this.effectiveBudgetMs(task)) {
+          const anyDone = task.steps.some((s) => s.state === "done");
+          task.status = anyDone ? "partial" : "failed";
+          task.pauseReason = null;
+          task.resumeAfterMs = null;
+          task.completedAt = this.now();
+          task.updatedAt = task.completedAt;
+          const manualCleanup = task.steps
+            .filter((s) => s.state !== "done")
+            .map((s) => `Step ${s.index} (${s.tool}) not run: total budget exhausted — manual cleanup may be required`);
+          this.refreshSummary(task, ["Total budget exhausted."]);
+          this.setFinalReport(task, [], manualCleanup);
+          const saved = await this.persistOnly(freshAll, task, {
+            kind: "task.budget-exhausted",
+            taskId: id,
+            stepIndex: -1,
+            tool: "",
+            decision: task.status,
             outcome: "budget-exceeded",
           });
           return toTaskView(saved);
@@ -1451,6 +1827,96 @@ export class TaskRunner {
   }
 
   /**
+   * Phase B per-iteration tool resolution. Runner-native mode gating
+   * runs first (no registry needed): summary/compaction modes have no
+   * browser tools, plan mode never executes, and read/explore modes
+   * never run consequential steps. The wired resolveTool dep then
+   * re-resolves against the live policy snapshot and scope; a dep
+   * failure denies fail-closed. Absent dep = mode gate only.
+   */
+  private async resolveStepTool(task: TaskRecord, step: TaskStep): Promise<{ allowed: boolean; reason?: string }> {
+    const mode = taskMode(task);
+    if (mode === "summary" || mode === "compaction") {
+      return { allowed: false, reason: `mode "${mode}" has no browser tools` };
+    }
+    if (mode === "plan") {
+      return { allowed: false, reason: `mode "plan" never executes steps; approve the plan and resume in act mode` };
+    }
+    if (mode !== "act" && this.isConsequential(step.tool)) {
+      return { allowed: false, reason: `tool "${step.tool}" is consequential and not allowed in mode "${mode}"` };
+    }
+    if (!this.deps.resolveTool) return { allowed: true };
+    try {
+      const resolved = await this.deps.resolveTool(step.tool, {
+        mode,
+        policySnapshot: task.policySnapshot,
+        clientId: task.clientId,
+        step: cloneJson(step),
+      });
+      return { allowed: resolved.allowed, reason: resolved.reason };
+    } catch {
+      return { allowed: false, reason: "tool resolution failed" };
+    }
+  }
+
+  /** Phase B: a denied tool pauses the task (extended policy-changed pause), step left pending, never executed. */
+  private async pauseForDenied(all: TaskRecord[], task: TaskRecord, step: TaskStep, reason: string): Promise<StepOutcome> {
+    step.state = "pending";
+    step.lastError = { code: "TOOL_DENIED", message: truncateSummary(reason), retryable: false };
+    task.status = "paused";
+    task.pauseReason = "policy-changed";
+    task.resumeAfterMs = null;
+    task.updatedAt = this.now();
+    this.refreshSummary(task);
+    await this.checkpoint(all, task, {
+      kind: "task.policy-changed",
+      taskId: task.id,
+      stepIndex: step.index,
+      tool: step.tool,
+      decision: "paused",
+      outcome: "policy-changed",
+    });
+    return "paused";
+  }
+
+  /** Phase B: a step interrupted by cancel/pause keeps its pending state; the checkpoint merge preserves the terminal/paused task status. */
+  private async abortPending(all: TaskRecord[], task: TaskRecord, step: TaskStep): Promise<StepOutcome> {
+    step.state = "pending";
+    step.lastError = { code: "CANCELLED", message: "step aborted by task cancel or pause", retryable: false };
+    task.updatedAt = this.now();
+    this.refreshSummary(task);
+    await this.checkpoint(all, task, {
+      kind: "task.step-aborted",
+      taskId: task.id,
+      stepIndex: step.index,
+      tool: step.tool,
+      decision: "paused",
+      outcome: "cancelled",
+    });
+    return "paused";
+  }
+
+  /** Phase B: a failed post-step verify marks the step unknown and pauses — dispatched is never marked done. */
+  private async pauseForVerifyFailed(all: TaskRecord[], task: TaskRecord, step: TaskStep, detail: string): Promise<StepOutcome> {
+    step.state = "unknown";
+    step.verifyOutcome = "fail";
+    step.lastError = { code: "VERIFY_FAILED", message: truncateSummary(detail), retryable: false };
+    task.status = "paused";
+    task.pauseReason = "verify-failed";
+    task.updatedAt = this.now();
+    this.refreshSummary(task);
+    await this.checkpoint(all, task, {
+      kind: "task.step-unknown",
+      taskId: task.id,
+      stepIndex: step.index,
+      tool: step.tool,
+      decision: "paused",
+      outcome: "verify-failed",
+    });
+    return "paused";
+  }
+
+  /**
    * Execute one step through the tab gate, tab chain and error taxonomy,
    * checkpointing after the step (and after each failed retryable
    * attempt, so attempts/lastError survive a crash). Returns whether
@@ -1497,6 +1963,15 @@ export class TaskRunner {
     // Phase 1: this step runs under plan approval only when an active
     // approval covers it (checked by the run loop before calling here).
     const planApproved = this.activeApproval(task) !== null && this.stepBoundsReason(step, this.activeApproval(task)) === null;
+    const signal = options.signal ?? new AbortController().signal;
+
+    // Phase B per-iteration tool resolution: re-resolve before any tab
+    // side effect, observation, or execution. A tool that has become
+    // denied pauses the task instead of executing.
+    const resolution = await this.resolveStepTool(task, step);
+    if (!resolution.allowed) {
+      return this.pauseForDenied(all, task, step, resolution.reason ?? `tool "${step.tool}" is denied`);
+    }
 
     // Per-tab gate, consequential steps only (rule 6). Non-consequential
     // steps never pause on navigation, and never check the tab at all.
@@ -1559,7 +2034,7 @@ export class TaskRunner {
     if (consequential && this.deps.preStepObserve) {
       let observed: PreStepObservation;
       try {
-        observed = await this.deps.preStepObserve(cloneJson(step));
+        observed = await this.deps.preStepObserve(cloneJson(step), signal);
       } catch {
         task.status = "paused";
         task.pauseReason = "stale-ref";
@@ -1593,8 +2068,57 @@ export class TaskRunner {
       }
     }
 
-    const signal = options.signal ?? new AbortController().signal;
+    // Phase B snapshot checkpoint: before a consequential step, capture
+    // a bounded page snapshot into the step record and persist it
+    // BEFORE executing, so verify comparison and resolveUnknown have a
+    // pre-step state even if the worker restarts mid-step. A failed
+    // capture pauses fail-closed; a pause/cancel issued during capture
+    // wins via the checkpoint merge.
+    if (consequential && this.deps.captureSnapshot) {
+      let snapshot: PageSnapshotCheckpoint;
+      try {
+        snapshot = await this.deps.captureSnapshot(cloneJson(step), signal);
+      } catch {
+        task.status = "paused";
+        task.pauseReason = "snapshot-failed";
+        task.updatedAt = this.now();
+        this.refreshSummary(task);
+        await this.checkpoint(all, task, {
+          kind: "task.paused",
+          taskId: task.id,
+          stepIndex: step.index,
+          tool: step.tool,
+          decision: "paused",
+          outcome: "snapshot-failed",
+        });
+        return "paused";
+      }
+      step.preStepSnapshot = {
+        url: snapshot.url,
+        a11ySummary: truncateSummary(snapshot.a11ySummary),
+        formSummary: truncateSummary(snapshot.formSummary),
+      };
+      // The resolveUnknown re-execution path enters here with the task
+      // still paused; executing means running, and the checkpoint merge
+      // still lets a fresh pause/cancel win over this working status.
+      task.status = "running";
+      task.updatedAt = this.now();
+      const saved = await this.checkpoint(all, task, {
+        kind: "task.step-snapshot",
+        taskId: task.id,
+        stepIndex: step.index,
+        tool: step.tool,
+        decision: "snapshot",
+        outcome: "success",
+      });
+      if (saved.status !== "running") return "paused";
+      task = saved;
+    }
+
     for (;;) {
+      // Phase B abort propagation: a cancel/pause issued while the step
+      // waited aborts before the next attempt, not just between steps.
+      if (signal.aborted) return this.abortPending(all, task, step);
       // A consequential step that is already done is never re-executed
       // (rule 4): return the stored output. This is the checkpoint
       // resume path — a restart re-enters the step list at a done step
@@ -1619,6 +2143,11 @@ export class TaskRunner {
           });
         result = consequential && tabId !== null ? await this.throughTabChain(tabId, run) : await run();
       } catch (error) {
+        // Phase B abort propagation: an in-flight tool call aborted by
+        // task cancel/pause is an interruption, never a failure — the
+        // step stays pending and the checkpoint merge keeps the
+        // cancelled/paused task status. Compensations run in cancelTask.
+        if (signal.aborted) return this.abortPending(all, task, step);
         const extracted = extractError(error);
         const errorClass = classifyError(extracted);
         const lastError = {
@@ -1782,6 +2311,31 @@ export class TaskRunner {
         return "paused";
       }
 
+      // Phase B verification as a runner step, not a client instruction:
+      // after a consequential step, run a verify observation and record
+      // it on the step. A step whose verify does not show the expected
+      // state becomes unknown and pauses — it is never marked done on
+      // dispatch. Without verify wiring the step is marked done as
+      // before, with verifyOutcome "skipped" so the gap is visible.
+      if (consequential && this.deps.postStepObserve) {
+        let observed: PostStepObservation;
+        try {
+          observed = await this.deps.postStepObserve(cloneJson(step), signal);
+        } catch {
+          if (signal.aborted) return this.abortPending(all, task, step);
+          return this.pauseForVerifyFailed(all, task, step, "post-step verify observation failed");
+        }
+        if (signal.aborted) return this.abortPending(all, task, step);
+        step.verifySummary = truncateSummary(observed.summary);
+        const verdict = evaluateVerifyCondition(step.verify, observed);
+        if (!verdict.pass) {
+          return this.pauseForVerifyFailed(all, task, step, verdict.detail);
+        }
+        step.verifyOutcome = "pass";
+      } else if (consequential) {
+        step.verifyOutcome = "skipped";
+      }
+
       step.state = "done";
       step.outputSummary = truncateSummary(result.outputSummary ?? "");
       step.finishedAt = this.now();
@@ -1818,6 +2372,42 @@ export class TaskRunner {
     signal: AbortSignal,
   ): Promise<StepOutcome> {
     const planApproved = this.activeApproval(task) !== null;
+    // Phase B pre-flight: per-iteration resolution and snapshot capture
+    // for every member BEFORE anything launches, so a denied tool or a
+    // failed snapshot pauses the batch without partial execution.
+    for (const step of batch) {
+      const resolution = await this.resolveStepTool(task, step);
+      if (!resolution.allowed) {
+        return this.pauseForDenied(all, task, step, resolution.reason ?? `tool "${step.tool}" is denied`);
+      }
+    }
+    if (this.deps.captureSnapshot) {
+      for (const step of batch) {
+        if (!this.isConsequential(step.tool)) continue;
+        try {
+          const snapshot = await this.deps.captureSnapshot(cloneJson(step), signal);
+          step.preStepSnapshot = {
+            url: snapshot.url,
+            a11ySummary: truncateSummary(snapshot.a11ySummary),
+            formSummary: truncateSummary(snapshot.formSummary),
+          };
+        } catch {
+          task.status = "paused";
+          task.pauseReason = "snapshot-failed";
+          task.updatedAt = this.now();
+          this.refreshSummary(task);
+          await this.checkpoint(all, task, {
+            kind: "task.paused",
+            taskId: task.id,
+            stepIndex: step.index,
+            tool: step.tool,
+            decision: "paused",
+            outcome: "snapshot-failed",
+          });
+          return "paused";
+        }
+      }
+    }
     for (const step of batch) {
       step.state = "running";
       if (step.startedAt === null) step.startedAt = this.now();
@@ -1854,6 +2444,62 @@ export class TaskRunner {
       const step = batch[i];
       const outcome = settled[i];
       if (outcome.status === "fulfilled") {
+        // Phase B verification for consequential batch members, same
+        // rule as the sequential path: a failed verify marks the step
+        // unknown and pauses (after the whole batch is recorded).
+        if (this.isConsequential(step.tool) && this.deps.postStepObserve) {
+          let observed: PostStepObservation;
+          try {
+            observed = await this.deps.postStepObserve(cloneJson(step), signal);
+          } catch {
+            if (signal.aborted) {
+              step.state = "pending";
+              step.lastError = { code: "CANCELLED", message: "step aborted by task cancel or pause", retryable: false };
+            } else {
+              step.state = "unknown";
+              step.verifyOutcome = "fail";
+              step.lastError = { code: "VERIFY_FAILED", message: "post-step verify observation failed", retryable: false };
+            }
+            task.status = "paused";
+            task.pauseReason = signal.aborted ? "cancelled" : "verify-failed";
+            task.updatedAt = this.now();
+            this.refreshSummary(task);
+            await this.checkpoint(all, task, {
+              kind: "task.step-unknown",
+              taskId: task.id,
+              stepIndex: step.index,
+              tool: step.tool,
+              decision: "paused",
+              outcome: signal.aborted ? "cancelled" : "verify-failed",
+            });
+            stop = "paused";
+            continue;
+          }
+          step.verifySummary = truncateSummary(observed.summary);
+          const verdict = evaluateVerifyCondition(step.verify, observed);
+          if (!verdict.pass) {
+            step.state = "unknown";
+            step.verifyOutcome = "fail";
+            step.lastError = { code: "VERIFY_FAILED", message: truncateSummary(verdict.detail), retryable: false };
+            task.status = "paused";
+            task.pauseReason = "verify-failed";
+            task.updatedAt = this.now();
+            this.refreshSummary(task);
+            await this.checkpoint(all, task, {
+              kind: "task.step-unknown",
+              taskId: task.id,
+              stepIndex: step.index,
+              tool: step.tool,
+              decision: "paused",
+              outcome: "verify-failed",
+            });
+            stop = "paused";
+            continue;
+          }
+          step.verifyOutcome = "pass";
+        } else if (this.isConsequential(step.tool)) {
+          step.verifyOutcome = "skipped";
+        }
         step.state = "done";
         step.outputSummary = truncateSummary(outcome.value.outputSummary ?? "");
         step.finishedAt = this.now();
@@ -1873,6 +2519,26 @@ export class TaskRunner {
       }
       const extracted = extractError(outcome.reason);
       const errorClass = classifyError(extracted);
+      // Phase B abort propagation in batches: an aborted member is an
+      // interruption, never a failure.
+      if (signal.aborted) {
+        step.state = "pending";
+        step.lastError = { code: "CANCELLED", message: "step aborted by task cancel or pause", retryable: false };
+        task.status = "paused";
+        task.pauseReason = "cancelled";
+        task.updatedAt = this.now();
+        this.refreshSummary(task);
+        await this.checkpoint(all, task, {
+          kind: "task.step-aborted",
+          taskId: task.id,
+          stepIndex: step.index,
+          tool: step.tool,
+          decision: "paused",
+          outcome: "cancelled",
+        });
+        stop = "paused";
+        continue;
+      }
       step.lastError = {
         code: extracted.code,
         message: truncateSummary(extracted.message),

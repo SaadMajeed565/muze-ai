@@ -28,6 +28,78 @@ export type TaskStatus =
 
 export type TaskStepState = "pending" | "running" | "done" | "failed" | "skipped" | "waiting_approval" | "unknown";
 
+/**
+ * Phase B agent modes (OpenCode-style, adapted from Phase A gateway
+ * modes). A task's mode is pinned at creation and never changes
+ * mid-task (see runner.ts); it is NOT the dashboard policy mode in
+ * PolicySnapshot.mode (restricted/default/unrestricted), which gates
+ * execution separately. "act" is the default (previous behaviour).
+ * Stored tasks written before Phase B have no mode field; taskMode()
+ * below reads those as "act".
+ */
+export const AGENT_MODES = ["read", "act", "plan", "explore", "summary", "compaction"] as const;
+export type AgentMode = (typeof AGENT_MODES)[number];
+
+/** Parse a mode value without guessing: unknown input returns null. */
+export function parseAgentMode(value: unknown): AgentMode | null {
+  return typeof value === "string" && (AGENT_MODES as readonly string[]).includes(value) ? (value as AgentMode) : null;
+}
+
+/** Pinned mode of a task, defaulting pre-Phase-B records to "act". */
+export function taskMode(task: { mode?: AgentMode | string | null }): AgentMode {
+  return parseAgentMode(task.mode) ?? "act";
+}
+
+/**
+ * Phase C child-task modes (OpenCode adoption plan §6, Phase C).
+ * A child task is created only in `explore` (read-only subagent) or
+ * `summary` (internal, empty effective tool set) mode — never in
+ * `act`/`plan`/`read`/`compaction`. Recursion is blocked separately
+ * by the runner (a child may not create a child, mirroring OpenCode's
+ * `task: deny` for subagents).
+ */
+export const CHILD_MODES = ["explore", "summary"] as const;
+export type ChildMode = (typeof CHILD_MODES)[number];
+
+/** Parse a child mode without guessing: unknown input returns null. */
+export function parseChildMode(value: unknown): ChildMode | null {
+  return typeof value === "string" && (CHILD_MODES as readonly string[]).includes(value) ? (value as ChildMode) : null;
+}
+
+/** Parent task id of a task, or null for a top-level task (pre-Phase-C
+ * records have no parentId field and read as top-level). */
+export function taskParentId(task: { parentId?: string | null }): string | null {
+  return typeof task.parentId === "string" && task.parentId !== "" ? task.parentId : null;
+}
+
+/**
+ * Generic verify condition supplied by the client at creation (Phase B).
+ * Generic only — never a site procedure: a URL equality/containment
+ * check, or an element-presence check for a ref. `element-present`
+ * uses `value` as the ref when given, else the step input's `ref`.
+ */
+export type VerifyConditionKind = "url-equals" | "url-contains" | "element-present";
+
+export interface VerifyCondition {
+  kind: VerifyConditionKind;
+  /** URL for url-equals, substring for url-contains, ref for element-present (optional). */
+  value?: string;
+}
+
+/**
+ * Bounded page-snapshot checkpoint captured before a consequential
+ * step (Phase B, browser analogue of OpenCode's turn-start snapshot).
+ * Summaries only, truncated like every other step summary: the
+ * service-worker wiring stores counts (node/form counts) and the tab
+ * URL, never node text, page content, or screenshots. Used for verify
+ * comparison and resolveUnknown — NOT for automatic revert.
+ */
+export interface PageSnapshotCheckpoint {
+  url: string | null;
+  a11ySummary: string;
+  formSummary: string;
+}
+
 export type CompensationKind = "none" | "close-tab" | "navigate-back" | "delete-download" | "manual";
 
 export interface TaskCompensation {
@@ -71,6 +143,19 @@ export interface TaskStep {
   parallelGroup: number | null;
   observationSummary: string;
   outsideBoundsReason: string | null;
+  /**
+   * Phase B loop fields. `verify` is the client-supplied generic
+   * condition (null = no expectation); `preStepSnapshot` is the
+   * bounded checkpoint captured before a consequential step (null
+   * for non-consequential steps, batch members, and unwired hosts);
+   * `verifySummary` is the truncated post-step observation;
+   * `verifyOutcome` is "pass" | "fail" | "skipped" (consequential
+   * step, no verify wiring) or null (not a verified step).
+   */
+  verify: VerifyCondition | null;
+  preStepSnapshot: PageSnapshotCheckpoint | null;
+  verifySummary: string;
+  verifyOutcome: string | null;
 }
 
 /**
@@ -136,9 +221,25 @@ export interface PinnedTab {
 
 export interface TaskRecord {
   id: string;
+  /**
+   * Phase C: parent task id for a child task, null for a top-level
+   * task. Optional because pre-Phase-C records have no such field
+   * (absent reads as top-level, see taskParentId). A child task's
+   * context contains only its own steps/inputs, never the parent's
+   * full history; a child may not create children (enforced by the
+   * runner) and may not change its parent's mode, policy, or plan
+   * (creation never mutates the parent record).
+   */
+  parentId?: string | null;
   goal: string;
   clientId: string;
   browserSessionId: string;
+  /**
+   * Phase B: agent mode pinned at creation (see AGENT_MODES). Never
+   * changes mid-task: the run loop pauses with "mode-changed" if the
+   * stored mode differs from the mode pinned at run start.
+   */
+  mode: AgentMode;
   status: TaskStatus;
   steps: TaskStep[];
   totalBudgetMs: number;

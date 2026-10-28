@@ -66,39 +66,27 @@ const TOOL_ALIASES: Record<string, string> = {
   "system.status": "browser.info",
 };
 
-const MCP_INSTRUCTIONS =
+export const MCP_INSTRUCTIONS =
   "You are an expert agentic browser operator controlling the user's Chrome browser via Muze AI.\n\n" +
   "## CORE AGENTIC LOOP: Observe → Reason → Act → Verify\n" +
   "1. Ground: Always observe before acting. Call `observe` to inspect the page text, accessibility tree, form fields, and interactive element refs.\n" +
   "2. Interact: Call `act` with step(s) using the stable element `ref` (e.g. 'r1a2b') obtained from `observe`.\n" +
   "3. Settle: If an action triggers navigation or async data loading, synchronize with `navigate({ category: 'sync', for: 'network_idle' })`.\n" +
   "4. Verify: Re-observe the page to confirm the expected change succeeded.\n\n" +
-  "## THE 5 MASTER TOOLS\n" +
-  "1. `observe`: Page sensing & content extraction (text, a11y, forms, tables, links, outline, screenshot, selection).\n" +
-  "   - Inspecting pages, personal profiles, articles, and taking screenshots run freely with zero permission prompts.\n" +
-  "   - Find elements: `observe({ include: ['find'], by: 'role', value: 'button', name: 'Search' })` or by text/label/selector.\n" +
-  "2. `act`: Browser interaction engine.\n" +
-  "   - Batched `steps: [...]`:\n" +
-  "     * Click: `{ do: 'click', target: { ref: '...' } }` (or `{ target: { selector: '...' } }` or coordinates).\n" +
-  "     * Type/Fill: `{ do: 'type', target: { ref: '...' }, text: '...' }` or `{ do: 'fill', target: { ref: '...' }, value: '...' }`.\n" +
-  "     * Press: `{ do: 'press', target: { ref: '...' }, key: 'Enter' }`.\n" +
-  "     * Scroll/Hover/Check: `{ do: 'scroll', y: 300 }`, `{ do: 'hover', target: { ref } }`, `{ do: 'check', target: { ref }, checked: true }`.\n" +
-  "3. `navigate`: Spatial window & tab management, page transitions, and synchronization.\n" +
-  "   - URL navigation: `{ action: 'open', url: '...' }`, `back`, `forward`, `reload`, `search`.\n" +
-  "   - Tab management (`category: 'tab'`): `{ category: 'tab', action: 'list' | 'active' | 'create' | 'close' | 'activate' | 'duplicate' | 'group' | 'organize' }`. DEPRECATED in 2.x: prefer `tabs` / `windows` for tab/window actions; navigate tab/window actions still work but will be removed in registry 3.0.\n" +
-  "   - Window management (`category: 'window'`): `{ category: 'window', action: 'list' | 'create' | 'update' | 'close' }`. DEPRECATED in 2.x: prefer `windows`.\n" +
-  "   - Synchronization (`category: 'sync'`): `{ category: 'sync', for: 'network_idle', quietMs: 300 }`, `{ for: 'element', selector: '...' }`, `{ for: 'delay', timeoutMs: 1000 }`.\n" +
-  "4. `form`: Structured form lifecycle.\n" +
-  "   - Inspect: `{ phase: 'inspect' }` to list all inputs and validations.\n" +
-  "   - Fill: `{ phase: 'fill', fields: { refOrName: 'value' } }` or `{ fields: [{ ref, value }] }`.\n" +
-  "   - Upload: `{ phase: 'upload', ref: '...', files: [...] }` to attach files.\n" +
-  "   - Submit: `{ phase: 'submit', formRef: '...' }`.\n" +
-  "5. `data`: System state and storage across domains.\n" +
-  "   - History: `{ domain: 'history', action: 'search' | 'add' | 'delete' }`\n" +
-  "   - Bookmarks: `{ domain: 'bookmarks', action: 'list' | 'search' | 'create' | 'delete' }`\n" +
-  "   - Downloads: `{ domain: 'downloads', action: 'list' | 'start' | 'control' | 'erase' }`\n" +
-  "   - Clipboard: `{ domain: 'clipboard', action: 'read' | 'write', text: '...' }`. DEPRECATED in 2.x: prefer `clipboard`.\n" +
-  "   - DevTools: `{ domain: 'devtools', action: 'console' | 'network' | 'errors' | 'performance' }`. DEPRECATED in 2.x: prefer `devtools`.\n\n" +
+  "## EXECUTION DISCIPLINE\n" +
+  "- Never stop mid-task on a first failure. A missing element, a timeout, or a tool error means re-observe and try the next grounding method, not abandoning the task. Report a task as partial only when you have actually stopped, and say exactly which steps are done and which are not.\n" +
+  "- Never assume an identity. Identify a file by id + name + size, a tab by id + URL, and an element by ref + role + name + bounding box. If two candidates match, re-observe and disambiguate; do not pick the similar one.\n" +
+  "- Never claim success from `clicked: true` alone. A click only means the click was dispatched. Success is a post-action observe showing the expected state, such as a dialog title, a button label, or a confirmation message.\n" +
+  "- Fallback ladder, in order, per step: re-observe, then ref, then role + name, then text, then selector, then screenshot coordinates as a last resort. Do not jump to screenshot coordinates before the earlier methods, and do not ask the user until they have actually been tried.\n" +
+  "- A stale ref is never re-resolved to a different element. Re-observe and mint a fresh ref for the same element.\n\n" +
+  "## HOW TO BUILD YOUR OWN TASK BRIEF — HOW, NOT WHAT\n" +
+  "This initialize text teaches how to work, never what a specific task's steps are. Do not copy a prewritten procedure for a site or a task: interfaces change, and a copied procedure is a guess about a page you have not observed. For each new task, build your own short brief from the goal and what you actually observe, before your first action.\n" +
+  "- Restate the goal in your own words, and state what observable page state will prove it done. Define that success signal yourself from the page you observe, not from a label or message you were given in advance.\n" +
+  "- Gather context first: the current tab and URL, what is open (dialog, form, menu), and what inputs or files the goal actually supplies, each identified by id + name + size or by id + URL, never by similarity alone.\n" +
+  "- Decide direct vs plan: go direct only when the work is 1-3 steps, reversible or read-only, already grounded with no ambiguity, and has no consequential step. Otherwise build a plan: ordered steps, the capability each step needs, a verify observation after each consequential step, and the bounds that gate it.\n" +
+  "- Choose tools by capability, not by name: discover tools for the capability the step needs, read the full schema of only the tools the plan actually uses, and ignore the rest.\n" +
+  "- Work the fallback ladder per step, re-observe on any failure or unexpected state, and re-derive the brief when the page changes, a new dialog appears, or two candidates match.\n" +
+  "- Stop and ask only after the ladder is exhausted, and report exactly what is done, what is not, and what you tried.\n\n" +
   "## IN-CHAT PERMISSIONS & APPROVALS\n" +
   "- Reading operations (reading personal profiles, inspecting DOM, querying history/bookmarks) execute immediately without asking for user permission.\n" +
   "- Consequential operations (submitting forms, deleting records, writing clipboard) may require confirmation.\n" +
@@ -382,6 +370,163 @@ export function discoveryAllowed(descriptor: ToolDescriptor, scope: string | und
 export const GENERATED_TOOL_SELECTION = generateToolSelectionInstructions(SEARCH_DESCRIPTORS);
 
 /**
+ * Phase A agent modes (OpenCode-style, adapted to Muze's control points).
+ * A mode is a tool-visibility set + a prompt layer, recorded per MCP
+ * session. Visibility is NOT security: scope and dashboard policy still
+ * gate every call, and modeAllowsCall() below refuses hidden tools at
+ * CallTool time with PERMISSION_DENIED as well. Default is "act", which
+ * is exactly the pre-Phase-A behaviour, so existing clients do not break
+ * by merely upgrading. Modes are how-only: no mode prompt contains a
+ * procedure for any site or task.
+ */
+export type AgentMode = "read" | "act" | "plan" | "explore" | "summary" | "compaction";
+export const AGENT_MODES: AgentMode[] = ["read", "act", "plan", "explore", "summary", "compaction"];
+
+export function parseAgentMode(value: unknown): AgentMode | undefined {
+  return typeof value === "string" && (AGENT_MODES as string[]).includes(value) ? (value as AgentMode) : undefined;
+}
+
+export const MODE_PROMPTS: Record<AgentMode, string> = {
+  read: "Read mode: ground first, batch independent reads, and never act. You see read-only tools only. A tool you cannot see is not available in this mode — it is not merely discouraged.",
+  act: "Act mode: verify after every consequential step, work the fallback ladder, never re-resolve a stale ref, and be aware that a step may need a compensation if a later step fails.",
+  plan: "Plan mode: explore, ground, and propose ordered steps with bounds and verify conditions — never execute. Approving a plan does not execute it; execution requires resuming in act mode.",
+  explore: "Explore mode (read-only child): make bounded reads and return only the requested summary shape. You see read-only tools only and you cannot create child tasks.",
+  summary: "Internal summary mode: you have no browser tools. Condense only the task record you were given — what was done, what is in progress, what is next, and the key constraints and decisions.",
+  compaction: "Internal compaction mode: you have no browser tools. Operate only on stored task records, protect the newest tail and instruction-bearing records, and act only above the reclaim threshold.",
+};
+
+/** Tool-level visibility for a mode, over registry descriptors. */
+export function isModeVisibleTool(mode: AgentMode, descriptor: ToolDescriptor): boolean {
+  if (mode === "summary" || mode === "compaction") return false;
+  if (mode === "act") return true;
+  if (mode === "plan") {
+    if (descriptor.name === "tasks.create" || descriptor.name === "tasks.approvePlan") return true;
+  }
+  // read / explore / plan (base): read-only descriptors, plus the two
+  // meta tools that are themselves read-only (discovery, batching reads).
+  // Unified tools with mixed actions (navigate, form, data, act) carry a
+  // non-read-only descriptor risk, so they are excluded as whole tools
+  // here; their read-only actions remain reachable as granular tools
+  // (e.g. tabs.list) via discovery, where each action is risk-checked.
+  return descriptor.risk === "read-only" || descriptor.name === "tools.discover" || descriptor.name === "tools.batch";
+}
+
+export function filterDescriptorsByMode(descriptors: ToolDescriptor[], mode: AgentMode): ToolDescriptor[] {
+  return descriptors.filter((d) => isModeVisibleTool(mode, d));
+}
+
+/**
+ * Call-time mode backstop (visibility is not security, and scope/policy
+ * still run after this). Returns false when the call is not allowed in
+ * the mode. tools.batch is checked per item: every item tool must itself
+ * be mode-visible, otherwise the whole batch is refused.
+ */
+export function modeAllowsCall(mode: AgentMode, name: string, input?: Record<string, unknown>): boolean {
+  if (mode === "act") return true;
+  if (mode === "summary" || mode === "compaction") return false;
+  if (name === "tools.batch") {
+    const calls = input && Array.isArray((input as Record<string, unknown>).calls)
+      ? ((input as Record<string, unknown>).calls as Array<Record<string, unknown>>)
+      : null;
+    if (!calls) return true; // malformed input is rejected later as INVALID_INPUT
+    return calls.every((item) => {
+      const toolName = typeof item?.tool === "string" ? item.tool : "";
+      if (!toolName) return false;
+      const descriptor = descriptorForTool(toolName);
+      if (!descriptor) return false;
+      return isModeVisibleTool(mode, descriptor);
+    });
+  }
+  if (mode === "plan" && name === "tasks.create") {
+    // Plan mode may only preview a plan; execution is an act-mode call.
+    return (input as Record<string, unknown> | undefined)?.dryRun === true;
+  }
+  const descriptor = descriptorForTool(name);
+  if (!descriptor) return false;
+  return isModeVisibleTool(mode, descriptor);
+}
+
+export interface LayeredEnvironment {
+  browserConnected: boolean;
+  clientType: string;
+  scopePresent: boolean;
+  discoveredCount: number;
+}
+
+/**
+ * Phase A layered instruction assembler, in OpenCode's order adapted to
+ * Muze: Layer 1 base (how, not what) + Layer 2 mode + Layer 3 tool
+ * guidance for the mode's visible tools only + Layer 4 environment
+ * snapshot + Layer 5 session entries (discovered tools).
+ *
+ * Layer 4 honesty note: the gateway has no bridge query for the active
+ * tab, its URL/domain, the dashboard policy mode, or task counts in
+ * Phase A (adding one would be extension work, which Phase A excludes),
+ * so those fields are explicitly NOT claimed here. Tab state is always
+ * obtained via observe, never assumed from initialize text.
+ */
+export function buildLayeredInstructions(input: {
+  mode: AgentMode;
+  visibleDescriptors: ToolDescriptor[];
+  environment: LayeredEnvironment;
+  discovered: string[];
+}): string {
+  const layers = [
+    MCP_INSTRUCTIONS,
+    `## MODE: ${input.mode}\n${MODE_PROMPTS[input.mode]}`,
+    generateToolSelectionInstructions(input.visibleDescriptors),
+    [
+      "## ENVIRONMENT SNAPSHOT (gateway, at initialize; re-observe before acting)",
+      `- Mode: ${input.mode}`,
+      `- Browser connected: ${input.environment.browserConnected ? "yes" : "no"}`,
+      `- Client type: ${input.environment.clientType}`,
+      `- OAuth scope: ${input.environment.scopePresent ? "present" : "absent"} (value never shown)`,
+      `- Discovered tools this session: ${input.environment.discoveredCount}`,
+      "- Active tab, URL, domain, dashboard policy mode, and task counts are NOT in this snapshot: the gateway has no bridge query for them in Phase A, so obtain tab state via observe and never assume it.",
+    ].join("\n"),
+    [
+      "## SESSION ENTRIES",
+      input.discovered.length
+        ? `- Discovered tools this session: ${input.discovered.join(", ")}`
+        : "- Discovered tools this session: (none yet)",
+    ].join("\n"),
+  ];
+  return layers.join("\n\n");
+}
+
+
+/**
+ * Phase D surface discipline: deterministic per-mode initialize-payload
+ * measurement. Every mode is assembled through the same Phase A layered
+ * assembler with a fixed environment (no browser, unknown client, scope
+ * present, no discovered tools), so the numbers are reproducible without
+ * a live gateway call and depend only on the mode's prompt layer and its
+ * visible-tool guidance. `old` is the pre-Phase-A two-string assembly
+ * (base instructions + full-registry tool selection) for comparison.
+ * Sizes are in characters of the assembled initialize text.
+ */
+export type InitializePayloadSizes = Record<AgentMode | "old", number>;
+export function measureInitializePayloads(): InitializePayloadSizes {
+  const environment: LayeredEnvironment = {
+    browserConnected: false,
+    clientType: "unknown",
+    scopePresent: true,
+    discoveredCount: 0,
+  };
+  const sizes = {} as InitializePayloadSizes;
+  for (const mode of AGENT_MODES) {
+    sizes[mode] = buildLayeredInstructions({
+      mode,
+      visibleDescriptors: filterDescriptorsByMode(SEARCH_DESCRIPTORS, mode),
+      environment,
+      discovered: [],
+    }).length;
+  }
+  sizes.old = `${MCP_INSTRUCTIONS}\n\n${GENERATED_TOOL_SELECTION}`.length;
+  return sizes;
+}
+
+/**
  * Discovery v2 (Phase 2): tag/category/verb/description scoring over the
  * FULL registry (not just the unified surface), permission/scope filtered
  * FIRST, grouped, up to 20 results, full schema for the top 5 only.
@@ -391,9 +536,15 @@ export const GENERATED_TOOL_SELECTION = generateToolSelectionInstructions(SEARCH
 export function searchTools(
   query: string,
   limit: number,
-  options: { scope?: string; taskType?: string; health?: Record<string, { timeoutRate: number; errorRate: number }> } = {},
+  options: { scope?: string; taskType?: string; health?: Record<string, { timeoutRate: number; errorRate: number }>; mode?: AgentMode } = {},
 ): Array<Record<string, unknown>> {
-  const allowed = options.scope ? (descriptor: ToolDescriptor) => discoveryAllowed(descriptor, options.scope) : undefined;
+  // Phase A: mode filter first, then scope — a mode-hidden tool is never
+  // scored or returned, whatever the OAuth scope would allow.
+  const allowed = (descriptor: ToolDescriptor): boolean => {
+    if (options.mode && !isModeVisibleTool(options.mode, descriptor)) return false;
+    if (options.scope) return discoveryAllowed(descriptor, options.scope);
+    return true;
+  };
   const { results, grouped, totalAvailable } = discoverTools(SEARCH_DESCRIPTORS, query, {
     limit,
     allowed,
@@ -844,12 +995,25 @@ export function toMcpContent(result: unknown): Array<Record<string, unknown>> {
  * the Worker from the access token). Missing scope denies every tool call;
  * see scopeAllowsTool. This is the 0.3.0 scope-enforcement plumbing.
  */
+export interface GatewaySessionState {
+  mode: AgentMode;
+  discovered: string[];
+}
+
 export function createGatewayMcpServer(
   bridge: GatewayBridge,
   client?: ClientIdentity,
   env?: { MCP_SHOW_ALL_TOOLS?: string },
   oauthScope?: string,
-  options?: { clientType?: string },
+  options?: {
+    clientType?: string;
+    initialMode?: AgentMode;
+    initialDiscovered?: string[];
+    /** Called whenever the mode or discovered set changes, so the caller
+     * (SessionDO) can persist them. Best-effort: a failing callback must
+     * never break a tool call. */
+    onSessionStateChange?: (state: GatewaySessionState) => void;
+  },
 ): Server {
   // Client type is recorded ONLY if declared (session-do passes the
   // initialize clientInfo name through; an undeclared client is "unknown").
@@ -857,11 +1021,49 @@ export function createGatewayMcpServer(
   // tool-meta.ts LISTTOOLS_CAPS), not a claimed vendor limit.
   const clientType = classifyClientType(options?.clientType ?? client?.name);
   const listToolsCap = listToolsCapForClientType(clientType);
+  // Phase A session state. Default "act" is exactly the pre-Phase-A
+  // behaviour. Mode changes (via the agent prompt, see GetPrompt below)
+  // apply to this server instance immediately and to ListTools, discovery,
+  // and CallTool from that point on.
+  let sessionMode: AgentMode = options?.initialMode ?? "act";
+  const visibleDescriptorsForInstructions = (): ToolDescriptor[] =>
+    filterDescriptorsByMode(SEARCH_DESCRIPTORS, sessionMode);
+  const layeredEnvironment = (): LayeredEnvironment => ({
+    browserConnected: bridge.isConnected(),
+    clientType,
+    scopePresent: !!oauthScope,
+    discoveredCount: discoveredTools.length,
+  });
+  // Discovered tools are declared here (before the Server is built) so
+  // the construction-time instructions can already count them.
+  const discoveredTools: string[] = [...(options?.initialDiscovered ?? [])];
+  const emitSessionState = (): void => {
+    try {
+      options?.onSessionStateChange?.({ mode: sessionMode, discovered: [...discoveredTools] });
+    } catch {
+      // ignore: persistence is best-effort, never call-breaking
+    }
+  };
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       capabilities: { tools: {}, prompts: {}, elicitation: {} } as any,
-      instructions: `${MCP_INSTRUCTIONS}\n\n${GENERATED_TOOL_SELECTION}`,
+      // Phase A: layered assembly at construction time. The mode and
+      // environment layers here are a construction-time snapshot; a mode
+      // change after initialize is reflected in ListTools, discovery, and
+      // CallTool immediately, and in the agent-prompt response, while the
+      // SDK's initialize instructions text itself is static per server.
+      instructions: buildLayeredInstructions({
+        mode: sessionMode,
+        visibleDescriptors: visibleDescriptorsForInstructions(),
+        environment: {
+          browserConnected: bridge.isConnected(),
+          clientType,
+          scopePresent: !!oauthScope,
+          discoveredCount: discoveredTools.length,
+        },
+        discovered: [...discoveredTools],
+      }),
       // The SDK defaults to Ajv, which compiles schemas with `new Function` and
       // is therefore rejected by the Workers runtime. The gateway sends its
       // elicitation through the protocol layer today, but the Workers-safe
@@ -885,11 +1087,17 @@ export function createGatewayMcpServer(
   // when the session closes, it never changes permissions, and a tool only
   // appears if the current (extension-authoritative or static) list still
   // contains it. Bounded by the ListTools cap, core tools first.
-  const discoveredTools: string[] = [];
+  // Phase A: the set is also reported to onSessionStateChange so the
+  // caller (SessionDO) can persist it across isolate restarts.
   const rememberDiscovered = (names: string[]): void => {
+    let changed = false;
     for (const name of names) {
-      if (!discoveredTools.includes(name)) discoveredTools.push(name);
+      if (!discoveredTools.includes(name)) {
+        discoveredTools.push(name);
+        changed = true;
+      }
     }
+    if (changed) emitSessionState();
   };
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -915,7 +1123,13 @@ export function createGatewayMcpServer(
         }
       }
     }
-    const coreTools = filterToCoreTools(tools, showAllTools);
+    // Phase A: mode filter applies to BOTH the live list and the static
+    // fallback list, and to the core set below — a mode-denied tool is
+    // excluded from ListTools, not just refused at execution. (The
+    // extension's own list is already permission-filtered; the gateway
+    // adds the mode layer on top of it.)
+    const modeFilteredTools = filterDescriptorsByMode(tools, sessionMode);
+    const coreTools = filterToCoreTools(modeFilteredTools, showAllTools);
     // Session-aware: append discovered / task-plan tools that are still in
     // the current list (extension authority preserved), then apply the
     // documented conservative ListTools cap (core first) unless show-all
@@ -933,7 +1147,7 @@ export function createGatewayMcpServer(
       for (const name of discoveredTools) {
         if (coreNames.has(name)) continue;
         const descriptor = byName.get(name);
-        if (descriptor && discoveryAllowed(descriptor, oauthScope)) {
+        if (descriptor && isModeVisibleTool(sessionMode, descriptor) && discoveryAllowed(descriptor, oauthScope)) {
           listed = [...listed, descriptor];
           coreNames.add(name);
         }
@@ -970,6 +1184,7 @@ export function createGatewayMcpServer(
           arguments: [
             { name: "goal", description: "The specific objective to achieve in the browser", required: true },
             { name: "startUrl", description: "Starting URL to navigate to (optional)", required: false },
+            { name: "mode", description: "Phase A agent mode for this MCP session: read, act, plan, explore, summary, or compaction. Selecting a mode filters ListTools, discovery, and calls for this session from that point on. Defaults to act (previous behaviour) when omitted.", required: false },
           ],
         },
         {
@@ -995,10 +1210,33 @@ export function createGatewayMcpServer(
   server.setRequestHandler(GetPromptRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     if (name === "autonomous_browser_agent") {
+      // Phase A mode selection: fetching the generic agent prompt with a
+      // mode argument records that mode for this MCP session. It does not
+      // change any running task's mode, and it does not weaken scope or
+      // policy. An invalid mode is rejected, never guessed.
+      if (args.mode !== undefined) {
+        const requested = parseAgentMode(args.mode);
+        if (!requested) {
+          throw new ToolErrorException("INVALID_INPUT", `Unknown agent mode "${String(args.mode)}". Valid modes: ${AGENT_MODES.join(", ")}.`);
+        }
+        if (requested !== sessionMode) {
+          sessionMode = requested;
+          emitSessionState();
+          // Tell clients that re-list to pick up the new visibility set.
+          // Best-effort: not all SDK versions expose this, and a client
+          // that re-calls ListTools sees the new set regardless.
+          try {
+            const maybe = server as unknown as { sendToolListChanged?: () => Promise<void> };
+            if (typeof maybe.sendToolListChanged === "function") void maybe.sendToolListChanged().catch(() => undefined);
+          } catch {
+            // ignore
+          }
+        }
+      }
       const goal = args.goal ?? "Explore the active page";
       const startUrl = args.startUrl;
       return {
-        description: "Autonomous browser execution prompt",
+        description: "Generic agentic browser automation prompt: how to build and run your own task brief",
         messages: [
           {
             role: "user",
@@ -1008,14 +1246,21 @@ export function createGatewayMcpServer(
                 `# OBJECTIVE: ${goal}`,
                 startUrl ? `Starting URL: ${startUrl}` : "",
                 "",
-                "## EXECUTION PROTOCOL (Observe → Reason → Act → Verify):",
-                "1. Ground: Call `observe({ include: ['metadata', 'text', 'a11y'] })` to understand the page and obtain element refs (e.g. 'r1a2b'). Reading content or profiles runs freely without permission prompts.",
-                "2. Reason: Formulate your plan explaining the exact next action.",
-                "3. Act: Target the element using its ref from step 1 with `act({ steps: [{ do: '...', target: { ref: '...' } }] })`.",
-                "4. Settle: If the action causes navigation or dynamic loading, call `navigate({ category: 'sync', for: 'network_idle' })`.",
-                "5. Verify: Observe the page again to confirm the expected change took place.",
-                "6. Approvals: If an action requires confirmation, ask the user in chat (elicitation) or via the dashboard; never re-run with a confirmation flag — such flags are stripped and never count as approval.",
-                "7. Report: Conclude with a clear summary of what was accomplished.",
+                "## THIS PROMPT TEACHES HOW, NOT WHAT",
+                "No procedure for a specific site or task is given here, because one would be a guess about a page you have not observed. Build your own task brief from the goal and the page itself, then run it:",
+                "",
+                "1. Brief: restate the goal in your own words and define, from the page you will observe, what observable state proves it done.",
+                "2. Context: observe first — current tab and URL, what is open, what inputs or files the goal supplies, each identified by id + name + size or id + URL, never by similarity alone.",
+                "3. Decide: direct only for 1-3 reversible or read-only steps that are already grounded with no ambiguity and no consequential step; otherwise make a plan with ordered steps, the capability each step needs, and a verify observation after each consequential step.",
+                "4. Tools: choose by capability, not by name — discover tools for the capability the step needs and read full schemas only for the tools the plan uses.",
+                "5. Ground and act: resolve each target in order — ref, then role + name, then text, then selector, then coordinates as a last resort — and re-observe after each action.",
+                "6. Verify: a dispatched action is not success. Success is a post-action observe showing the state your brief defined. If a step fails, work the fallback ladder and re-observe instead of stopping; re-derive the brief when the page changes, a new dialog appears, or two candidates match.",
+                "7. Approvals: a consequential step waits for a real approval (elicitation or dashboard decision); a confirmation flag in tool input is stripped and never counts as approval.",
+                "8. Report: conclude with what is done, what is not, and what you tried — never report a task complete from a dispatched action alone.",
+                "",
+                `## MODE FOR THIS SESSION: ${sessionMode}`,
+                MODE_PROMPTS[sessionMode],
+                `Environment at prompt time: browser connected: ${layeredEnvironment().browserConnected ? "yes" : "no"}; discovered tools this session: ${layeredEnvironment().discoveredCount}. Active tab, URL, domain, policy mode, and task counts are not in this snapshot — obtain tab state via observe and never assume it.`,
               ].filter(Boolean).join("\n"),
             },
           },
@@ -1084,6 +1329,24 @@ export function createGatewayMcpServer(
     // Confirmation flags never count as approval and are never forwarded.
     const input = stripConfirmationFlags(adapted.input);
     try {
+      // Phase A mode backstop (visibility is not security): a tool hidden
+      // in this session's mode is refused here too, so a client that
+      // guesses a hidden tool name still cannot call it. Scope and policy
+      // still run after this and are unchanged.
+      if (!modeAllowsCall(sessionMode, name, input)) {
+        throw new ToolErrorException(
+          "PERMISSION_DENIED",
+          `Tool "${name}" is not visible in mode "${sessionMode}"`,
+          { details: { tool: name, mode: sessionMode } },
+        );
+      }
+      // A tasks.create mode field, when present, must name a valid mode;
+      // it is validated here and forwarded unchanged. Task-mode pinning
+      // itself is extension runner work (Phase B), not gateway work, and
+      // this field never changes the session mode on its own.
+      if (name === "tasks.create" && (input as Record<string, unknown>).mode !== undefined && !parseAgentMode((input as Record<string, unknown>).mode)) {
+        throw new ToolErrorException("INVALID_INPUT", `Unknown task mode "${String((input as Record<string, unknown>).mode)}". Valid modes: ${AGENT_MODES.join(", ")}.`);
+      }
       // OAuth scope is enforced here, before anything reaches the bridge,
       // against the canonical granular tool when the call resolves to one.
       assertScopeAllows(oauthScope, name, input);
@@ -1092,7 +1355,7 @@ export function createGatewayMcpServer(
         const limitRaw = typeof input.limit === "number" ? input.limit : Number(input.limit);
         const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 6;
         const taskType = typeof input.taskType === "string" ? input.taskType : undefined;
-        const found = searchTools(query, limit, { scope: oauthScope, taskType });
+        const found = searchTools(query, limit, { scope: oauthScope, taskType, mode: sessionMode });
         // Session-aware: discovered tools persist in ListTools for this session.
         rememberDiscovered(found.map((f) => String(f.name)));
         const totalAvailable = SEARCH_DESCRIPTORS.length;

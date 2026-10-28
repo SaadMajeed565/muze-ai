@@ -89,12 +89,17 @@ function toContractTaskView(view: RunnerTaskView): TaskView {
     attempts: step.attempts,
     outputSummary: step.outputSummary,
     ...(step.outsideBoundsReason !== null && step.outsideBoundsReason !== undefined ? { outsideBoundsReason: step.outsideBoundsReason } : {}),
+    // Phase B: verify outcome/summary are bounded runner summaries, safe for the bridge view.
+    ...(step.verifySummary ? { verifySummary: step.verifySummary } : {}),
+    ...(step.verifyOutcome !== null && step.verifyOutcome !== undefined ? { verifyOutcome: step.verifyOutcome } : {}),
   }));
   const candidate = {
     id: view.id,
     goal: view.goal,
     clientId: view.clientId,
     browserSessionId: view.browserSessionId,
+    // Phase B: pinned task mode, when present (pre-Phase-B tasks omit it).
+    ...(view.mode !== undefined && view.mode !== null ? { mode: view.mode } : {}),
     status: view.status,
     steps,
     totalSteps: view.steps.length,
@@ -878,6 +883,10 @@ export class HostProtocolHandler {
             ...(typeof input.totalBudgetMs === "number" ? { totalBudgetMs: input.totalBudgetMs } : {}),
             ...(typeof input.start === "boolean" ? { start: input.start } : {}),
             ...(input.bounds !== undefined ? { planBounds: input.bounds as PlanBounds } : {}),
+            // Phase B: task mode pinned at creation (validated by the
+            // tasks.create schema; the runner rejects unknown values).
+            // This never changes the caller's session mode.
+            ...(typeof input.mode === "string" ? { mode: input.mode as CreateTaskInput["mode"] } : {}),
           };
           // Phase 1 dry-run: validate the whole plan and return the
           // preview only — no task record is created, nothing executes.

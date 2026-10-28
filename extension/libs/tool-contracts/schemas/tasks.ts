@@ -57,6 +57,17 @@ export const TaskCompensationSchema = z
   .strict();
 export type TaskCompensation = z.infer<typeof TaskCompensationSchema>;
 
+/** Phase B generic verify condition for one step (generic only: a URL
+ * check or an element-presence check — never a site procedure). The
+ * runner validates it at creation (url kinds require a value). */
+export const TaskStepVerifySchema = z
+  .object({
+    kind: z.enum(["url-equals", "url-contains", "element-present"]).describe("Generic verify condition kind"),
+    value: z.string().min(1).max(2000).optional().describe("URL for url-equals, substring for url-contains, ref for element-present (else the step input's ref)"),
+  })
+  .strict();
+export type TaskStepVerify = z.infer<typeof TaskStepVerifySchema>;
+
 /** One planned step. `tool` must be a non-empty existing tool name; the
  * wrapped `input` is validated by the runner/executor at execution time,
  * not here (see the header note). */
@@ -68,9 +79,21 @@ export const TaskStepInputSchema = z
     compensation: TaskCompensationSchema.optional(),
     independent: z.boolean().optional().describe("Phase 3: this step does not depend on sibling steps; required for parallel execution"),
     parallelGroup: z.number().int().min(0).optional().describe("Phase 3: steps sharing a group run together when all are independent and read-only (max 4); consequential steps join only when explicitly independent and plan-approved"),
+    verify: TaskStepVerifySchema.optional().describe("Phase B: generic verify condition checked by the runner after a consequential step; a failed verify marks the step unknown and pauses, never done on dispatch"),
   })
   .strict();
 export type TaskStepInput = z.infer<typeof TaskStepInputSchema>;
+
+/**
+ * Phase B agent modes for tasks (mirrors the Phase A gateway modes).
+ * A task's mode is pinned at creation; the gateway already validates a
+ * tasks.create mode field and forwards it unchanged, so this schema is
+ * the extension-side acceptance of that field — an unknown mode is
+ * rejected at parse time, never guessed.
+ */
+export const TASK_AGENT_MODES = ["read", "act", "plan", "explore", "summary", "compaction"] as const;
+export const TaskAgentModeSchema = z.enum(TASK_AGENT_MODES);
+export type TaskAgentMode = z.infer<typeof TaskAgentModeSchema>;
 
 /** One step as reported in a TaskView. `state` is a free string because
  * the runner owns the step-state vocabulary; the view never carries the
@@ -84,6 +107,8 @@ export const TaskStepViewSchema = z
     attempts: z.number().int().min(0),
     outputSummary: z.string(),
     outsideBoundsReason: z.string().max(1000).optional().describe("Phase 1: why this step paused outside the approved plan bounds, if it did"),
+    verifySummary: z.string().optional().describe("Phase B: truncated post-step verify observation, when a verify ran"),
+    verifyOutcome: z.string().optional().describe("Phase B: pass, fail, or skipped (consequential step without verify wiring)"),
   })
   .strict();
 export type TaskStepView = z.infer<typeof TaskStepViewSchema>;
@@ -158,6 +183,7 @@ export const TaskViewSchema = z
     goal: z.string().min(1).max(2000),
     clientId: z.string().min(1),
     browserSessionId: z.string().min(1).optional(),
+    mode: TaskAgentModeSchema.optional().describe("Phase B: agent mode pinned at creation; omitted for pre-Phase-B tasks (read as act)"),
     status: TaskStatusSchema,
     steps: z.array(TaskStepViewSchema).min(1).max(100),
     totalSteps: z.number().int().min(1).max(100),
@@ -185,6 +211,7 @@ export const TasksCreateInputSchema = z
     browserSessionId: z.string().min(1).max(256).optional().describe("Target browser session; a task never moves to a different browser on its own"),
     bounds: PlanBoundsSchema.optional().describe("Phase 1: plan bounds supplied at creation; consequential steps still wait for tasks.approvePlan"),
     dryRun: z.boolean().optional().describe("Phase 1: when true, validate the whole plan and return a preview; execute nothing and create no task record"),
+    mode: TaskAgentModeSchema.optional().describe("Phase B: agent mode pinned at creation (read/act/plan/explore/summary/compaction); omit for act. Never changes mid-task; this field never changes the caller's session mode"),
   })
   .strict();
 export type TasksCreateInput = z.infer<typeof TasksCreateInputSchema>;

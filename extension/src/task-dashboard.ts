@@ -101,6 +101,13 @@ export interface TaskView {
   completedAt: number;
   resumeAfterMs?: number;
   pauseReason?: string;
+  /** Phase B: agent mode pinned at creation; omitted for pre-Phase-B tasks (read as act). */
+  mode?: string;
+  /** Phase D: true when the runner record carries a parentId, i.e. this
+   * is a Phase C child task. The parent id itself is never exposed to
+   * the dashboard — only the boolean, so the loop-status view can mark
+   * child tasks without leaking task linkage beyond that. */
+  isChild?: boolean;
   /** Phase 2: present once the task reaches a terminal state. */
   finalReport?: TaskFinalReport;
 }
@@ -280,10 +287,83 @@ export function sanitizeTaskView(value: unknown): TaskView {
   if (typeof record.resumeAfterMs === "number" && Number.isFinite(record.resumeAfterMs)) {
     view.resumeAfterMs = record.resumeAfterMs;
   }
+  // Phase B: pinned task mode passes through when present; pre-Phase-B
+  // views omit it and read as act.
+  if (typeof record.mode === "string" && record.mode !== "") {
+    view.mode = record.mode;
+  }
+  // Phase D: child status passes through as a boolean only; the parent
+  // id itself is dropped by the allowlist, like every other non-listed
+  // field.
+  if (typeof record.parentId === "string" && record.parentId !== "") {
+    view.isChild = true;
+  }
   if (typeof record.pauseReason === "string") view.pauseReason = record.pauseReason;
   const finalReport = sanitizeFinalReport(record.finalReport);
   if (finalReport) view.finalReport = finalReport;
   return view;
+}
+
+/**
+ * Phase D loop status for the dashboard, derived purely from the
+ * runner-written TaskView — never hand-set by the dashboard. The
+ * runner is the loop owner: its status, pauseReason, resultSummary,
+ * and final report are the state, and this function only names it for
+ * display (the OpenCode TUI `idle | busy | retry` analogue).
+ *
+ * - `verify-failed`: paused with pauseReason `verify-failed` (Phase B
+ *   post-step verify observation did not show the expected state).
+ * - `budget-terminal`: terminal (partial/failed) with the runner's own
+ *   budget-exhaustion markers — resultSummary "Total budget
+ *   exhausted." and/or a final-report manual-cleanup line naming the
+ *   total budget. Any other partial/failed ending keeps its own name.
+ * - `waiting_approval` / `paused` / `running` / `created` / `done` /
+ *   `failed` / `cancelled` / `partial`: the runner status itself,
+ *   spelled exactly as the runner writes it.
+ * - `child` is a separate flag (Phase C parentId), not a status: a
+ *   child task can be running, paused, or verify-failed, and the
+ *   dashboard shows both.
+ *
+ * Deliberately absent: compacted/pruned state. Phase C compaction is
+ * view-only and pruning clears step outputSummary fields with no
+ * stored flag, so a pruned step is indistinguishable in a TaskView
+ * from a step that legitimately had an empty summary. Deriving a
+ * "pruned" badge from empty summaries would be a guess, so no such
+ * badge is shown until the runner records pruning explicitly.
+ */
+export type LoopStatus =
+  | "running"
+  | "paused"
+  | "verify-failed"
+  | "budget-terminal"
+  | "waiting_approval"
+  | "created"
+  | "done"
+  | "failed"
+  | "cancelled"
+  | "partial";
+
+export interface LoopStatusInfo {
+  loop: LoopStatus;
+  child: boolean;
+  mode: string;
+}
+
+function isBudgetTerminal(view: TaskView): boolean {
+  if (view.resultSummary.includes("Total budget exhausted")) return true;
+  return (view.finalReport?.manualCleanup ?? []).some((line) => line.includes("total budget exhausted"));
+}
+
+export function deriveLoopStatus(view: TaskView): LoopStatusInfo {
+  const child = view.isChild === true;
+  const mode = view.mode ?? "act";
+  if (view.status === "paused" && view.pauseReason === "verify-failed") {
+    return { loop: "verify-failed", child, mode };
+  }
+  if ((view.status === "partial" || view.status === "failed") && isBudgetTerminal(view)) {
+    return { loop: "budget-terminal", child, mode };
+  }
+  return { loop: view.status, child, mode };
 }
 
 /**
