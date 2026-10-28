@@ -1,0 +1,48 @@
+{
+  "name": "muze-ai",
+  // Deploy artefact: the esbuild bundle built by `node build.mjs` into
+  // dist/index.js. Do NOT point this back at src/index.ts: that was the
+  // 0.2.0 build/deploy mismatch (deploy shipped unbundled source while
+  // build.mjs produced dist/index.js that was never deployed).
+  //
+  // Deploy ONLY via the package script that builds first (coordinator owns
+  // package.json; required change: "deploy": "npm run build && wrangler deploy").
+  // Running `wrangler deploy` alone deploys whatever stale dist/ happens to
+  // exist. The e2e test already builds before loading dist/index.js.
+  "main": "./dist/index.js",
+  "compatibility_date": "2025-10-15",
+  "compatibility_flags": ["nodejs_compat_v2"],
+  "observability": {
+    "enabled": true,
+    // 0.1 = 10% head sampling. Was 1 (100%) in 0.2.0, which is noisy and
+    // costly at gateway volume; 0.1 is the configured default. Raise it
+    // temporarily for a debugging session, then restore it.
+    "head_sampling_rate": 0.1
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SESSION_DO",
+        "class_name": "SessionDO"
+      },
+      {
+        "name": "DIRECTORY_DO",
+        "class_name": "DirectoryDO"
+      },
+      {
+        "name": "RATE_LIMIT_DO",
+        "class_name": "RateLimitDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionDO", "DirectoryDO"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["RateLimitDO"]
+    }
+  ]
+}

@@ -1,0 +1,303 @@
+import { z } from "zod";
+import type { ToolDefinition } from "../tools.js";
+
+/**
+ * Phase 0 task contracts (registry 2.1.0, additive only).
+ *
+ * A task is a durable job owned by the extension: a goal plus an ordered
+ * list of steps, each step naming an existing tool and its input. The
+ * extension's task runner executes the steps sequentially through the
+ * existing executor/policy/approval path; the gateway never executes a
+ * step and never synthesises a task view.
+ *
+ * Two deliberate boundaries, kept explicit so a later section does not
+ * blur them:
+ *
+ * - Step inputs are NOT validated against the wrapped tool's schema at
+ *   create time. A step input is a generic record
+ *   (`z.record(z.string(), z.unknown())`) because steps wrap arbitrary
+ *   existing tools; validating here would duplicate the executor and
+ *   drift from it. The runner/executor validates the wrapped tool input
+ *   at execution time, when policy and approval are re-checked.
+ * - A TaskView is a summary view, never the stored record: it carries
+ *   per-step `inputSummary`/`outputSummary` strings, never step inputs,
+ *   never tokens, never raw outputs. Host dispatch validates the
+ *   runner's return against TaskViewSchema so a raw record can never
+ *   leak across the bridge.
+ *
+ * No confirmation flags (`confirmed` / `userApproved` / `approved`)
+ * appear anywhere in these schemas, and every object is strict: a
+ * client-supplied approval flag is rejected at parse time and is never
+ * approval, consistent with the 0.3.0 contract change.
+ *
+ * Phase 1 (this file): `tasks.approvePlan` as a separate granular
+ * tool, and `tasks.create` with `dryRun: true` returning a preview
+ * instead of creating a task. Plan approval itself is never a schema
+ * field: for MCP callers the broker approval token travels as the
+ * bridge message's approvalId (host dispatch derives the source from
+ * it and fails closed without one); dashboard decisions travel through
+ * the dashboard handler, not through this schema.
+ */
+
+export const TASK_STATUSES = ["created", "running", "paused", "waiting_approval", "done", "failed", "cancelled", "partial"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+export const TaskStatusSchema = z.enum(TASK_STATUSES);
+
+/**
+ * Compensation for one step, best-effort and honestly reported: the
+ * runner reports what ran and what is still manual, and never claims
+ * true rollback for external actions.
+ */
+export const TaskCompensationSchema = z
+  .object({
+    kind: z.enum(["none", "close-tab", "navigate-back", "delete-download", "manual"]),
+    description: z.string().min(1).max(1000).optional(),
+  })
+  .strict();
+export type TaskCompensation = z.infer<typeof TaskCompensationSchema>;
+
+/** One planned step. `tool` must be a non-empty existing tool name; the
+ * wrapped `input` is validated by the runner/executor at execution time,
+ * not here (see the header note). */
+export const TaskStepInputSchema = z
+  .object({
+    tool: z.string().min(1).max(128).describe("Name of an existing tool to run for this step"),
+    input: z.record(z.string(), z.unknown()).describe("Input for the wrapped tool; validated at execution time, not at create time"),
+    timeoutMs: z.number().int().min(1).max(60_000).optional().describe("Per-step timeout, 1..60000 ms"),
+    compensation: TaskCompensationSchema.optional(),
+    independent: z.boolean().optional().describe("Phase 3: this step does not depend on sibling steps; required for parallel execution"),
+    parallelGroup: z.number().int().min(0).optional().describe("Phase 3: steps sharing a group run together when all are independent and read-only (max 4); consequential steps join only when explicitly independent and plan-approved"),
+  })
+  .strict();
+export type TaskStepInput = z.infer<typeof TaskStepInputSchema>;
+
+/** One step as reported in a TaskView. `state` is a free string because
+ * the runner owns the step-state vocabulary; the view never carries the
+ * step's raw input or raw output, only bounded summaries. */
+export const TaskStepViewSchema = z
+  .object({
+    index: z.number().int().min(0),
+    tool: z.string().min(1),
+    inputSummary: z.string(),
+    state: z.string().min(1),
+    attempts: z.number().int().min(0),
+    outputSummary: z.string(),
+    outsideBoundsReason: z.string().max(1000).optional().describe("Phase 1: why this step paused outside the approved plan bounds, if it did"),
+  })
+  .strict();
+export type TaskStepView = z.infer<typeof TaskStepViewSchema>;
+
+/** Structured final report (Phase 2): done/undone/failed indices plus
+ * compensations that ran and manual cleanup still required. */
+export const TaskFinalReportSchema = z
+  .object({
+    done: z.array(z.number().int().min(0)),
+    undone: z.array(z.number().int().min(0)),
+    failed: z.array(z.number().int().min(0)),
+    compensations: z.array(z.string()),
+    manualCleanup: z.array(z.string()),
+  })
+  .strict();
+export type TaskFinalReport = z.infer<typeof TaskFinalReportSchema>;
+
+/**
+ * Plan-level approval bounds (Phase 1, plan 3.3). All restrictions,
+ * all optional: purchases, payments, and external submits default to
+ * denied at approval time when omitted.
+ */
+export const PlanBoundsSchema = z
+  .object({
+    allowedTools: z.array(z.string().min(1)).optional(),
+    allowedRiskLevels: z.array(z.string().min(1)).optional(),
+    allowedDomains: z.array(z.string().min(1)).optional().describe("Domain list or globs, e.g. example.com or *.example.com"),
+    allowPurchases: z.boolean().optional(),
+    allowPayments: z.boolean().optional(),
+    allowExternalSubmit: z.boolean().optional(),
+    maxSteps: z.number().int().min(1).max(100).optional(),
+    maxAttemptsPerStep: z.number().int().min(1).max(10).optional(),
+    totalBudgetMs: z.number().int().positive().optional(),
+  })
+  .strict();
+export type PlanBounds = z.infer<typeof PlanBoundsSchema>;
+
+/** One step of a dry-run preview (Phase 1, plan 3.4). */
+export const DryRunPreviewStepSchema = z
+  .object({
+    index: z.number().int().min(0),
+    tool: z.string(),
+    inputSummary: z.string(),
+    risk: z.string(),
+    needsApproval: z.boolean(),
+    domains: z.array(z.string()),
+    valid: z.boolean(),
+    errors: z.array(z.string()),
+    outsideBoundsReason: z.string().nullable(),
+  })
+  .strict();
+export type DryRunPreviewStep = z.infer<typeof DryRunPreviewStepSchema>;
+
+/** Dry-run preview: the validated plan, never a task record. */
+export const DryRunPreviewSchema = z
+  .object({
+    goal: z.string(),
+    totalSteps: z.number().int().min(0).max(100),
+    totalBudgetMs: z.number().int(),
+    domains: z.array(z.string()),
+    steps: z.array(DryRunPreviewStepSchema).max(100),
+    approvalsNeeded: z.array(z.number().int().min(0)),
+    errors: z.array(z.string()),
+    valid: z.boolean(),
+  })
+  .strict();
+export type DryRunPreview = z.infer<typeof DryRunPreviewSchema>;
+
+export const TaskViewSchema = z
+  .object({
+    id: z.string().min(1),
+    goal: z.string().min(1).max(2000),
+    clientId: z.string().min(1),
+    browserSessionId: z.string().min(1).optional(),
+    status: TaskStatusSchema,
+    steps: z.array(TaskStepViewSchema).min(1).max(100),
+    totalSteps: z.number().int().min(1).max(100),
+    doneSteps: z.array(z.number().int().min(0)),
+    undoneSteps: z.array(z.number().int().min(0)),
+    totalBudgetMs: z.number().int().positive(),
+    correlationId: z.string().min(1),
+    resultSummary: z.string(),
+    createdAt: z.number().int(),
+    updatedAt: z.number().int(),
+    completedAt: z.number().int().nullable().optional(),
+    resumeAfterMs: z.number().int().min(0).optional(),
+    pauseReason: z.string().max(1000).optional(),
+    finalReport: TaskFinalReportSchema.optional().describe("Phase 2: structured final report, present once the task reaches a terminal state"),
+  })
+  .strict();
+export type TaskView = z.infer<typeof TaskViewSchema>;
+
+export const TasksCreateInputSchema = z
+  .object({
+    goal: z.string().min(1).max(2000),
+    steps: z.array(TaskStepInputSchema).min(1).max(100),
+    totalBudgetMs: z.number().int().positive().optional().describe("Total budget for the whole task in ms; omit for the runner default"),
+    start: z.boolean().default(true).describe("Start running immediately; false leaves the task created but not started"),
+    browserSessionId: z.string().min(1).max(256).optional().describe("Target browser session; a task never moves to a different browser on its own"),
+    bounds: PlanBoundsSchema.optional().describe("Phase 1: plan bounds supplied at creation; consequential steps still wait for tasks.approvePlan"),
+    dryRun: z.boolean().optional().describe("Phase 1: when true, validate the whole plan and return a preview; execute nothing and create no task record"),
+  })
+  .strict();
+export type TasksCreateInput = z.infer<typeof TasksCreateInputSchema>;
+
+export const TasksGetInputSchema = z.object({ taskId: z.string().min(1).max(256) }).strict();
+export type TasksGetInput = z.infer<typeof TasksGetInputSchema>;
+
+export const TasksListInputSchema = z.object({ browserSessionId: z.string().min(1).max(256).optional() }).strict();
+export type TasksListInput = z.infer<typeof TasksListInputSchema>;
+
+export const TasksPauseInputSchema = z
+  .object({ taskId: z.string().min(1).max(256), reason: z.string().min(1).max(1000).optional() })
+  .strict();
+export type TasksPauseInput = z.infer<typeof TasksPauseInputSchema>;
+
+export const TasksResumeInputSchema = z.object({ taskId: z.string().min(1).max(256) }).strict();
+export type TasksResumeInput = z.infer<typeof TasksResumeInputSchema>;
+
+export const TasksCancelInputSchema = z.object({ taskId: z.string().min(1).max(256) }).strict();
+export type TasksCancelInput = z.infer<typeof TasksCancelInputSchema>;
+
+export const TasksApprovePlanInputSchema = z
+  .object({
+    taskId: z.string().min(1).max(256),
+    bounds: PlanBoundsSchema.optional().describe("Bounds for this approval; omit to approve under the creation bounds, or plan-derived defaults"),
+  })
+  .strict();
+export type TasksApprovePlanInput = z.infer<typeof TasksApprovePlanInputSchema>;
+
+export const TasksListOutputSchema = z.object({ tasks: z.array(TaskViewSchema) }).strict();
+export type TasksListOutput = z.infer<typeof TasksListOutputSchema>;
+
+export const tasksCreate: ToolDefinition = {
+  name: "tasks.create",
+  title: "Create task",
+  description:
+    "Create a durable multi-step task in the extension and, by default, start running it. Creating the task is reversible (it can be paused or cancelled); consequential steps inside the task still go through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves its steps.",
+  category: "workflows",
+  risk: "reversible",
+  requiresApproval: false,
+  input: TasksCreateInputSchema,
+  output: TaskViewSchema,
+};
+
+export const tasksGet: ToolDefinition = {
+  name: "tasks.get",
+  title: "Get task",
+  description: "Read the current view of one task: status, step progress, done and undone steps, and result summary. Read-only; returns the summary view, never step inputs or raw outputs.",
+  category: "workflows",
+  risk: "read-only",
+  requiresApproval: false,
+  input: TasksGetInputSchema,
+  output: TaskViewSchema,
+};
+
+export const tasksList: ToolDefinition = {
+  name: "tasks.list",
+  title: "List tasks",
+  description: "List tasks for this client, optionally filtered to one browser session. Read-only; returns summary views only.",
+  category: "workflows",
+  risk: "read-only",
+  requiresApproval: false,
+  input: TasksListInputSchema,
+  output: TasksListOutputSchema,
+};
+
+export const tasksPause: ToolDefinition = {
+  name: "tasks.pause",
+  title: "Pause task",
+  description: "Pause a running or waiting task; it can be resumed later from its checkpoint. Reversible.",
+  category: "workflows",
+  risk: "reversible",
+  requiresApproval: false,
+  input: TasksPauseInputSchema,
+  output: TaskViewSchema,
+};
+
+export const tasksResume: ToolDefinition = {
+  name: "tasks.resume",
+  title: "Resume task",
+  description:
+    "Resume a paused task from its checkpoint. Reversible. Resume re-checks the client and scope in the runner; the gateway must not weaken this, and a resume never re-runs steps already recorded done.",
+  category: "workflows",
+  risk: "reversible",
+  requiresApproval: false,
+  input: TasksResumeInputSchema,
+  output: TaskViewSchema,
+};
+
+export const tasksCancel: ToolDefinition = {
+  name: "tasks.cancel",
+  title: "Cancel task",
+  description:
+    "Cancel a task. Steps already done stay done and are reported as such; remaining steps are reported undone, with best-effort compensations. Reversible in the sense that cancellation itself does not destroy the task record.",
+  category: "workflows",
+  risk: "reversible",
+  requiresApproval: false,
+  input: TasksCancelInputSchema,
+  output: TaskViewSchema,
+};
+
+export const tasksApprovePlan: ToolDefinition = {
+  name: "tasks.approvePlan",
+  title: "Approve task plan",
+  description:
+    "Approve a task's plan with bounds, so steps inside the bounds run without a second approval and steps outside them pause and ask again. This is a separate granular tool, never an action parameter and never a client-supplied confirmed flag: for MCP callers the approval must arrive as a broker approval token on the call (host dispatch fails closed without one); dashboard approvals travel through the dashboard handler. Approval expires at the task lifetime or 24 hours, whichever is shorter. Approving does not start the task; call tasks.resume afterwards.",
+  category: "workflows",
+  risk: "reversible",
+  requiresApproval: false,
+  input: TasksApprovePlanInputSchema,
+  output: TaskViewSchema,
+};
+
+export const taskTools: ToolDefinition[] = [tasksCreate, tasksGet, tasksList, tasksPause, tasksResume, tasksCancel, tasksApprovePlan];
+
+export const TASK_TOOL_NAMES: string[] = taskTools.map((t) => t.name);

@@ -1,0 +1,12 @@
+node_modules/
+**/dist
+**/.wrangler
+**/.dev.vars
+**/.env
+**/.env.*
+**/coverage
+**/test-results
+**/*.tsbuildinfo
+**/*.zip
+.DS_Store
+*.log

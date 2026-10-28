@@ -1,0 +1,21 @@
+{
+  "name": "universal-ai-browser-bridge",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Two standalone projects: a Chrome MV3 extension and the Cloudflare gateway that pairs it with AI clients over MCP.",
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
+  },
+  "scripts": {
+    "install:all": "npm --prefix cloudflare install && npm --prefix extension install",
+    "sync:contracts": "node scripts/sync-tool-contracts.mjs",
+    "check:contracts": "node scripts/check-tool-contracts.mjs",
+    "build": "npm run sync:contracts && npm --prefix cloudflare run build && npm --prefix extension run build",
+    "package:extension": "npm run sync:contracts && npm run check:contracts && npm --prefix extension run build && node scripts/package-extension.mjs",
+    "typecheck": "npm --prefix cloudflare run typecheck && npm --prefix extension run typecheck",
+    "test": "npm --prefix cloudflare test && npm --prefix extension test"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}
