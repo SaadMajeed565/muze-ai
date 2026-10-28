@@ -278,6 +278,14 @@ export function isTopFrameCdp(ctx: BrowserContext, frameId?: number): boolean {
   return Boolean(ctx.cdp?.available()) && (!frameId || frameId === 0);
 }
 
+/** CDP is available at all, regardless of frame. CDP input is tab-level:
+ * mouse input needs top-viewport coordinates (see topViewportBox), but
+ * key/text input goes to whatever element is focused, in any frame, so
+ * type/press/fill/clear can use CDP in a sub-frame after focusing. */
+export function isCdpAvailable(ctx: BrowserContext): boolean {
+  return Boolean(ctx.cdp?.available());
+}
+
 export async function mapScreenshotCoords(
   ctx: BrowserContext,
   tabId: number,

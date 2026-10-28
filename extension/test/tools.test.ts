@@ -339,6 +339,31 @@ describe("pointer and keyboard tools", () => {
     expect(rt.ctx.cdpCalls.some((c) => c.method === "click")).toBe(true);
   });
 
+  it("clicks and types via CDP in a sub-frame, not just the top frame", async () => {
+    seedInteractive();
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    rt.ctx.mockFrames = [0, 3];
+    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#box", frameId: 3 }, client, ctx: rt.ctx });
+    const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
+    const click = await rt.executor.execute({ tool: "dom.click", input: { ref, frameId: 3 }, client, ctx: rt.ctx });
+    expect((click.result as { method: string }).method).toBe("cdp");
+    const foundName = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#name", frameId: 3 }, client, ctx: rt.ctx });
+    const nameRef = (foundName.result as { elements: { ref: string }[] }).elements[0].ref;
+    const type = await rt.executor.execute({ tool: "dom.type", input: { ref: nameRef, frameId: 3, text: "hi" }, client, ctx: rt.ctx });
+    expect((type.result as { method: string }).method).toBe("cdp");
+  });
+
+  it("selects via CDP arrow keys, falling back to the DOM path when the mock keys do not move the value", async () => {
+    document.body.innerHTML = `<select id="s"><option value="a">A</option><option value="b">B</option></select>`;
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#s" }, client, ctx: rt.ctx });
+    const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
+    const result = await rt.executor.execute({ tool: "dom.select", input: { ref, value: "b" }, client, ctx: rt.ctx });
+    expect((result.result as { selected: boolean }).selected).toBe(true);
+    expect((document.getElementById("s") as HTMLSelectElement).value).toBe("b");
+    expect(rt.ctx.cdpCalls.some((c) => c.method === "press")).toBe(true);
+  });
+
   it("drags between elements with a full pointer/drag sequence", async () => {
     seedInteractive();
     const rt = createTestRuntime();

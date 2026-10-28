@@ -37,7 +37,7 @@ import {
 import type { BrowserContext } from "../context.js";
 import { getFile } from "../../files/index.js";
 import { defineTool, type RegisteredTool } from "../registry.js";
-import { assertViewportCoords, isTopFrameCdp, mapScreenshotCoords, parseFrameRef, requireScriptableTab, runPageOp, settlePage } from "./helpers.js";
+import { assertViewportCoords, isCdpAvailable, isTopFrameCdp, mapScreenshotCoords, parseFrameRef, requireScriptableTab, runPageOp, settlePage } from "./helpers.js";
 import { isSensitiveElement, isSensitiveFieldName } from "../../security/privacy.js";
 
 async function requireActivationApproval(
@@ -73,21 +73,26 @@ async function getFileFromStore(id: string): Promise<{ name: string; mimeType: s
 
 type FindParams = { tabId?: number; frameId?: number; by: string; value: string; role?: string; name?: string; limit: number };
 
-/** Genuine CDP click at an element's centre: scroll into view, measure,
- * then click with the human-sequenced CDP click. Used by the toggle and
- * submit handlers, which are clicks by another name. */
+/** Genuine CDP click at an element's centre, in any frame: topViewportBox
+ * maps a sub-frame element to top-viewport coordinates (CDP input is
+ * tab-level, in top-viewport pixels). Returns false for a cross-origin
+ * sub-frame, where the offset cannot be computed — the caller must fall
+ * back to synthetic input rather than click at a wrong point. Used by
+ * the click, toggle, and submit handlers, which are clicks by another
+ * name. */
 async function cdpClickElement(
   ctx: BrowserContext,
   tabId: number,
   ref: string,
   frameId: number | undefined,
   signal: AbortSignal,
-): Promise<void> {
-  await runPageOp(ctx, tabId, { op: "scrollTo", ref }, frameId, signal);
-  const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
-    ctx, tabId, { op: "boundingBox", ref }, frameId, signal,
+): Promise<boolean> {
+  const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
+    ctx, tabId, { op: "topViewportBox", ref }, frameId, signal,
   );
+  if (box.crossOrigin) return false;
   await ctx.cdp!.click(tabId, box.viewportX + box.width / 2, box.viewportY + box.height / 2, "left");
+  return true;
 }
 
 /** Genuine CDP clear: focus, select all with Ctrl+A, then Backspace.
@@ -161,32 +166,32 @@ export const interactToolHandlers: RegisteredTool[] = [
     if (data.button === "left") {
       await requireActivationApproval(exec, tab.id!, { op: "activationCheck", ref: data.ref }, data.frameId);
     }
-    // CDP fast paths are top-frame only. When CDP is available, a CDP failure
-    // is thrown explicitly — it is never silently hidden behind a synthetic
-    // fallback. The synthetic path runs only when CDP is unavailable (or the
-    // frame is a sub-frame) and records method: "synthetic".
-    if (isTopFrameCdp(exec.ctx, data.frameId)) {
-      // The synthetic path scrolls the element into view before clicking;
-      // the CDP path previously did not, so a below-the-fold element's
-      // viewport coordinates could point off-screen and click the wrong
-      // thing. Scroll first, then measure.
-      await runPageOp(exec.ctx, tab.id!, { op: "scrollTo", ref: data.ref }, data.frameId, exec.signal);
-      const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
-        exec.ctx,
-        tab.id!,
-        { op: "boundingBox", ref: data.ref },
-        data.frameId,
-        exec.signal,
+    // CDP click in any frame: topViewportBox maps the element to
+    // top-viewport coordinates, which is what CDP input uses. A CDP
+    // failure is thrown explicitly — it is never silently hidden behind
+    // a synthetic fallback. The synthetic path runs only when CDP is
+    // unavailable, or for a cross-origin sub-frame whose offset cannot
+    // be computed, and records method: "synthetic".
+    if (isCdpAvailable(exec.ctx)) {
+      const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
+        exec.ctx, tab.id!, { op: "topViewportBox", ref: data.ref }, data.frameId, exec.signal,
       );
-      await exec.ctx.cdp!.click(tab.id!, box.viewportX + box.width / 2, box.viewportY + box.height / 2, data.button);
-      await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
-      return { clicked: true as const, ref: data.ref, hardware: true, method: "cdp" as const };
+      if (!box.crossOrigin) {
+        await exec.ctx.cdp!.click(tab.id!, box.viewportX + box.width / 2, box.viewportY + box.height / 2, data.button);
+        await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
+        return { clicked: true as const, ref: data.ref, hardware: true, method: "cdp" as const };
+      }
     }
     const result = await runPageOp(exec.ctx, tab.id!, { op: "click", ref: data.ref, button: data.button }, data.frameId, exec.signal);
     await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
     return { ...(result as Record<string, unknown>), method: "synthetic" as const };
   }),
 
+  // dom.focus stays on the browser focus API: CDP has no focus input
+  // command, and focusing by clicking would activate the element, while
+  // focusing by Tabbing is index-dependent and fragile. Focus is a
+  // prerequisite, not a gesture sites check for isTrusted, and every
+  // CDP type/press/fill that follows a focus already goes through CDP.
   defineTool(domFocus, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
@@ -196,18 +201,16 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domHover, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
-      const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
-        ctx,
-        tab.id!,
-        { op: "boundingBox", ref: data.ref },
-        data.frameId,
-        signal,
+    if (isCdpAvailable(ctx)) {
+      const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
+        ctx, tab.id!, { op: "topViewportBox", ref: data.ref }, data.frameId, signal,
       );
-      await ctx.cdp!.move(tab.id!, box.viewportX + box.width / 2, box.viewportY + box.height / 2);
-      // dom.hover's strict output schema has no method/hardware fields, so
-      // the CDP path returns the same shape as the synthetic path.
-      return { hovered: true as const, ref: data.ref };
+      if (!box.crossOrigin) {
+        await ctx.cdp!.move(tab.id!, box.viewportX + box.width / 2, box.viewportY + box.height / 2);
+        // dom.hover's strict output schema has no method/hardware fields, so
+        // the CDP path returns the same shape as the synthetic path.
+        return { hovered: true as const, ref: data.ref };
+      }
     }
     return runPageOp(ctx, tab.id!, { op: "hover", ref: data.ref }, data.frameId, signal);
   }),
@@ -230,27 +233,81 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domScrollTo, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isCdpAvailable(ctx)) {
+      // Scroll into view with a genuine wheel, not scrollIntoView:
+      // measure without moving (topBox), wheel toward the viewport
+      // centre, re-measure, repeat. If the element is inside a container
+      // the wheel cannot move, or its frame is cross-origin, fall back
+      // to scrollIntoView rather than leave it off-screen.
+      const vp = await runPageOp<{ width: number; height: number }>(ctx, tab.id!, { op: "getViewport" }, undefined, signal);
+      let inView = false;
+      for (let i = 0; i < 20; i++) {
+        const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
+          ctx, tab.id!, { op: "topBox", ref: data.ref }, data.frameId, signal,
+        );
+        if (box.crossOrigin) break;
+        const centreY = box.viewportY + box.height / 2;
+        const centreX = box.viewportX + box.width / 2;
+        if (centreY >= 0 && centreY <= vp.height && centreX >= 0 && centreX <= vp.width) {
+          inView = true;
+          break;
+        }
+        const deltaY = Math.max(-2000, Math.min(2000, Math.round(centreY - vp.height / 2)));
+        if (deltaY === 0) break;
+        await ctx.cdp!.scroll(tab.id!, Math.round(vp.width / 2), Math.round(vp.height / 2), 0, deltaY);
+      }
+      if (inView) return { scrolled: true as const, ref: data.ref };
+    }
     return runPageOp(ctx, tab.id!, { op: "scrollTo", ref: data.ref }, data.frameId, signal);
   }),
 
-  // dom.select deliberately stays on the DOM path: CDP has no select
-  // command, and a native <select> dropdown is a browser/OS popup that
-  // cannot be chosen reliably by clicking or by keyboard index. The
-  // value assignment here is state, not a trusted-event gesture.
   defineTool(domSelect, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string; value?: string; label?: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isCdpAvailable(ctx)) {
+      // CDP has no select command, so a select is driven the way a user
+      // drives it: focus it, then step through options with real arrow
+      // keys, then verify the value actually changed. Multiple selects
+      // and unfindable options keep the DOM path / the not-selected
+      // result, because arrow-key stepping cannot express them.
+      const before = await runPageOp<{ selectedIndex: number; optionIndex: number; value: string; multiple: boolean }>(
+        ctx, tab.id!, { op: "selectIndex", ref: data.ref, value: data.value, label: data.label }, data.frameId, signal,
+      );
+      if (!before.multiple && before.optionIndex >= 0 && before.optionIndex !== before.selectedIndex) {
+        await runPageOp(ctx, tab.id!, { op: "focus", ref: data.ref }, data.frameId, signal);
+        const key = before.optionIndex > before.selectedIndex ? "ArrowDown" : "ArrowUp";
+        const steps = Math.abs(before.optionIndex - before.selectedIndex);
+        for (let i = 0; i < steps; i++) await ctx.cdp!.press(tab.id!, key, 0);
+        const after = await runPageOp<{ selectedIndex: number; optionIndex: number; value: string }>(
+          ctx, tab.id!, { op: "selectIndex", ref: data.ref, value: data.value, label: data.label }, data.frameId, signal,
+        );
+        if (after.optionIndex >= 0 && after.selectedIndex === after.optionIndex) {
+          return { selected: true as const, value: after.value };
+        }
+        // Keyboard stepping did not land on the option (custom widget,
+        // listbox, or a popup that swallowed the keys): fall through to
+        // the DOM path below rather than report a wrong selection.
+      } else if (!before.multiple && before.optionIndex >= 0 && before.optionIndex === before.selectedIndex) {
+        return { selected: true as const, value: before.value };
+      } else if (before.optionIndex < 0) {
+        return { selected: false as const, value: before.value };
+      }
+    }
     return runPageOp(ctx, tab.id!, { op: "select", ref: data.ref, value: data.value, label: data.label }, data.frameId, signal);
   }),
 
   defineTool(domSetChecked, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string; checked: boolean };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
+    if (isCdpAvailable(ctx)) {
       // A toggle is a click: only click when the state actually differs,
-      // exactly like the synthetic path, then read the state back.
+      // exactly like the synthetic path, then read the state back. A
+      // cross-origin sub-frame falls through to the synthetic path.
       const before = await runPageOp<{ checked: boolean }>(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
-      if (before.checked !== data.checked) await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
+      if (before.checked !== data.checked) {
+        const clicked = await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
+        if (!clicked) return runPageOp(ctx, tab.id!, { op: "setChecked", ref: data.ref, checked: data.checked }, data.frameId, signal);
+      }
       return runPageOp(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
     }
     return runPageOp(ctx, tab.id!, { op: "setChecked", ref: data.ref, checked: data.checked }, data.frameId, signal);
@@ -259,9 +316,9 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domSetRadio, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
-      await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
-      return runPageOp(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
+    if (isCdpAvailable(ctx)) {
+      const clicked = await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
+      if (clicked) return runPageOp(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
     }
     return runPageOp(ctx, tab.id!, { op: "setRadio", ref: data.ref }, data.frameId, signal);
   }),
@@ -270,10 +327,12 @@ export const interactToolHandlers: RegisteredTool[] = [
     const data = input as { tabId?: number; frameId?: number; ref: string; value: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
     await assertNotSensitiveField(ctx, tab.id!, data.ref, data.frameId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
+    if (isCdpAvailable(ctx)) {
       // Fill as a genuine user would: clear with real keys, then type
       // with trusted CDP insertText, instead of setting the value by
-      // script and firing untrusted input/change events.
+      // script and firing untrusted input/change events. CDP text goes
+      // to the focused element, in any frame, so this is not top-frame
+      // only.
       await cdpClearField(ctx, tab.id!, data.ref, data.frameId, signal);
       if (data.value) await ctx.cdp!.type(tab.id!, data.value);
       return { filled: true as const, ref: data.ref };
@@ -284,7 +343,7 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domClear, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
+    if (isCdpAvailable(ctx)) {
       await cdpClearField(ctx, tab.id!, data.ref, data.frameId, signal);
       return { cleared: true as const, ref: data.ref };
     }
@@ -297,7 +356,7 @@ export const interactToolHandlers: RegisteredTool[] = [
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
     await assertNotSensitiveField(ctx, tab.id!, data.ref, data.frameId, signal);
     await runPageOp(ctx, tab.id!, { op: "focus", ref: data.ref }, data.frameId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
+    if (isCdpAvailable(ctx)) {
       await ctx.cdp!.type(tab.id!, data.text);
       await settlePage(ctx, tab.id!, data, data.frameId, signal);
       return { typed: true as const, ref: data.ref, hardware: true, method: "cdp" as const };
@@ -313,7 +372,11 @@ export const interactToolHandlers: RegisteredTool[] = [
     if (data.key === "Enter" || data.key === " ") {
       await requireActivationApproval(exec, tab.id!, { op: "activationCheck", ref: data.ref, key: data.key }, data.frameId);
     }
-    if (isTopFrameCdp(exec.ctx, data.frameId)) {
+    if (isCdpAvailable(exec.ctx)) {
+      // Focus first, as the synthetic path does: CDP key events go to
+      // the focused element, in any frame, so without this a press could
+      // land on whatever happened to be focused before.
+      await runPageOp(exec.ctx, tab.id!, { op: "focus", ref: data.ref }, data.frameId, exec.signal);
       let bitmask = 0;
       if (data.modifiers?.includes("Alt")) bitmask |= 1;
       if (data.modifiers?.includes("Control")) bitmask |= 2;
@@ -371,16 +434,18 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domDrag, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; fromRef: string; toRef: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
-      const from = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
-        ctx, tab.id!, { op: "boundingBox", ref: data.fromRef }, data.frameId, signal,
+    if (isCdpAvailable(ctx)) {
+      const from = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
+        ctx, tab.id!, { op: "topViewportBox", ref: data.fromRef }, data.frameId, signal,
       );
-      const to = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
-        ctx, tab.id!, { op: "boundingBox", ref: data.toRef }, data.frameId, signal,
+      const to = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
+        ctx, tab.id!, { op: "topViewportBox", ref: data.toRef }, data.frameId, signal,
       );
-      await ctx.cdp!.drag(tab.id!, from.viewportX + from.width / 2, from.viewportY + from.height / 2, to.viewportX + to.width / 2, to.viewportY + to.height / 2);
-      // dom.drag's strict output schema has no method/hardware fields.
-      return { dragged: true as const, fromRef: data.fromRef, toRef: data.toRef };
+      if (!from.crossOrigin && !to.crossOrigin) {
+        await ctx.cdp!.drag(tab.id!, from.viewportX + from.width / 2, from.viewportY + from.height / 2, to.viewportX + to.width / 2, to.viewportY + to.height / 2);
+        // dom.drag's strict output schema has no method/hardware fields.
+        return { dragged: true as const, fromRef: data.fromRef, toRef: data.toRef };
+      }
     }
     await runPageOp<{ dragged: true }>(ctx, tab.id!, { op: "drag", fromRef: data.fromRef, toRef: data.toRef }, data.frameId, signal);
     return { dragged: true as const, fromRef: data.fromRef, toRef: data.toRef };
@@ -435,11 +500,11 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domSubmit, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string; expectedAction?: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    if (isTopFrameCdp(ctx, data.frameId)) {
+    if (isCdpAvailable(ctx)) {
       // Only a submit button/input is a click. A form itself is submitted
       // by the browser's requestSubmit API, not by clicking its centre,
       // which could hit a child control instead — so forms keep the
-      // synthetic path, which is a native API call, not a JS event.
+      // native-API path, which is a trusted browser call, not a JS event.
       const desc = await runPageOp<{
         element?: { tagName?: string; type?: string };
       }>(ctx, tab.id!, { op: "elementDescriptor", ref: data.ref }, data.frameId, signal);
@@ -447,8 +512,8 @@ export const interactToolHandlers: RegisteredTool[] = [
         desc.element?.tagName === "button" ||
         (desc.element?.tagName === "input" && (desc.element.type === "submit" || desc.element.type === "image"));
       if (isSubmitControl) {
-        await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
-        return { submitted: true as const, ref: data.ref, dispatched: true as const, verified: false as const };
+        const clicked = await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
+        if (clicked) return { submitted: true as const, ref: data.ref, dispatched: true as const, verified: false as const };
       }
     }
     const result = await runPageOp<{ submitted: boolean; dispatched?: boolean; verified?: boolean }>(
@@ -511,7 +576,7 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(formsFill, async (input, exec) => {
     const data = input as { tabId?: number; frameId?: number; fields: { ref: string; value: string }[] };
     const tab = await requireScriptableTab(exec.ctx, data.tabId, exec.signal);
-    if (isTopFrameCdp(exec.ctx, data.frameId)) {
+    if (isCdpAvailable(exec.ctx)) {
       // Batch form fill via the same genuine paths as the granular tools:
       // text fields go through dom.fill (CDP keys + insertText), selects
       // through dom.select, toggles are skipped as before. A single bad

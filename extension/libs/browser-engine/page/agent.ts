@@ -31,6 +31,9 @@ export type PageOp =
   | { op: "setRadio"; ref: string }
   | { op: "checkedState"; ref: string }
   | { op: "scrollState" }
+  | { op: "topViewportBox"; ref: string }
+  | { op: "topBox"; ref: string }
+  | { op: "selectIndex"; ref: string; value?: string; label?: string }
   | { op: "setValue"; ref: string; value: string }
   | { op: "clear"; ref: string }
   | { op: "submit"; ref: string; expectedAction?: string }
@@ -760,6 +763,48 @@ export function pageAgent(request: PageOp): any {
       el.value = chosen.value;
       fireInput(el);
       return { selected: true, value: el.value };
+    }
+    case "topViewportBox":
+    case "topBox": {
+      // Top-viewport coordinates of an element, for CDP input, which is
+      // addressed in top-viewport pixels even when the element lives in
+      // a sub-frame. topViewportBox scrolls into view first (like
+      // boundingBox); topBox does not, so a wheel-scroll loop can measure
+      // without moving the element itself. The walk up frameElement
+      // works only for same-origin frames: for a cross-origin frame,
+      // frameElement is null, the walk stops early, and crossOrigin is
+      // true, so the caller must fall back to synthetic input rather
+      // than click at the wrong top-viewport point.
+      const el = resolve(request.ref) as HTMLElement | null;
+      if (!el) return { error: "STALE_ELEMENT" };
+      if (request.op === "topViewportBox") el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      let topX = rect.left;
+      let topY = rect.top;
+      let win: Window = window;
+      while (win !== win.top) {
+        let frameEl: HTMLElement | null;
+        try {
+          frameEl = win.frameElement as HTMLElement | null;
+        } catch {
+          break;
+        }
+        if (!frameEl) break;
+        const fr = frameEl.getBoundingClientRect();
+        topX += fr.left;
+        topY += fr.top;
+        win = win.parent;
+      }
+      return { viewportX: topX, viewportY: topY, width: rect.width, height: rect.height, crossOrigin: win !== win.top };
+    }
+    case "selectIndex": {
+      const el = resolve(request.ref) as HTMLSelectElement | null;
+      if (!el) return { error: "STALE_ELEMENT" };
+      const options = Array.from(el.options);
+      let optionIndex = -1;
+      if (request.value !== undefined) optionIndex = options.findIndex((o) => o.value === request.value);
+      else if (request.label !== undefined) optionIndex = options.findIndex((o) => o.text.trim() === request.label!.trim());
+      return { selectedIndex: el.selectedIndex, optionIndex, value: el.value, multiple: el.multiple };
     }
     case "checkedState": {
       const el = resolve(request.ref) as HTMLInputElement | null;
