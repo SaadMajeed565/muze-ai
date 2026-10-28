@@ -11,6 +11,7 @@
 export type PageOp =
   | { op: "readPage"; offset: number; maxChars: number }
   | { op: "readClipboard" }
+  | { op: "writeClipboard"; text: string }
   | { op: "metadata" }
   | { op: "outline"; maxDepth: number }
   | { op: "links"; limit: number; sameOriginOnly: boolean }
@@ -693,6 +694,17 @@ export function pageAgent(request: PageOp): any {
       return (navigator.clipboard.readText() as Promise<string>).then((text) => ({
         text: text.slice(0, 100_000),
         truncated: text.length > 100_000,
+      }));
+    }
+    case "writeClipboard": {
+      // Page-context counterpart of readClipboard, for the clipboard
+      // write self-focus fallback: the offscreen document is never
+      // focused, so its writeText always fails, but a focused page
+      // document can writeText with the extension's clipboardWrite
+      // permission. A rejection propagates to the caller, which
+      // converts a focus failure to the self-focus-attempted error.
+      return (navigator.clipboard.writeText(request.text) as Promise<void>).then(() => ({
+        written: true as const,
       }));
     }
     case "findText": {

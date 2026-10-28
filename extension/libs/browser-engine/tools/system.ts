@@ -26,7 +26,87 @@ import { isRestrictedUrl, redactUrl } from "../../security/index.js";
 import { diagnosticsHook, readDiagnosticsLog, type DiagnosticsLog } from "../page/diagnostics.js";
 import type { BrowserContext } from "../context.js";
 import { defineTool, type RegisteredTool } from "../registry.js";
-import { raceWithAbort, requireScriptableTab, resolveTabId, runPageOp, throwIfAborted, toTabInfo, validateDownloadPath, validateUrlInput } from "./helpers.js";
+import { abortableDelay, raceWithAbort, requireScriptableTab, resolveTabId, runPageOp, throwIfAborted, toTabInfo, validateDownloadPath, validateUrlInput } from "./helpers.js";
+
+/**
+ * Clipboard self-focus (2026-10-28, user requirement: "it should focus
+ * itself instead of me keeping focus for clipboard").
+ *
+ * The offscreen document is never focused, so its navigator.clipboard
+ * calls always fail with a focus error, and the page-context fallback
+ * only works while the browser window holding the active tab is
+ * focused. Previously the tool told the user to click a window and
+ * retry. Now the tool focuses that window itself before falling back:
+ * it takes the active tab (chrome.tabs.query active + lastFocusedWindow,
+ * i.e. the window the user was last in), activates that tab if it is
+ * not already active, and calls chrome.windows.update with
+ * focused:true on that tab's window, then waits a short settle so the
+ * focus change can land before the page read/write is attempted.
+ *
+ * Settle: 200ms. Chrome focus changes are asynchronous and a page
+ * read attempted in the same tick as the focus call still sees an
+ * unfocused document; 200ms is long enough for the focus event to
+ * propagate in practice and short enough not to dominate the call
+ * (the tool's own 15s/30s bounds are untouched).
+ *
+ * Boundaries, deliberately:
+ * - Self-focus NEVER switches the user's active tab to a different
+ *   tab. It only focuses the window of the tab that is already
+ *   active, and activates that same tab if needed. If the active tab
+ *   is a restricted page (chrome://, Extensions, dashboard), self-focus
+ *   is skipped entirely — focusing that window would not help, since
+ *   no page-context read can run there — and the caller returns the
+ *   restricted-page error naming that case.
+ * - A failed self-focus attempt is swallowed (returns false), never
+ *   thrown: focus is best-effort, and the page attempt that follows
+ *   is the thing that decides success or the honest focus error.
+ * - OS focus-stealing prevention is the honest limit: on some systems
+ *   a background service worker's focus request only flashes the
+ *   window in the taskbar instead of bringing it to the front. In
+ *   that case the retry still fails and the error says the self-focus
+ *   attempt did not make the window focused — it does not tell the
+ *   user to keep focus manually as the primary instruction, and it
+ *   never fabricates clipboard content.
+ */
+const CLIPBOARD_SELF_FOCUS_SETTLE_MS = 200;
+
+async function selfFocusActiveWindow(ctx: BrowserContext, signal: AbortSignal | undefined): Promise<boolean> {
+  try {
+    const tab = await raceWithAbort(ctx.getActiveTab(), signal);
+    if (!tab || typeof tab.id !== "number" || typeof tab.windowId !== "number") return false;
+    // Restricted active tab: no page-context clipboard op can run there,
+    // so focusing its window cannot help and must not be attempted as a
+    // way of moving the user elsewhere. The caller returns the
+    // restricted-page error for this case.
+    if (isRestrictedUrl(tab.url)) return false;
+    if (!tab.active) await raceWithAbort(ctx.updateTab(tab.id, { active: true }), signal);
+    await raceWithAbort(ctx.updateWindow(tab.windowId, { focused: true }), signal);
+    await abortableDelay(CLIPBOARD_SELF_FOCUS_SETTLE_MS, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readClipboardFromPage(ctx: BrowserContext, signal: AbortSignal | undefined): Promise<{ text: string; truncated: boolean }> {
+  const tab = await requireScriptableTab(ctx, undefined, signal);
+  const pageResult = await runPageOp<{ text?: string; truncated?: boolean }>(ctx, tab.id!, { op: "readClipboard" }, undefined, signal);
+  if (typeof pageResult?.text !== "string") {
+    throw new ToolErrorException("INTERNAL", "Clipboard read failed: the page-context clipboard read returned no text.");
+  }
+  const pageText = pageResult.text;
+  const truncated = pageResult.truncated ?? pageText.length > 100_000;
+  return { text: truncated ? pageText.slice(0, 100_000) : pageText, truncated };
+}
+
+async function writeClipboardToPage(ctx: BrowserContext, text: string, signal: AbortSignal | undefined): Promise<void> {
+  const tab = await requireScriptableTab(ctx, undefined, signal);
+  await runPageOp(ctx, tab.id!, { op: "writeClipboard", text }, undefined, signal);
+}
+
+function isFocusError(error: unknown): boolean {
+  return /not focused/i.test(error instanceof Error ? error.message : String(error));
+}
 
 /**
  * Read the page's diagnostics log, never crashing on a null read (retest3:
@@ -125,48 +205,42 @@ export const systemToolHandlers: RegisteredTool[] = [
       // focus lapse. The legitimate fallback is the active tab's page
       // context: the extension holds the clipboardRead permission, and a
       // content-context readText succeeds whenever that tab's document is
-      // focused (i.e. the user is in a browser window). Only focus errors
-      // take this path — any other failure (e.g. a permission denial) is
-      // rethrown unchanged, so a real denial is never masked as a focus
-      // problem. Nothing is written to the clipboard on any path, and a
-      // failed read returns no content, real or fabricated.
-      if (/not focused/i.test(error instanceof Error ? error.message : String(error))) {
-        try {
-          const tab = await requireScriptableTab(ctx, undefined, signal);
-          const pageResult = await runPageOp<{ text?: string; truncated?: boolean }>(
-            ctx,
-            tab.id!,
-            { op: "readClipboard" },
-            undefined,
-            signal,
-          );
-          if (typeof pageResult?.text === "string") {
-            const pageText = pageResult.text;
-            const truncated = pageResult.truncated ?? pageText.length > 100_000;
-            return { text: truncated ? pageText.slice(0, 100_000) : pageText, truncated };
+      // focused. Only focus errors take this path — any other failure
+      // (e.g. a permission denial) is rethrown unchanged, so a real
+      // denial is never masked as a focus problem. Nothing is written
+      // to the clipboard on any path, and a failed read returns no
+      // content, real or fabricated.
+      //
+      // Self-focus (2026-10-28): instead of telling the user to click
+      // a window and retry, the tool focuses the active tab's window
+      // itself before the fallback read, and focuses it again and
+      // retries the read once if the first fallback read still
+      // reports not-focused (focus changes are asynchronous, so one
+      // settle may not be enough). The output shape is unchanged:
+      // { text, truncated }.
+      if (isFocusError(error)) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await selfFocusActiveWindow(ctx, signal);
+          try {
+            return await readClipboardFromPage(ctx, signal);
+          } catch (fallbackError) {
+            // Restricted active tab: no scriptable tab is active at all,
+            // so no focus attempt can help — name that case, do not
+            // switch the user to another tab, and do not fall through
+            // to the generic focus error.
+            if (ToolErrorException.is(fallbackError) && fallbackError.code === "RESTRICTED_PAGE") {
+              throw new ToolErrorException(
+                "INTERNAL",
+                "Clipboard read failed: the active tab is a restricted page (for example chrome://, Extensions, or the Cloudflare dashboard) and cannot run a page-context clipboard read. Make a normal, non-restricted browser tab the active tab, then retry. No clipboard content was read.",
+              );
+            }
+            if (isFocusError(fallbackError) && attempt === 0) continue;
+            break;
           }
-        } catch (fallbackError) {
-          // Retest4 note, code change (not a new read path): the old
-          // catch swallowed every fallback failure into the generic
-          // both-paths focus error, including the common case where
-          // the ACTIVE tab itself is a restricted page (chrome://,
-          // Extensions, dashboard) after a reload. That case is not
-          // "the window is unfocused" — it is "no scriptable tab is
-          // active at all" — and it needs its own instruction, or
-          // the user keeps focusing the same restricted window and
-          // retrying to no effect. A genuinely unfocused window
-          // still falls through to the focus error below.
-          if (ToolErrorException.is(fallbackError) && fallbackError.code === "RESTRICTED_PAGE") {
-            throw new ToolErrorException(
-              "INTERNAL",
-              "Clipboard read failed: the active tab is a restricted page (for example chrome://, Extensions, or the Cloudflare dashboard) and cannot run a page-context clipboard read. Click a normal, non-restricted browser tab so it becomes the active tab, then retry. No clipboard content was read.",
-            );
-          }
-          // Fall through to the honest focus-required error below.
         }
         throw new ToolErrorException(
           "INTERNAL",
-          "Clipboard read failed: Chrome requires a focused document for navigator.clipboard.readText. The offscreen document is never focused, and the active tab's page context could not read it either — click a browser window so a normal (non-restricted) tab is focused, then retry. No clipboard content was read.",
+          "Clipboard read failed: Chrome requires a focused document for navigator.clipboard.readText. The offscreen document is never focused, and the tool's own attempt to focus the browser window did not make the active tab's document focused (on some systems a background focus request only flashes the window instead of bringing it to the front) — retrying will only help once the browser window is actually in the foreground. No clipboard content was read.",
         );
       }
       throw error;
@@ -181,10 +255,33 @@ export const systemToolHandlers: RegisteredTool[] = [
     try {
       await raceWithAbort(ctx.clipboard.write(text), signal);
     } catch (error) {
-      if (/not focused/i.test(error instanceof Error ? error.message : String(error))) {
+      // Same self-focus as read, plus a page-context write fallback
+      // mirroring readClipboard: the offscreen write can never succeed
+      // unfocused, but a focused page document can writeText with the
+      // extension's clipboardWrite permission. Previously write had no
+      // page fallback at all and always failed unfocused. Only focus
+      // errors take this path; other failures are rethrown unchanged.
+      // Output shape is unchanged: { written, chars }.
+      if (isFocusError(error)) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await selfFocusActiveWindow(ctx, signal);
+          try {
+            await writeClipboardToPage(ctx, text, signal);
+            return { written: true as const, chars: text.length };
+          } catch (fallbackError) {
+            if (ToolErrorException.is(fallbackError) && fallbackError.code === "RESTRICTED_PAGE") {
+              throw new ToolErrorException(
+                "INTERNAL",
+                "Clipboard write failed: the active tab is a restricted page (for example chrome://, Extensions, or the Cloudflare dashboard) and cannot run a page-context clipboard write. Make a normal, non-restricted browser tab the active tab, then retry. No clipboard content was written.",
+              );
+            }
+            if (isFocusError(fallbackError) && attempt === 0) continue;
+            break;
+          }
+        }
         throw new ToolErrorException(
           "INTERNAL",
-          "Clipboard write failed: Chrome requires a focused document for navigator.clipboard.writeText, and the offscreen document is not focused. Click a browser window to focus it and retry. No clipboard content was written.",
+          "Clipboard write failed: Chrome requires a focused document for navigator.clipboard.writeText. The offscreen document is never focused, and the tool's own attempt to focus the browser window did not make the active tab's document focused (on some systems a background focus request only flashes the window instead of bringing it to the front). No clipboard content was written.",
         );
       }
       throw error;
