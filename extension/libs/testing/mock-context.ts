@@ -290,6 +290,9 @@ export class MockBrowserContext implements BrowserContext {
         click: async (tabId, x, y, button, clickCount) => {
           this.cdpCalls.push({ method: "click", args: [tabId, x, y, button, clickCount] });
         },
+        move: async (tabId, x, y) => {
+          this.cdpCalls.push({ method: "move", args: [tabId, x, y] });
+        },
         type: async (tabId, text) => {
           this.cdpCalls.push({ method: "type", args: [tabId, text] });
         },

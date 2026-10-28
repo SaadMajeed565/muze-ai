@@ -258,6 +258,7 @@ export interface SessionStore {
 export interface CdpCapability {
   available(): boolean;
   click(tabId: number, x: number, y: number, button?: "left" | "right" | "middle", clickCount?: number): Promise<void>;
+  move(tabId: number, x: number, y: number): Promise<void>;
   type(tabId: number, text: string): Promise<void>;
   press(tabId: number, key: string, modifiers?: number): Promise<void>;
   scroll(tabId: number, x: number, y: number, deltaX: number, deltaY: number): Promise<void>;

@@ -73,6 +73,31 @@ async function getFileFromStore(id: string): Promise<{ name: string; mimeType: s
 
 type FindParams = { tabId?: number; frameId?: number; by: string; value: string; role?: string; name?: string; limit: number };
 
+/** Genuine CDP click at an element's centre: scroll into view, measure,
+ * then click with the human-sequenced CDP click. Used by the toggle and
+ * submit handlers, which are clicks by another name. */
+async function cdpClickElement(
+  ctx: BrowserContext,
+  tabId: number,
+  ref: string,
+  frameId: number | undefined,
+  signal: AbortSignal,
+): Promise<void> {
+  await runPageOp(ctx, tabId, { op: "scrollTo", ref }, frameId, signal);
+  const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
+    ctx, tabId, { op: "boundingBox", ref }, frameId, signal,
+  );
+  await ctx.cdp!.click(tabId, box.viewportX + box.width / 2, box.viewportY + box.height / 2, "left");
+}
+
+/** Genuine CDP clear: focus, select all with Ctrl+A, then Backspace.
+ * A DOM setter clear is not a user gesture; this is. */
+async function cdpClearField(ctx: BrowserContext, tabId: number, ref: string, frameId: number | undefined, signal: AbortSignal): Promise<void> {
+  await runPageOp(ctx, tabId, { op: "focus", ref }, frameId, signal);
+  await ctx.cdp!.press(tabId, "a", 2);
+  await ctx.cdp!.press(tabId, "Backspace", 0);
+}
+
 /**
  * Handler-level sensitive-field guard, using the same detection as forms.fill
  * (type, name, id, aria-label, visible label, autocomplete). dom.fill and
@@ -141,6 +166,11 @@ export const interactToolHandlers: RegisteredTool[] = [
     // fallback. The synthetic path runs only when CDP is unavailable (or the
     // frame is a sub-frame) and records method: "synthetic".
     if (isTopFrameCdp(exec.ctx, data.frameId)) {
+      // The synthetic path scrolls the element into view before clicking;
+      // the CDP path previously did not, so a below-the-fold element's
+      // viewport coordinates could point off-screen and click the wrong
+      // thing. Scroll first, then measure.
+      await runPageOp(exec.ctx, tab.id!, { op: "scrollTo", ref: data.ref }, data.frameId, exec.signal);
       const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
         exec.ctx,
         tab.id!,
@@ -166,12 +196,34 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domHover, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
+        ctx,
+        tab.id!,
+        { op: "boundingBox", ref: data.ref },
+        data.frameId,
+        signal,
+      );
+      await ctx.cdp!.move(tab.id!, box.viewportX + box.width / 2, box.viewportY + box.height / 2);
+      // dom.hover's strict output schema has no method/hardware fields, so
+      // the CDP path returns the same shape as the synthetic path.
+      return { hovered: true as const, ref: data.ref };
+    }
     return runPageOp(ctx, tab.id!, { op: "hover", ref: data.ref }, data.frameId, signal);
   }),
 
   defineTool(domScroll, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; direction: "up" | "down" | "top" | "bottom"; amount: number };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      // Genuine wheel scroll at the viewport centre. Top/bottom use a
+      // large delta and let the browser clamp at the page ends; the
+      // returned scroll state is read back, not set by script.
+      const vp = await runPageOp<{ width: number; height: number }>(ctx, tab.id!, { op: "getViewport" }, data.frameId, signal);
+      const deltaY = data.direction === "up" ? -data.amount : data.direction === "down" ? data.amount : data.direction === "top" ? -100_000 : 100_000;
+      await ctx.cdp!.scroll(tab.id!, Math.round(vp.width / 2), Math.round(vp.height / 2), 0, deltaY);
+      return runPageOp(ctx, tab.id!, { op: "scrollState" }, data.frameId, signal);
+    }
     return runPageOp(ctx, tab.id!, { op: "scrollPage", direction: data.direction, amount: data.amount }, data.frameId, signal);
   }),
 
@@ -181,6 +233,10 @@ export const interactToolHandlers: RegisteredTool[] = [
     return runPageOp(ctx, tab.id!, { op: "scrollTo", ref: data.ref }, data.frameId, signal);
   }),
 
+  // dom.select deliberately stays on the DOM path: CDP has no select
+  // command, and a native <select> dropdown is a browser/OS popup that
+  // cannot be chosen reliably by clicking or by keyboard index. The
+  // value assignment here is state, not a trusted-event gesture.
   defineTool(domSelect, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string; value?: string; label?: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
@@ -190,12 +246,23 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domSetChecked, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string; checked: boolean };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      // A toggle is a click: only click when the state actually differs,
+      // exactly like the synthetic path, then read the state back.
+      const before = await runPageOp<{ checked: boolean }>(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
+      if (before.checked !== data.checked) await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
+      return runPageOp(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
+    }
     return runPageOp(ctx, tab.id!, { op: "setChecked", ref: data.ref, checked: data.checked }, data.frameId, signal);
   }),
 
   defineTool(domSetRadio, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
+      return runPageOp(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
+    }
     return runPageOp(ctx, tab.id!, { op: "setRadio", ref: data.ref }, data.frameId, signal);
   }),
 
@@ -203,12 +270,24 @@ export const interactToolHandlers: RegisteredTool[] = [
     const data = input as { tabId?: number; frameId?: number; ref: string; value: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
     await assertNotSensitiveField(ctx, tab.id!, data.ref, data.frameId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      // Fill as a genuine user would: clear with real keys, then type
+      // with trusted CDP insertText, instead of setting the value by
+      // script and firing untrusted input/change events.
+      await cdpClearField(ctx, tab.id!, data.ref, data.frameId, signal);
+      if (data.value) await ctx.cdp!.type(tab.id!, data.value);
+      return { filled: true as const, ref: data.ref };
+    }
     return runPageOp(ctx, tab.id!, { op: "setValue", ref: data.ref, value: data.value }, data.frameId, signal);
   }),
 
   defineTool(domClear, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      await cdpClearField(ctx, tab.id!, data.ref, data.frameId, signal);
+      return { cleared: true as const, ref: data.ref };
+    }
     await runPageOp(ctx, tab.id!, { op: "clear", ref: data.ref }, data.frameId, signal);
     return { cleared: true as const, ref: data.ref };
   }),
@@ -281,6 +360,10 @@ export const interactToolHandlers: RegisteredTool[] = [
     const data = input as { tabId?: number; frameId?: number; x: number; y: number };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
     await assertViewportCoords(ctx, tab.id!, [{ x: data.x, y: data.y }], data.frameId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      await ctx.cdp!.move(tab.id!, data.x, data.y);
+      return { moved: true as const, x: data.x, y: data.y, method: "cdp" as const };
+    }
     await runPageOp<{ moved: true }>(ctx, tab.id!, { op: "moveTo", x: data.x, y: data.y }, data.frameId, signal);
     return { moved: true as const, x: data.x, y: data.y, method: "synthetic" as const };
   }),
@@ -288,6 +371,17 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domDrag, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; fromRef: string; toRef: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      const from = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
+        ctx, tab.id!, { op: "boundingBox", ref: data.fromRef }, data.frameId, signal,
+      );
+      const to = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number }>(
+        ctx, tab.id!, { op: "boundingBox", ref: data.toRef }, data.frameId, signal,
+      );
+      await ctx.cdp!.drag(tab.id!, from.viewportX + from.width / 2, from.viewportY + from.height / 2, to.viewportX + to.width / 2, to.viewportY + to.height / 2);
+      // dom.drag's strict output schema has no method/hardware fields.
+      return { dragged: true as const, fromRef: data.fromRef, toRef: data.toRef };
+    }
     await runPageOp<{ dragged: true }>(ctx, tab.id!, { op: "drag", fromRef: data.fromRef, toRef: data.toRef }, data.frameId, signal);
     return { dragged: true as const, fromRef: data.fromRef, toRef: data.toRef };
   }),
@@ -306,6 +400,10 @@ export const interactToolHandlers: RegisteredTool[] = [
     const from = await mapScreenshotCoords(ctx, tab.id!, data.x1, data.y1, data.coordinateSpace, data.frameId, signal);
     const to = await mapScreenshotCoords(ctx, tab.id!, data.x2, data.y2, data.coordinateSpace, data.frameId, signal);
     await assertViewportCoords(ctx, tab.id!, [from, to], data.frameId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      await ctx.cdp!.drag(tab.id!, from.x, from.y, to.x, to.y);
+      return { dragged: true as const, x1: from.x, y1: from.y, x2: to.x, y2: to.y, method: "cdp" as const };
+    }
     await runPageOp<{ dragged: true }>(ctx, tab.id!, { op: "dragAt", x1: from.x, y1: from.y, x2: to.x, y2: to.y }, data.frameId, signal);
     return { dragged: true as const, x1: from.x, y1: from.y, x2: to.x, y2: to.y, method: "synthetic" as const };
   }),
@@ -337,6 +435,22 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domSubmit, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string; expectedAction?: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (isTopFrameCdp(ctx, data.frameId)) {
+      // Only a submit button/input is a click. A form itself is submitted
+      // by the browser's requestSubmit API, not by clicking its centre,
+      // which could hit a child control instead — so forms keep the
+      // synthetic path, which is a native API call, not a JS event.
+      const desc = await runPageOp<{
+        element?: { tagName?: string; type?: string };
+      }>(ctx, tab.id!, { op: "elementDescriptor", ref: data.ref }, data.frameId, signal);
+      const isSubmitControl =
+        desc.element?.tagName === "button" ||
+        (desc.element?.tagName === "input" && (desc.element.type === "submit" || desc.element.type === "image"));
+      if (isSubmitControl) {
+        await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
+        return { submitted: true as const, ref: data.ref, dispatched: true as const, verified: false as const };
+      }
+    }
     const result = await runPageOp<{ submitted: boolean; dispatched?: boolean; verified?: boolean }>(
       ctx, tab.id!, { op: "submit", ref: data.ref, expectedAction: data.expectedAction }, data.frameId, signal,
     );
@@ -394,10 +508,49 @@ export const interactToolHandlers: RegisteredTool[] = [
     return runPageOp(ctx, tab.id!, { op: "setFile", selector: data.selector, files }, data.frameId, signal);
   }),
 
-  defineTool(formsFill, async (input, { ctx, signal }) => {
+  defineTool(formsFill, async (input, exec) => {
     const data = input as { tabId?: number; frameId?: number; fields: { ref: string; value: string }[] };
-    const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    return runPageOp(ctx, tab.id!, { op: "fillForm", fields: data.fields }, data.frameId, signal);
+    const tab = await requireScriptableTab(exec.ctx, data.tabId, exec.signal);
+    if (isTopFrameCdp(exec.ctx, data.frameId)) {
+      // Batch form fill via the same genuine paths as the granular tools:
+      // text fields go through dom.fill (CDP keys + insertText), selects
+      // through dom.select, toggles are skipped as before. A single bad
+      // field must not abort the batch, so per-field failures are
+      // reported in `skipped`, matching the synthetic fillForm report.
+      const filled: { ref: string; field: string; value: string }[] = [];
+      const skipped: { field: string; reason: string }[] = [];
+      for (const field of data.fields) {
+        try {
+          const desc = await runPageOp<{
+            element?: { tagName?: string; type?: string };
+            label?: string;
+          }>(exec.ctx, tab.id!, { op: "elementDescriptor", ref: field.ref }, data.frameId, exec.signal);
+          if (!desc.element) {
+            skipped.push({ field: field.ref, reason: "stale or missing element" });
+            continue;
+          }
+          const label = desc.label || field.ref;
+          if (desc.element.tagName === "input" && (desc.element.type === "checkbox" || desc.element.type === "radio")) {
+            skipped.push({ field: label, reason: "use dom.setChecked/setRadio for toggles" });
+            continue;
+          }
+          if (desc.element.tagName === "select") {
+            const sel = await exec.invoke<{ selected: boolean }>("dom.select", { tabId: tab.id, frameId: data.frameId, ref: field.ref, value: field.value });
+            if (sel.selected) filled.push({ ref: field.ref, field: label, value: "•".repeat(Math.min(field.value.length, 8)) });
+            else skipped.push({ field: label, reason: "option not found" });
+            continue;
+          }
+          await exec.invoke("dom.fill", { tabId: tab.id, frameId: data.frameId, ref: field.ref, value: field.value });
+          filled.push({ ref: field.ref, field: label, value: "•".repeat(Math.min(field.value.length, 8)) });
+        } catch (error) {
+          const code = (error as { code?: string }).code;
+          if (code === "PERMISSION_DENIED") skipped.push({ field: field.ref, reason: "sensitive field is never filled" });
+          else skipped.push({ field: field.ref, reason: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+        }
+      }
+      return { filled, skipped };
+    }
+    return runPageOp(exec.ctx, tab.id!, { op: "fillForm", fields: data.fields }, data.frameId, exec.signal);
   }),
 
   defineTool(formsSubmit, async (input, { ctx, signal }) => {

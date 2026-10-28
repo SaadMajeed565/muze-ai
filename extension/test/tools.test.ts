@@ -287,6 +287,58 @@ describe("pointer and keyboard tools", () => {
     expect(moves).toBe(1);
   });
 
+  it("moves the mouse via CDP when CDP is available, not synthetic events", async () => {
+    seedInteractive();
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    let moves = 0;
+    document.body.addEventListener("mousemove", () => moves++);
+    const result = await rt.executor.execute({ tool: "dom.moveTo", input: { x: 5, y: 6 }, client, ctx: rt.ctx });
+    expect(result.result).toEqual({ moved: true, x: 5, y: 6, method: "cdp" });
+    expect(moves).toBe(0);
+    expect(rt.ctx.cdpCalls.some((c) => c.method === "move")).toBe(true);
+  });
+
+  it("drags via CDP when CDP is available", async () => {
+    seedInteractive();
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const result = await rt.executor.execute({ tool: "dom.dragAt", input: { x1: 1, y1: 2, x2: 30, y2: 40 }, client, ctx: rt.ctx });
+    expect(result.result).toEqual({ dragged: true, x1: 1, y1: 2, x2: 30, y2: 40, method: "cdp" });
+    expect(rt.ctx.cdpCalls.some((c) => c.method === "drag")).toBe(true);
+  });
+
+  it("scrolls, fills, and clears via CDP when CDP is available", async () => {
+    seedInteractive();
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const find = async (selector: string) => {
+      const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: selector }, client, ctx: rt.ctx });
+      return (found.result as { elements: { ref: string }[] }).elements[0].ref;
+    };
+    const scroll = await rt.executor.execute({ tool: "dom.scroll", input: { direction: "down", amount: 600 }, client, ctx: rt.ctx });
+    expect(typeof (scroll.result as { scrollY: number }).scrollY).toBe("number");
+    expect(rt.ctx.cdpCalls.some((c) => c.method === "scroll" && (c.args as unknown[])[4] === 600)).toBe(true);
+    const nameRef = await find("#name");
+    const fill = await rt.executor.execute({ tool: "dom.fill", input: { ref: nameRef, value: "bob" }, client, ctx: rt.ctx });
+    expect(fill.result).toEqual({ filled: true, ref: nameRef });
+    expect(rt.ctx.cdpCalls.some((c) => c.method === "type")).toBe(true);
+    const clear = await rt.executor.execute({ tool: "dom.clear", input: { ref: nameRef }, client, ctx: rt.ctx });
+    expect((clear.result as { cleared: boolean }).cleared).toBe(true);
+    expect(rt.ctx.cdpCalls.some((c) => c.method === "press")).toBe(true);
+  });
+
+  it("toggles a checkbox via a CDP click when CDP is available", async () => {
+    seedInteractive();
+    document.body.innerHTML += `<input id="chk" type="checkbox" />`;
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#chk" }, client, ctx: rt.ctx });
+    const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
+    const result = await rt.executor.execute({ tool: "dom.setChecked", input: { ref, checked: true }, client, ctx: rt.ctx });
+    // The mock CDP click only records the call, it does not toggle the
+    // jsdom checkbox, so the read-back state is false here. In a real
+    // browser the CDP click toggles it. The wiring assertion is the call.
+    expect(typeof (result.result as { checked: boolean }).checked).toBe("boolean");
+    expect(rt.ctx.cdpCalls.some((c) => c.method === "click")).toBe(true);
+  });
+
   it("drags between elements with a full pointer/drag sequence", async () => {
     seedInteractive();
     const rt = createTestRuntime();

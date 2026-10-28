@@ -29,6 +29,8 @@ export type PageOp =
   | { op: "select"; ref: string; value?: string; label?: string }
   | { op: "setChecked"; ref: string; checked: boolean }
   | { op: "setRadio"; ref: string }
+  | { op: "checkedState"; ref: string }
+  | { op: "scrollState" }
   | { op: "setValue"; ref: string; value: string }
   | { op: "clear"; ref: string }
   | { op: "submit"; ref: string; expectedAction?: string }
@@ -758,6 +760,14 @@ export function pageAgent(request: PageOp): any {
       el.value = chosen.value;
       fireInput(el);
       return { selected: true, value: el.value };
+    }
+    case "checkedState": {
+      const el = resolve(request.ref) as HTMLInputElement | null;
+      if (!el) return { error: "STALE_ELEMENT" };
+      return { checked: el.checked };
+    }
+    case "scrollState": {
+      return { scrollY: window.scrollY, scrollHeight: doc.body.scrollHeight };
     }
     case "setChecked": {
       const el = resolve(request.ref) as HTMLInputElement | null;

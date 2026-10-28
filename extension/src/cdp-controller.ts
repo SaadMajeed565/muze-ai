@@ -24,11 +24,19 @@ const CDP_VERSION = "1.3";
  * local; a lingering debugger banner and an open privileged channel are
  * not, so the re-attach cost is the right side of that trade.
  */
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class ChromeCdpCapability implements CdpCapability {
   private readonly attachedTabs = new Set<number>();
   private readonly attachingPromises = new Map<number, Promise<void>>();
   /** CDP calls currently running per tab; auto-detach fires only at zero. */
   private readonly inflight = new Map<number, number>();
+  /** Last genuine mouse position per tab, so a move/click can travel there
+   * instead of teleporting. A site that watches mouse behaviour can tell a
+   * single instant jump apart from a human move, even though both are
+   * isTrusted. Unknown on first use in a tab: the first move goes straight
+   * to its target, and later moves travel from the tracked position. */
+  private readonly lastMouse = new Map<number, { x: number; y: number }>();
 
   constructor() {
     if (typeof chrome !== "undefined") {
@@ -41,6 +49,7 @@ export class ChromeCdpCapability implements CdpCapability {
         chrome.tabs.onRemoved.addListener((tabId) => {
           this.attachedTabs.delete(tabId);
           this.inflight.delete(tabId);
+          this.lastMouse.delete(tabId);
         });
       }
     }
@@ -92,18 +101,47 @@ export class ChromeCdpCapability implements CdpCapability {
     }
   }
 
-  async click(tabId: number, x: number, y: number, button: "left" | "right" | "middle" = "left", clickCount = 1): Promise<void> {
-    await this.withTab(tabId, async () => {
-      const target = { tabId };
-      const cdpButton = button === "right" ? "right" : button === "middle" ? "middle" : "left";
-
-      // Move -> Press -> Release
+  /** Move the genuine cursor to a point, travelling in steps from the last
+   * tracked position when one is known. Must run inside withTab. */
+  private async moveInside(tabId: number, x: number, y: number): Promise<void> {
+    const target = { tabId };
+    const from = this.lastMouse.get(tabId);
+    if (!from) {
       await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
         x: Math.round(x),
         y: Math.round(y),
       });
+    } else {
+      const steps = 6;
+      for (let i = 1; i <= steps; i++) {
+        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: Math.round(from.x + ((x - from.x) * i) / steps),
+          y: Math.round(from.y + ((y - from.y) * i) / steps),
+        });
+        await delay(12);
+      }
+    }
+    this.lastMouse.set(tabId, { x, y });
+  }
 
+  async move(tabId: number, x: number, y: number): Promise<void> {
+    await this.withTab(tabId, async () => {
+      await this.moveInside(tabId, x, y);
+    });
+  }
+
+  async click(tabId: number, x: number, y: number, button: "left" | "right" | "middle" = "left", clickCount = 1): Promise<void> {
+    await this.withTab(tabId, async () => {
+      const target = { tabId };
+      const cdpButton = button === "right" ? "right" : button === "middle" ? "middle" : "left";
+
+      // Travel -> hover dwell -> press -> hold -> release. The old version
+      // sent move/press/release back to back with no timing, which is a
+      // recognisably non-human sequence even though every event isTrusted.
+      await this.moveInside(tabId, x, y);
+      await delay(50);
       await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
         type: "mousePressed",
         x: Math.round(x),
@@ -111,7 +149,7 @@ export class ChromeCdpCapability implements CdpCapability {
         button: cdpButton,
         clickCount,
       });
-
+      await delay(60);
       await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
         type: "mouseReleased",
         x: Math.round(x),
@@ -119,6 +157,7 @@ export class ChromeCdpCapability implements CdpCapability {
         button: cdpButton,
         clickCount,
       });
+      this.lastMouse.set(tabId, { x, y });
     });
   }
 
@@ -194,6 +233,7 @@ export class ChromeCdpCapability implements CdpCapability {
         button: "left",
         clickCount: 1,
       });
+      this.lastMouse.set(tabId, { x: toX, y: toY });
     });
   }
 
