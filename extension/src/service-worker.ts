@@ -1,6 +1,6 @@
 import { REGISTRY_VERSION, UNIFIED_TOOL_NAMES, type BridgeEvent, type ToolDescriptor } from "../libs/tool-contracts/index.js";
 import { AuditLog, ApprovalBroker, PolicyEngine, RateLimiter } from "../libs/security/index.js";
-import { ToolExecutor, createToolRegistry } from "../libs/browser-engine/index.js";
+import { ChromeWorkingTabGroup, ToolExecutor, createToolRegistry } from "../libs/browser-engine/index.js";
 import { BridgeManager } from "./bridge-manager.js";
 import { ChromeBrowserContext } from "./chrome-context.js";
 import { ChromeOffscreenMessenger } from "./offscreen-messenger.js";
@@ -181,6 +181,9 @@ function getTaskRunner(): TaskRunner {
   }
   taskRunner = new TaskRunner({
     store,
+    // Automatic working tabs: a task's tabs join the "Muze AI" group
+    // while it runs, and are ungrouped (left open) when it ends.
+    workingGroup: new ChromeWorkingTabGroup(context),
     executeStep: async (tool, input, ctx) => {
       const result = await executor.execute({
         tool,

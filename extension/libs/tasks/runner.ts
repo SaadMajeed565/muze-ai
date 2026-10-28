@@ -108,9 +108,31 @@ export interface PreStepObservation {
   summary: string;
 }
 
+/**
+ * The working-tab group a task's tabs are moved into while it runs.
+ * Structural only, so the runner never imports the browser engine:
+ * the service worker supplies the real ChromeWorkingTabGroup, and
+ * tests supply a recording stub. Absent = no automatic grouping
+ * (the pre-existing behaviour, and what every existing runner test
+ * exercises).
+ */
+export interface WorkingTabGroupLike {
+  trackTab(taskId: string, tabId: number): Promise<void>;
+  finish(taskId: string): Promise<void>;
+}
+
 export interface RunnerDeps {
   store: TaskStore;
   executeStep: (tool: string, input: Record<string, unknown>, ctx: StepContext) => Promise<StepExecutionResult>;
+  /**
+   * Automatic "Muze AI" tab grouping. When present, every tab a step
+   * touches is moved into the working group, and finish() is called
+   * exactly once when the task reaches a terminal status (done,
+   * failed, partial, cancelled) — never on pause or waiting-approval,
+   * so a resumed task keeps its group. finish() ungroups the tabs
+   * and leaves them open; it never closes a tab.
+   */
+  workingGroup?: WorkingTabGroupLike;
   executeCompensation?: (step: TaskStep) => Promise<void>;
   audit: (entry: RunnerAuditEntry) => void;
   progress: (view: TaskView) => void;
@@ -363,6 +385,30 @@ export class TaskRunner {
     const step = task.steps[stepIndex];
     if (!step) throw new Error(`task ${task.id} has no step ${stepIndex}`);
     return step;
+  }
+
+  /**
+   * Working-group helpers. Grouping is cosmetic, so both swallow
+   * errors: a grouping failure must never fail or pause a task step,
+   * and finish() is idempotent (the group itself clears its tracking
+   * on first finish, so a second call is a no-op).
+   */
+  private async trackWorkingTab(taskId: string, tabId: number | null): Promise<void> {
+    if (tabId === null || !this.deps.workingGroup) return;
+    try {
+      await this.deps.workingGroup.trackTab(taskId, tabId);
+    } catch {
+      // Cosmetic only; the step still runs on the ungrouped tab.
+    }
+  }
+
+  private async finishWorkingGroup(taskId: string): Promise<void> {
+    if (!this.deps.workingGroup) return;
+    try {
+      await this.deps.workingGroup.finish(taskId);
+    } catch {
+      // Ungrouping is best-effort; tabs stay open either way.
+    }
   }
 
   /**
@@ -905,6 +951,8 @@ export class TaskRunner {
       decision: "cancelled",
       outcome: "success",
     });
+    // Cancelled is terminal: ungroup, keep tabs open.
+    await this.finishWorkingGroup(id);
     return toTaskView(saved);
   }
 
@@ -1004,6 +1052,9 @@ export class TaskRunner {
       task.updatedAt = task.completedAt;
       this.refreshSummary(task);
       this.setFinalReport(task);
+      // Done outside the run loop (for example via resolveUnknown):
+      // ungroup, keep tabs open.
+      await this.finishWorkingGroup(task.id);
     } else if (task.status !== "done") {
       task.status = "paused";
       task.updatedAt = this.now();
@@ -1069,7 +1120,20 @@ export class TaskRunner {
     return this.runTask(id, clientId, browserSessionId);
   }
 
+  /**
+   * Run loop entry point. The inner loop returns every outcome
+   * (paused, waiting, done, failed, partial, cancelled); only a
+   * terminal outcome ungroups the task's working tabs, and the
+   * tabs are always left open. A paused or waiting task keeps its
+   * group, so a resume continues visibly in the same group.
+   */
   async runTask(id: string, clientId: string, browserSessionId?: string): Promise<TaskView> {
+    const view = await this.runTaskInner(id, clientId, browserSessionId);
+    if (isTerminal(view.status)) await this.finishWorkingGroup(id);
+    return view;
+  }
+
+  private async runTaskInner(id: string, clientId: string, browserSessionId?: string): Promise<TaskView> {
     const all = await this.loadAll();
     let task = this.findOrThrow(all, id);
     this.assertClient(task, clientId);
@@ -1427,6 +1491,9 @@ export class TaskRunner {
     const consequential = this.isConsequential(step.tool);
     const input = step.input as Record<string, unknown>;
     const tabId = typeof input.tabId === "number" && Number.isInteger(input.tabId) ? input.tabId : null;
+    // Working group: the tab this step touches joins the "Muze AI"
+    // group before it runs, so the group is visible while Muze works.
+    await this.trackWorkingTab(task.id, tabId);
     // Phase 1: this step runs under plan approval only when an active
     // approval covers it (checked by the run loop before calling here).
     const planApproved = this.activeApproval(task) !== null && this.stepBoundsReason(step, this.activeApproval(task)) === null;
@@ -1755,6 +1822,13 @@ export class TaskRunner {
       step.state = "running";
       if (step.startedAt === null) step.startedAt = this.now();
       step.attempts += 1;
+    }
+    // Working group, tracked sequentially first: parallel trackTab
+    // calls could otherwise each create their own "Muze AI" group.
+    for (const step of batch) {
+      const input = step.input as Record<string, unknown>;
+      const tabId = typeof input.tabId === "number" && Number.isInteger(input.tabId) ? input.tabId : null;
+      await this.trackWorkingTab(task.id, tabId);
     }
     task.status = "running";
     task.updatedAt = this.now();

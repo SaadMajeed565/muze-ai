@@ -1,4 +1,5 @@
 export * from "./context.js";
+export * from "./working-tab-group.js";
 export * from "./registry.js";
 export * from "./executor.js";
 export * from "./registry-factory.js";
