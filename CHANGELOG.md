@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — bridge session fix (extension only, not yet live-proven)
+
+- Fixed a WebSocket handshake 400 on `/bridge`: the extension dialled the bare gateway URL, but the gateway routes `/bridge` to the SessionDO named by the `session` query parameter and returns 400 without it. `connectGateway` now dials `{gateway}?session=<gatewaySessionId>` (session id is a routing identifier, not a credential; the device token is still the first WebSocket message) and does not dial at all when no session id is stored, instead of looping on a guaranteed 400. No gateway change, no version bump yet — bump to 0.5.1 only after this fix is proven live in a real browser.
+
 ## 0.5.0 — task plan approval, dry-run, progress, parallel read-only, discovery v2, deprecation, health (additive, no migration needed)
 
 Protocol version unchanged at 2.0.0, registry version 2.2.0 -> 2.3.0, product version 0.4.1 -> 0.5.0. No tool removed, no existing tool or parameter changed, no approval weakened. Old clients ignore the new metadata and tools and keep working. Registry 3.0 removal of deprecated actions is NOT enabled in this release (see Known gaps).

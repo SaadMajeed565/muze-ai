@@ -175,4 +175,8 @@ describe("normalizeBridgeUrl", () => {
   it("preserves an explicit non-root path and query", () => {
     expect(normalizeBridgeUrl("http://127.0.0.1:8788/custom?x=1")).toBe("ws://127.0.0.1:8788/custom?x=1");
   });
+
+  it("preserves the bridge session query the gateway routes on (0.5.1 regression)", () => {
+    expect(normalizeBridgeUrl("https://gw.example.com?session=abc-123")).toBe("wss://gw.example.com/bridge?session=abc-123");
+  });
 });

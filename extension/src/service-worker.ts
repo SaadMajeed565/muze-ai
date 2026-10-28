@@ -494,7 +494,18 @@ async function connectGateway(settings: BridgeSettings): Promise<void> {
 
   gatewayAuthRequired = false;
   gatewayAuthToken = "";
-  manager.connectGateway(url, settings.gatewayToken);
+  // Bridge routing (0.5.1 fix): the gateway routes /bridge to the SessionDO
+  // named by the `session` query parameter and returns 400 without it, so a
+  // bare gateway URL can never connect, even with a valid token. The session
+  // id is a routing identifier, not a credential; the device token is still
+  // sent as the first WebSocket message. Without a session id, do not dial
+  // a URL that is guaranteed to fail with a handshake 400.
+  if (!settings.gatewaySessionId) {
+    markGatewayAuthRequired(settings.gatewayToken, "Sign in again to link this browser session");
+    return;
+  }
+  const bridgeUrl = `${url}?session=${encodeURIComponent(settings.gatewaySessionId)}`;
+  manager.connectGateway(bridgeUrl, settings.gatewayToken);
   })().finally(() => { connectGatewayInFlight = null; });
   return connectGatewayInFlight;
 }
