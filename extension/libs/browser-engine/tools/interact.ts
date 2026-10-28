@@ -264,14 +264,29 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(domSelect, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; frameId?: number; ref: string; value?: string; label?: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    // Normalise before any lookup: an empty value is a missing value,
+    // not a value to match (upstream callers send value:"" for a
+    // label-only select). Without this, "" shadows the label in every
+    // lookup below and in the page agent, which is exactly how the
+    // retest3 label call ("Three", value left at "2") returned
+    // selected:false: the lookup matched nothing and never tried the
+    // label. The page agent applies the same rule, so this is belt and
+    // braces at the handler boundary, not the only place it is fixed.
+    const value = data.value !== undefined && data.value !== "" ? data.value : undefined;
+    const label = data.label !== undefined && data.label !== "" ? data.label : undefined;
     if (isCdpAvailable(ctx)) {
       // CDP has no select command, so a select is driven the way a user
       // drives it: focus it, then step through options with real arrow
       // keys, then verify the value actually changed. Multiple selects
-      // and unfindable options keep the DOM path / the not-selected
-      // result, because arrow-key stepping cannot express them.
+      // keep the DOM path, because arrow-key stepping cannot express
+      // them. An unfindable option NO LONGER returns selected:false
+      // here: it falls through to the DOM path, whose lookup (visible
+      // text, value-miss fallback to label) is the authority on whether
+      // the option exists — the old short-circuit returned false for a
+      // label the stepping lookup had not matched, without ever trying
+      // the DOM lookup.
       const before = await runPageOp<{ selectedIndex: number; optionIndex: number; value: string; multiple: boolean; notSelect?: boolean; tagName?: string }>(
-        ctx, tab.id!, { op: "selectIndex", ref: data.ref, value: data.value, label: data.label }, data.frameId, signal,
+        ctx, tab.id!, { op: "selectIndex", ref: data.ref, value, label }, data.frameId, signal,
       );
       if (before.notSelect) {
         throw new ToolErrorException(
@@ -285,7 +300,7 @@ export const interactToolHandlers: RegisteredTool[] = [
         const steps = Math.abs(before.optionIndex - before.selectedIndex);
         for (let i = 0; i < steps; i++) await ctx.cdp!.press(tab.id!, key, 0);
         const after = await runPageOp<{ selectedIndex: number; optionIndex: number; value: string }>(
-          ctx, tab.id!, { op: "selectIndex", ref: data.ref, value: data.value, label: data.label }, data.frameId, signal,
+          ctx, tab.id!, { op: "selectIndex", ref: data.ref, value, label }, data.frameId, signal,
         );
         if (after.optionIndex >= 0 && after.selectedIndex === after.optionIndex) {
           return { selected: true as const, value: after.value };
@@ -295,11 +310,11 @@ export const interactToolHandlers: RegisteredTool[] = [
         // the DOM path below rather than report a wrong selection.
       } else if (!before.multiple && before.optionIndex >= 0 && before.optionIndex === before.selectedIndex) {
         return { selected: true as const, value: before.value };
-      } else if (before.optionIndex < 0) {
-        return { selected: false as const, value: before.value };
       }
+      // optionIndex < 0, or a multiple select, or stepping missed:
+      // fall through to the DOM path below.
     }
-    return runPageOp(ctx, tab.id!, { op: "select", ref: data.ref, value: data.value, label: data.label }, data.frameId, signal);
+    return runPageOp(ctx, tab.id!, { op: "select", ref: data.ref, value, label }, data.frameId, signal);
   }),
 
   defineTool(domSetChecked, async (input, { ctx, signal }) => {
@@ -309,6 +324,11 @@ export const interactToolHandlers: RegisteredTool[] = [
       // A toggle is a click: only click when the state actually differs,
       // exactly like the synthetic path, then read the state back. A
       // cross-origin sub-frame falls through to the synthetic path.
+      // Note (retest3): check and uncheck take this SAME branch — there
+      // is no uncheck-only code path to fix. The observed check-pass /
+      // uncheck-timeout split is the CDP mouse sequence split (uncheck
+      // was the second mouse sequence on its tab, so it took the old
+      // interpolated move); see cdp-controller.ts.
       const before = await runPageOp<{ checked: boolean }>(ctx, tab.id!, { op: "checkedState", ref: data.ref }, data.frameId, signal);
       if (before.checked !== data.checked) {
         const clicked = await cdpClickElement(ctx, tab.id!, data.ref, data.frameId, signal);
@@ -441,12 +461,31 @@ export const interactToolHandlers: RegisteredTool[] = [
     const data = input as { tabId?: number; frameId?: number; fromRef: string; toRef: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
     if (isCdpAvailable(ctx)) {
-      const from = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
-        ctx, tab.id!, { op: "topViewportBox", ref: data.fromRef }, data.frameId, signal,
+      // Both boxes in ONE page op (topViewportBoxes): the old code
+      // measured from and to in two separate ops, and each
+      // topViewportBox scrolls its element into view, so the from
+      // coordinates were measured in a different scroll state than the
+      // to coordinates, and a ref replaced between the two calls failed
+      // as a bare STALE_ELEMENT naming neither ref. A stale ref is
+      // still never silently re-resolved to a different element: it
+      // fails here, naming exactly which ref went stale, and the
+      // caller re-observes to get a fresh ref and retries. That
+      // caller-side re-observe requirement is unchanged and is the
+      // only remedy for a genuinely replaced element (e.g. Wikipedia's
+      // search component replacing its input on re-render).
+      type Box = { viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean; stale?: false } | { stale: true };
+      const { boxes } = await runPageOp<{ boxes: Box[] }>(
+        ctx, tab.id!, { op: "topViewportBoxes", refs: [data.fromRef, data.toRef] }, data.frameId, signal,
       );
-      const to = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
-        ctx, tab.id!, { op: "topViewportBox", ref: data.toRef }, data.frameId, signal,
-      );
+      const staleIndex = boxes.findIndex((b) => (b as { stale?: boolean }).stale);
+      if (staleIndex >= 0) {
+        const staleRef = staleIndex === 0 ? data.fromRef : data.toRef;
+        throw new ToolErrorException(
+          "STALE_ELEMENT",
+          `dom.drag: ${staleIndex === 0 ? "fromRef" : "toRef"} ${staleRef} is stale (its element was replaced or removed after it was observed) — re-observe to get a fresh ref, then retry. Refs are never silently re-resolved to a different element.`,
+        );
+      }
+      const [from, to] = boxes as { viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }[];
       if (!from.crossOrigin && !to.crossOrigin) {
         await ctx.cdp!.drag(tab.id!, from.viewportX + from.width / 2, from.viewportY + from.height / 2, to.viewportX + to.width / 2, to.viewportY + to.height / 2);
         // dom.drag's strict output schema has no method/hardware fields.
@@ -562,8 +601,11 @@ export const interactToolHandlers: RegisteredTool[] = [
   }),
 
   defineTool(formsSetFile, async (input, { ctx, signal }) => {
-    const data = input as { tabId?: number; frameId?: number; selector: string; fileId?: string; files?: Array<{ name: string; mimeType: string; dataBase64: string }> };
+    const data = input as { tabId?: number; frameId?: number; selector?: string; ref?: string; fileId?: string; files?: Array<{ name: string; mimeType: string; dataBase64: string }> };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    if (!data.selector && !data.ref) {
+      throw new ToolErrorException("INVALID_INPUT", "Either selector or ref must be provided");
+    }
     if (!data.fileId && (!data.files || data.files.length === 0)) {
       throw new ToolErrorException("INVALID_INPUT", "Either fileId or files must be provided");
     }
@@ -576,7 +618,14 @@ export const interactToolHandlers: RegisteredTool[] = [
     // Inline files only: the store path carries no inline base64. The cap
     // matches the granular contract (35,000,000 base64 characters per file).
     if (!data.fileId) assertInlineFileCaps(files, SET_FILE_BASE64_LIMIT, SET_FILE_BASE64_LIMIT, "forms.setFile");
-    return runPageOp(ctx, tab.id!, { op: "setFile", selector: data.selector, files }, data.frameId, signal);
+    // Selector wins when both are given (previous behaviour); a ref-only
+    // call resolves through the page agent's exact ref registry, never by
+    // feeding the opaque ref string to querySelector (which matches
+    // nothing and misreports a live element as STALE_ELEMENT).
+    if (data.selector) {
+      return runPageOp(ctx, tab.id!, { op: "setFile", selector: data.selector, files }, data.frameId, signal);
+    }
+    return runPageOp(ctx, tab.id!, { op: "setFileByRef", ref: data.ref!, files }, data.frameId, signal);
   }),
 
   defineTool(formsFill, async (input, exec) => {
@@ -648,12 +697,33 @@ export const interactToolHandlers: RegisteredTool[] = [
   defineTool(screenshotsVisible, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; format: "png" | "jpeg"; quality: number };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    if (!tab.active && ctx.cdp?.available() && ctx.cdp.captureScreenshot) {
-      // CDP is available here, so a capture failure is thrown explicitly
-      // rather than silently falling back to captureVisibleTab.
-      const dataUrl = await ctx.cdp.captureScreenshot(tab.id!, undefined, data.format, data.quality);
-      const vp = await runPageOp<{ width: number; height: number }>(ctx, tab.id!, { op: "getViewport" }, undefined, signal).catch(() => ({ width: 1280, height: 800 }));
-      return { dataUrl, format: data.format, width: vp.width, height: vp.height };
+    if (ctx.cdp?.available() && ctx.cdp.captureScreenshot) {
+      // One capture path for active and background tabs alike. The old
+      // code used CDP (no clip, whole-surface capture) only for
+      // background tabs and chrome.tabs.captureVisibleTab + an offscreen
+      // decode round-trip for active tabs, so the same call was fast on
+      // one tab and hung to the 30s executor limit on another — the
+      // page-dependent visible timeout. The CDP viewport clip is the
+      // same path screenshots.element already uses successfully: it
+      // needs no tab activation and no offscreen decode. Only a CDP
+      // TIMEOUT falls back to the tabs capture (a background tab whose
+      // surface is not painting stalls CDP, but the tabs capture
+      // activates the tab and usually succeeds); any other CDP failure
+      // is thrown explicitly rather than silently masked.
+      try {
+        const vp = await runPageOp<{ width: number; height: number; devicePixelRatio: number }>(ctx, tab.id!, { op: "getViewport" }, undefined, signal).catch(() => ({ width: 1280, height: 800, devicePixelRatio: 1 }));
+        const dpr = vp.devicePixelRatio > 0 ? vp.devicePixelRatio : 1;
+        const dataUrl = await ctx.cdp.captureScreenshot(
+          tab.id!,
+          { x: 0, y: 0, width: Math.max(1, vp.width), height: Math.max(1, vp.height), scale: dpr },
+          data.format,
+          data.quality,
+        );
+        return { dataUrl, format: data.format, width: Math.round(vp.width * dpr), height: Math.round(vp.height * dpr) };
+      } catch (error) {
+        const isTimeout = ToolErrorException.is(error) ? error.code === "TIMEOUT" : /did not complete within/i.test(error instanceof Error ? error.message : String(error));
+        if (!isTimeout) throw error;
+      }
     }
     const shot = await ctx.captureVisibleTab(tab.id!, { format: data.format, quality: data.quality });
     return { dataUrl: shot.dataUrl, format: data.format, width: shot.width, height: shot.height };
@@ -722,7 +792,14 @@ export const interactToolHandlers: RegisteredTool[] = [
       quality: data.quality,
       maxHeight: data.maxHeight,
     });
-    return { dataUrl: shot.dataUrl, format: data.format, width: shot.width, height: shot.height, pages: shot.pages };
+    return {
+      dataUrl: shot.dataUrl,
+      format: data.format,
+      width: shot.width,
+      height: shot.height,
+      pages: shot.pages,
+      ...(shot.partial ? { partial: true as const, partialReason: shot.partialReason ?? "Captured height was capped; the image covers only the top of the page" } : {}),
+    };
   }),
 
   defineTool(screenshotsViewport, async (input, { ctx, signal }) => {

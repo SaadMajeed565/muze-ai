@@ -331,7 +331,7 @@ export interface BrowserContext {
   captureFullPage?(
     tabId: number,
     options: { format: "png" | "jpeg"; quality?: number; maxHeight: number },
-  ): Promise<{ dataUrl: string; width: number; height: number; pages: number }>;
+  ): Promise<{ dataUrl: string; width: number; height: number; pages: number; partial?: boolean; partialReason?: string }>;
 
   // Browser info
   getBrowserInfo(): Promise<BrowserInfoData>;

@@ -119,7 +119,9 @@ describe("discovery v2 (Phase 2)", () => {
 describe("deprecation (Phase 3)", () => {
   it("navigate tab/window actions are deprecated with use-instead, URL/sync actions are not", () => {
     expect(deprecatedUnifiedAction("navigate", "list", "tab")?.useInstead).toBe("tabs.list");
-    expect(deprecatedUnifiedAction("navigate", "close", "window")?.useInstead).toBe("tabs.close");
+    expect(deprecatedUnifiedAction("navigate", "close", "window")?.useInstead).toBe("windows.close");
+    expect(deprecatedUnifiedAction("navigate", "list", "window")?.useInstead).toBe("windows.list");
+    expect(deprecatedUnifiedAction("navigate", "create", "window")?.useInstead).toBe("windows.create");
     expect(deprecatedUnifiedAction("navigate", "update", "window")?.useInstead).toBe("windows.update");
     expect(deprecatedUnifiedAction("navigate", "open", "url")).toBeNull();
     expect(deprecatedUnifiedAction("navigate", "wait", "sync:network_idle")).toBeNull();

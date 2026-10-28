@@ -156,7 +156,7 @@ async function runStep(exec: Exec, tabId: number, frameId: number | undefined, s
         result = await exec.invoke("dom.clear", { tabId, frameId, ref });
         break;
       case "select":
-        result = await exec.invoke("dom.select", { tabId, frameId, ref, value: step.value ?? "" });
+        result = await exec.invoke("dom.select", { tabId, frameId, ref, value: step.value ?? "", ...(step.label ? { label: step.label } : {}) });
         break;
       case "check":
         if (step.checked === false) result = await exec.invoke("dom.setChecked", { tabId, frameId, ref, checked: false });
@@ -314,13 +314,21 @@ export const unifiedToolHandlers: RegisteredTool[] = [
     const category = data.category;
     const action = data.action;
 
+    // Window-branch actions (list/create/update/close) under an explicit
+    // category=window must reach the window branch, not the tab branch:
+    // list/create/close are tab actions too, so the old tab-first check
+    // swallowed every windows call the gateway forwards as navigate
+    // {category: window} and returned tabs instead of WindowInfo shapes.
+    // Tab-only actions under category=window still reach the tab branch.
+    const WINDOW_BRANCH_ACTIONS = ["list", "create", "update", "close"];
     const isTab =
-      category === "tab" ||
-      [
-        "list", "get", "active", "create", "close", "activate", "switch",
-        "duplicate", "discard", "move", "pin", "mute", "zoom", "group", "ungroup",
-        "save_session", "restore_session", "organize",
-      ].includes(action);
+      (category === "tab" ||
+        [
+          "list", "get", "active", "create", "close", "activate", "switch",
+          "duplicate", "discard", "move", "pin", "mute", "zoom", "group", "ungroup",
+          "save_session", "restore_session", "organize",
+        ].includes(action)) &&
+      !(category === "window" && WINDOW_BRANCH_ACTIONS.includes(action));
 
     const isWindow = category === "window" || action === "update";
     const isSync = category === "sync" || Boolean(data.for);
@@ -360,6 +368,20 @@ export const unifiedToolHandlers: RegisteredTool[] = [
         case "zoom": return exec.invoke("tabs.setZoom", { tabId: data.tabId, zoom: data.zoom ?? data.level ?? 1 });
         case "group": return exec.invoke("tabs.group", { tabIds: data.tabIds ?? [], title: data.title });
         case "ungroup": return exec.invoke("tabs.ungroup", { tabIds: data.tabIds ?? [] });
+        case "open": {
+          // Tab open: with a tabId it navigates that tab (tabs.navigate —
+          // the same target the gateway's tabs.navigate adaptation lands
+          // on); without one it opens a new tab (tabs.create).
+          if (typeof data.tabId === "number") return exec.invoke("tabs.navigate", { tabId: data.tabId, url: data.url });
+          return exec.invoke("tabs.create", { url: data.url, pinned: data.pinned ?? false, groupId: data.groupId, active: data.active ?? true });
+        }
+        // Tab reload maps to tabs.reload, not navigation.reload: the tab
+        // branch dispatches to tabs.* throughout, unified tabs reload
+        // already maps to tabs.reload, and the gateway rewrites unified
+        // tabs reload to exactly this form — so both spellings reload
+        // the same way. URL-branch reload (no category / category=url)
+        // still maps to navigation.reload, unchanged.
+        case "reload": return exec.invoke("tabs.reload", { tabId: data.tabId, bypassCache: data.bypassCache ?? false });
         case "save_session": {
           if (!exec.approvalValidated) {
             const dry = await exec.invoke<{ requiresApproval?: boolean }>("workflows.saveSession", { name: data.title ?? "session", windowId: data.windowId }, { dryRun: true });
@@ -381,7 +403,7 @@ export const unifiedToolHandlers: RegisteredTool[] = [
           }
           return exec.invoke("workflows.organizeTabs", { strategy: data.strategy === "prefix" ? "titlePrefix" : (data.strategy ?? "domain"), windowId: data.windowId, maxGroups: data.maxGroups ?? 5 });
         }
-        default: throw new ToolErrorException("INVALID_INPUT", `Unknown tab navigate action "${action}". Valid: list, get, active, search, create, close, activate, duplicate, discard, move, pin, mute, zoom, group, ungroup, save_session, restore_session, organize`);
+        default: throw new ToolErrorException("INVALID_INPUT", `Unknown tab navigate action "${action}". Valid: list, get, active, search, create, close, activate, duplicate, discard, move, pin, mute, zoom, group, ungroup, open, reload, save_session, restore_session, organize`);
       }
     }
 
@@ -420,11 +442,27 @@ export const unifiedToolHandlers: RegisteredTool[] = [
     }
 
     switch (data.action) {
-      case "open": return exec.invoke("navigation.open", { url: data.url, reuseActiveTab: data.reuseActiveTab ?? false, active: data.active ?? true, tabId });
+      case "open": {
+        // navigation.open's strict schema has no tabId field, and the
+        // gateway's tabs.navigate/navigation.open adaptation always
+        // carries tabId (undefined when the caller gave none). Forwarding
+        // that key made every open fail with "Unrecognized key: tabId"
+        // (the executor validates nested invokes in-process, so an
+        // undefined-valued unknown key still fails strict validation).
+        // A real tabId is not dropped: it routes to tabs.navigate, the
+        // tool that navigates an existing tab.
+        if (typeof tabId === "number") return exec.invoke("tabs.navigate", { tabId, url: data.url });
+        return exec.invoke("navigation.open", { url: data.url, reuseActiveTab: data.reuseActiveTab ?? false, active: data.active ?? true });
+      }
       case "back": return exec.invoke("navigation.back", { tabId });
       case "forward": return exec.invoke("navigation.forward", { tabId });
       case "reload": return exec.invoke("navigation.reload", { tabId, bypassCache: data.bypassCache ?? false });
-      case "search": return exec.invoke("navigation.search", { query: data.query ?? "", provider: data.provider ?? "duckduckgo", newTab: data.newTab ?? true, waitForLoad: data.waitForLoad ?? true, timeoutMs: data.timeoutMs ?? 10000, tabId });
+      // navigation.search's strict schema likewise has no tabId field, so
+      // the key is never forwarded. Search has no per-tab target in its
+      // contract (newTab opens a new tab, otherwise the active tab is
+      // navigated), so a tabId supplied here cannot be honoured by a
+      // more specific tool; it is dropped rather than failing the call.
+      case "search": return exec.invoke("navigation.search", { query: data.query ?? "", provider: data.provider ?? "duckduckgo", newTab: data.newTab ?? true, waitForLoad: data.waitForLoad ?? true, timeoutMs: data.timeoutMs ?? 10000 });
       case "wait": return exec.invoke("navigation.wait", { tabId, timeoutMs: data.timeoutMs ?? 10000, waitForNetworkIdle: data.waitForNetworkIdle ?? false, quietMs: data.quietMs ?? 300 });
       default: throw new ToolErrorException("INVALID_INPUT", `Unknown navigate action "${data.action}". Valid: open, back, forward, reload, search, wait (or category tab/window/sync)`);
     }
@@ -458,6 +496,11 @@ export const unifiedToolHandlers: RegisteredTool[] = [
     if (include.has("metadata")) {
       tasks.push(taskFor("metadata", "page.metadata", { tabId, frameId }, (r) => { out.metadata = r; }));
     }
+    // maxDepth/limit are forwarded as-is (possibly undefined): the observe
+    // schema deliberately has no default for them, so an omitted value lets
+    // each granular tool use its own default instead of observe's old
+    // 8/100, which exceeded page.outline's max 6 and page.find/dom.find's
+    // max 50 and failed validation. Explicit values are never clamped here.
     if (include.has("outline")) {
       tasks.push(taskFor("outline", "page.outline", { tabId, frameId, maxDepth: data.maxDepth }, (r) => {
         out.outline = r?.outline ?? r;
@@ -655,8 +698,15 @@ export const unifiedToolHandlers: RegisteredTool[] = [
       }
       case "set_file": {
         assertUnifiedFileCaps(data.files, "forms.setFile");
-        await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId }, "form.set_file");
-        return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId, files: data.files });
+        // The dry-run approval gate validates the granular input, so it
+        // must receive the SAME input the real invoke will: omitting
+        // `files` here made every inline-files call fail validation in
+        // the gate ("Either fileId or files must be provided") before
+        // the handler ever ran, while the fileId path passed. Likewise
+        // `ref` is passed through as a ref, not folded into `selector`:
+        // a ref is an opaque registry id, not a CSS selector.
+        await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, selector: data.selector, ref: data.ref, fileId: data.fileId, files: data.files }, "form.set_file");
+        return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, selector: data.selector, ref: data.ref, fileId: data.fileId, files: data.files });
       }
       case "submit": {
         await requireLegacyApproval(exec, "forms.submit", { tabId, frameId: data.frameId, formRef: data.formRef ?? data.ref, expectedAction: data.expectedAction }, "form.submit");
@@ -676,12 +726,16 @@ export const unifiedToolHandlers: RegisteredTool[] = [
     }
     if (data.action === "set_file") {
       assertUnifiedFileCaps(data.files, "forms.setFile");
-      await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId }, "submit.set_file");
+      // Same gate rule as form.set_file: the dry-run input must carry
+      // `files` (inline path) and `ref` as a ref, or validation in the
+      // gate fails before the handler runs / a live ref is misreported
+      // stale by feeding it to querySelector as a selector.
+      await requireLegacyApproval(exec, "forms.setFile", { tabId, frameId: data.frameId, selector: data.selector, ref: data.ref, fileId: data.fileId, files: data.files }, "submit.set_file");
     }
     switch (data.action) {
       case "submit": return exec.invoke("forms.submit", { tabId, frameId: data.frameId, formRef: data.formRef, expectedAction: data.expectedAction });
       case "upload": return exec.invoke("forms.upload", { tabId, frameId: data.frameId, ref: data.ref, files: data.files ?? [] });
-      case "set_file": return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, selector: data.selector ?? data.ref, fileId: data.fileId, files: data.files });
+      case "set_file": return exec.invoke("forms.setFile", { tabId, frameId: data.frameId, selector: data.selector, ref: data.ref, fileId: data.fileId, files: data.files });
       default: throw new ToolErrorException("INVALID_INPUT", `Unknown submit action "${data.action}". Valid: submit, upload, set_file`);
     }
   }),

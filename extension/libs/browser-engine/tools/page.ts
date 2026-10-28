@@ -135,7 +135,23 @@ export const pageToolHandlers: RegisteredTool[] = [
     const data = input as { tabId?: number; frameId?: number; query: string; caseSensitive: boolean; limit: number; contextChars: number };
     const tab = await requireScriptableTab(exec.ctx, data.tabId, exec.signal);
     const result = await runPageOp(exec.ctx, tab.id!, { op: "findText", query: data.query, caseSensitive: data.caseSensitive, limit: data.limit, contextChars: data.contextChars }, data.frameId, exec.signal);
-    return redactResult(result);
+    // Normalise to the declared output shape ({matches:[{index, text,
+    // context?}], total}). The page agent now returns this shape directly;
+    // the legacy shape ({matches:[{excerpt, index}], totalMatches}) is
+    // still mapped here so a stale agent payload can never again reach
+    // the executor's output validation as a schema failure. The schema
+    // itself is NOT weakened: a wrong shape is fixed, not papered over.
+    const raw = result as {
+      matches?: { index: number; text?: string; excerpt?: string; context?: string }[];
+      total?: number;
+      totalMatches?: number;
+    };
+    const matches = (raw.matches ?? []).map((m) => ({
+      index: m.index,
+      text: m.text ?? m.excerpt ?? "",
+      context: m.context ?? m.excerpt,
+    }));
+    return redactResult({ matches, total: raw.total ?? raw.totalMatches ?? matches.length });
   }),
 
   defineTool(pageTables, async (input, exec) => {

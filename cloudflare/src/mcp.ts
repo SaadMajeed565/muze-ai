@@ -225,6 +225,13 @@ const NAVIGATE_TAB_ACTIONS = new Set([
   "save_session", "restore_session", "organize",
 ]);
 
+/** Actions the navigate handler's window branch owns. Under an explicit
+ * category=window these beat the tab branch (mirrors the handler's guard
+ * in extension/libs/browser-engine/tools/unified.ts); without it, window
+ * list/create/close would resolve to tabs.* for scope, matching the old
+ * handler bug that returned tabs instead of WindowInfo shapes. */
+const NAVIGATE_WINDOW_ACTIONS = new Set(["list", "create", "update", "close"]);
+
 function entryToResolution(entry: { granularTool: string }, calledAs: string, action: string): UnifiedScopeResolution | null {
   if (entry.granularTool.startsWith("local:")) return null;
   return { granular: entry.granularTool, calledAs, action };
@@ -234,8 +241,10 @@ function resolveNavigate(d: Record<string, unknown>): UnifiedScopeResolution | n
   const action = asString(d.action);
   const category = asString(d.category);
   const forValue = asString(d.for);
-  // Handler order: tab, then window, then sync, then URL actions.
-  if (action !== undefined && (category === "tab" || NAVIGATE_TAB_ACTIONS.has(action))) {
+  // Handler order: tab, then window, then sync, then URL actions — except
+  // that window-branch actions under category=window go to the window
+  // branch (see NAVIGATE_WINDOW_ACTIONS above).
+  if (action !== undefined && (category === "tab" || NAVIGATE_TAB_ACTIONS.has(action)) && !(category === "window" && NAVIGATE_WINDOW_ACTIONS.has(action))) {
     const entry = resolveUnifiedAction("navigate", action, "tab") ?? resolveUnifiedAction("navigate", action);
     return entry ? entryToResolution(entry, "navigate", action) : null;
   }
@@ -635,7 +644,7 @@ function adaptLegacyToolCall(name: string, input: Record<string, unknown>): { na
     case "dom.clear":
       return { name: "act", input: { tabId: input.tabId, frameId: input.frameId, steps: [{ do: "clear", target: { ref: String(input.ref ?? "") } }] } };
     case "dom.select":
-      return { name: "act", input: { tabId: input.tabId, frameId: input.frameId, steps: [{ do: "select", target: { ref: String(input.ref ?? "") }, value: String(input.value ?? "") }] } };
+      return { name: "act", input: { tabId: input.tabId, frameId: input.frameId, steps: [{ do: "select", target: { ref: String(input.ref ?? "") }, value: String(input.value ?? ""), ...(typeof input.label === "string" && input.label !== "" ? { label: input.label } : {}) }] } };
     case "dom.setChecked":
       return { name: "act", input: { tabId: input.tabId, frameId: input.frameId, steps: [{ do: "check", target: { ref: String(input.ref ?? "") }, checked: Boolean(input.checked) }] } };
     case "dom.press":
@@ -656,7 +665,12 @@ function adaptLegacyToolCall(name: string, input: Record<string, unknown>): { na
       return { name: "navigate", input: { category: "tab", ...input } };
     case "tabs.navigate":
     case "navigation.open":
-      return { name: "navigate", input: { action: "open", url: input.url, tabId: input.tabId, reuseActiveTab: input.reuseActiveTab, active: input.active } };
+      // Omit tabId when the caller gave none: the extension's navigate
+      // handler used to forward the always-present (possibly undefined)
+      // key into navigation.open's strict schema, which rejects it with
+      // "Unrecognized key: tabId". A real tabId is kept — the handler
+      // routes an open with a tabId to tabs.navigate.
+      return { name: "navigate", input: { action: "open", url: input.url, ...(typeof input.tabId === "number" ? { tabId: input.tabId } : {}), reuseActiveTab: input.reuseActiveTab, active: input.active } };
     case "navigation.back":
       return { name: "navigate", input: { action: "back", tabId: input.tabId } };
     case "navigation.forward":
@@ -711,7 +725,11 @@ function adaptLegacyToolCall(name: string, input: Record<string, unknown>): { na
     case "forms.upload":
       return { name: "form", input: { phase: "upload", ref: input.ref, files: input.files, tabId: input.tabId, frameId: input.frameId } };
     case "forms.setFile":
-      return { name: "form", input: { phase: "set_file", ref: input.ref, selector: typeof input.selector === "string" ? input.selector : (typeof input.ref === "string" ? input.ref : undefined), fileId: input.fileId, files: input.files, tabId: input.tabId, frameId: input.frameId } };
+      // Do NOT fold ref into selector: a ref is an opaque registry id,
+      // not a CSS selector, and the granular handler resolves refs
+      // through the page agent while selectors go to querySelector.
+      // Folding made ref-only calls fail STALE_ELEMENT downstream.
+      return { name: "form", input: { phase: "set_file", ref: input.ref, selector: typeof input.selector === "string" ? input.selector : undefined, fileId: input.fileId, files: input.files, tabId: input.tabId, frameId: input.frameId } };
     case "submit":
       return { name: "form", input: { phase: (input.action as any) ?? "submit", ...input } };
     case "history.search":

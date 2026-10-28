@@ -10,6 +10,7 @@
 
 export type PageOp =
   | { op: "readPage"; offset: number; maxChars: number }
+  | { op: "readClipboard" }
   | { op: "metadata" }
   | { op: "outline"; maxDepth: number }
   | { op: "links"; limit: number; sameOriginOnly: boolean }
@@ -32,6 +33,7 @@ export type PageOp =
   | { op: "checkedState"; ref: string }
   | { op: "scrollState" }
   | { op: "topViewportBox"; ref: string }
+  | { op: "topViewportBoxes"; refs: string[] }
   | { op: "topBox"; ref: string }
   | { op: "selectIndex"; ref: string; value?: string; label?: string }
   | { op: "setValue"; ref: string; value: string }
@@ -56,6 +58,7 @@ export type PageOp =
   | { op: "waitForSelector"; selector: string; timeoutMs: number }
   | { op: "previewForm"; ref: string }
   | { op: "setFile"; selector: string; files: { name: string; mimeType: string; dataBase64: string }[] }
+  | { op: "setFileByRef"; ref: string; files: { name: string; mimeType: string; dataBase64: string }[] }
   | { op: "shadowRoots"; maxDepth: number }
   | { op: "a11yTree"; maxNodes: number; maxDepth: number; interactiveOnly: boolean }
   | { op: "snapshot"; maxNodes: number; maxDepth: number; interactiveOnly: boolean }
@@ -413,6 +416,55 @@ export function pageAgent(request: PageOp): any {
     return deepQueryAll();
   }
 
+  /** Shared select lookup for the select and selectIndex ops. An empty
+   * value is treated as absent (it is what a label-only call degrades
+   * to upstream), a non-empty value is tried first, and a label is
+   * tried whenever the value is absent or matched nothing. Label
+   * matching is by visible option text, never by value. */
+  function findSelectOption(
+    options: HTMLOptionElement[],
+    value: string | undefined,
+    label: string | undefined,
+  ): HTMLOptionElement | undefined {
+    const nonEmptyValue = value !== undefined && value !== "" ? value : undefined;
+    if (nonEmptyValue !== undefined) {
+      const byValue = options.find((o) => o.value === nonEmptyValue);
+      if (byValue) return byValue;
+    }
+    if (label !== undefined && label !== "") {
+      const wanted = label.trim();
+      const byText = options.find((o) => o.text.trim() === wanted);
+      if (byText) return byText;
+      return options.find((o) => o.text.trim().toLowerCase() === wanted.toLowerCase());
+    }
+    return undefined;
+  }
+
+  /** Top-viewport box of one element, shared by the single- and
+   * multi-ref ops. topViewportBox semantics: scroll into view first,
+   * then measure; the frame walk is same-origin only (crossOrigin). */
+  function topViewportBoxOf(el: HTMLElement, scrollFirst: boolean): { viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean } {
+    if (scrollFirst) el.scrollIntoView({ block: "center", inline: "center" });
+    const rect = el.getBoundingClientRect();
+    let topX = rect.left;
+    let topY = rect.top;
+    let win: Window = window;
+    while (win !== win.top) {
+      let frameEl: HTMLElement | null;
+      try {
+        frameEl = win.frameElement as HTMLElement | null;
+      } catch {
+        break;
+      }
+      if (!frameEl) break;
+      const fr = frameEl.getBoundingClientRect();
+      topX += fr.left;
+      topY += fr.top;
+      win = win.parent;
+    }
+    return { viewportX: topX, viewportY: topY, width: rect.width, height: rect.height, crossOrigin: win !== win.top };
+  }
+
   function matchBy(by: FindBy, value: string, role?: string, name?: string): Element[] {
     const lower = value.toLowerCase();
     switch (by) {
@@ -629,11 +681,31 @@ export function pageAgent(request: PageOp): any {
       const sel = window.getSelection();
       return { text: sel ? sel.toString().slice(0, 20000) : "" };
     }
+    case "readClipboard": {
+      // Runs in the page's content context (not the offscreen document,
+      // which is never focused, so navigator.clipboard.readText() there
+      // always fails with "Document is not focused"). With the extension's
+      // clipboardRead permission this succeeds whenever the tab's
+      // document is focused; a rejection propagates to the caller, which
+      // converts it to a clear focus-required error and reads nothing.
+      // Returning the promise is intentional: executeScript / the test
+      // context await the injected function's result.
+      return (navigator.clipboard.readText() as Promise<string>).then((text) => ({
+        text: text.slice(0, 100_000),
+        truncated: text.length > 100_000,
+      }));
+    }
     case "findText": {
       const body = ((doc.body as any)?.innerText ?? doc.body?.textContent ?? "") as string;
       const haystack = request.caseSensitive ? body : body.toLowerCase();
       const needle = request.caseSensitive ? request.query : request.query.toLowerCase();
-      const matches: { excerpt: string; index: number }[] = [];
+      // Shape must match page.find's declared output exactly
+      // ({matches:[{index, text, context?}], total}): the old shape
+      // ({matches:[{excerpt, index}], totalMatches}) failed the executor's
+      // output validation on the query path ("Tool page.find produced
+      // output that failed its schema"). text is the matched substring in
+      // its original case; context is the surrounding excerpt.
+      const matches: { index: number; text: string; context: string }[] = [];
       let from = 0;
       let total = 0;
       while (true) {
@@ -643,11 +715,15 @@ export function pageAgent(request: PageOp): any {
         if (matches.length < request.limit) {
           const start = Math.max(0, idx - request.contextChars);
           const end = Math.min(body.length, idx + needle.length + request.contextChars);
-          matches.push({ excerpt: body.slice(start, end).replace(/\s+/g, " ").trim(), index: idx });
+          matches.push({
+            index: idx,
+            text: body.slice(idx, idx + needle.length),
+            context: body.slice(start, end).replace(/\s+/g, " ").trim(),
+          });
         }
         from = idx + needle.length;
       }
-      return { matches, totalMatches: total };
+      return { matches, total };
     }
     case "tables": {
       const tableEls = deepQuerySelectorAll("table");
@@ -760,9 +836,15 @@ export function pageAgent(request: PageOp): any {
       // confusing ok:false. Fail with a typed error instead.
       if (el.tagName !== "SELECT" || !("options" in el)) return { error: "INVALID_INPUT" };
       const options = Array.from(el.options);
-      let chosen: HTMLOptionElement | undefined;
-      if (request.value !== undefined) chosen = options.find((o) => o.value === request.value);
-      else if (request.label !== undefined) chosen = options.find((o) => o.text.trim() === request.label!.trim());
+      // Lookup order, fixed for the retest3 label failure: a caller that
+      // normalises a missing value to "" (gateway act adaptation sends
+      // value:"" for a label-only select) must NOT let that empty value
+      // shadow the label, and a value that matches nothing must fall
+      // back to the label instead of reporting not-selected. Visible
+      // text is matched trimmed, with a case-insensitive fallback, so
+      // "Three" finds an option whose text is "Three" even when its
+      // value is "3" — value-only matching could never do that.
+      const chosen = findSelectOption(options, request.value, request.label);
       if (!chosen) return { selected: false, value: el.value };
       el.value = chosen.value;
       fireInput(el);
@@ -781,25 +863,36 @@ export function pageAgent(request: PageOp): any {
       // than click at the wrong top-viewport point.
       const el = resolve(request.ref) as HTMLElement | null;
       if (!el) return { error: "STALE_ELEMENT" };
-      if (request.op === "topViewportBox") el.scrollIntoView({ block: "center", inline: "center" });
-      const rect = el.getBoundingClientRect();
-      let topX = rect.left;
-      let topY = rect.top;
-      let win: Window = window;
-      while (win !== win.top) {
-        let frameEl: HTMLElement | null;
-        try {
-          frameEl = win.frameElement as HTMLElement | null;
-        } catch {
-          break;
+      return topViewportBoxOf(el, request.op === "topViewportBox");
+    }
+    case "topViewportBoxes": {
+      // Atomic dual measurement for dom.drag: the old handler measured
+      // from and to in two separate page ops, so the page could scroll
+      // (each topViewportBox scrolls its element into view) or re-render
+      // between the two measurements — the from coordinates were then
+      // measured in a different scroll state than the to coordinates,
+      // and a ref replaced between the two calls failed as a bare
+      // STALE_ELEMENT naming neither ref. Here both refs resolve in one
+      // injection: the from element is scrolled into view once, then
+      // both boxes are measured in that same scroll state. A stale ref
+      // is reported per position (staleIndex + staleRef), never silently
+      // re-resolved to a different element; the caller re-observes.
+      const boxes: ({ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean; stale: false } | { stale: true })[] = [];
+      for (let i = 0; i < request.refs.length; i++) {
+        const el = resolve(request.refs[i]) as HTMLElement | null;
+        if (!el) {
+          boxes.push({ stale: true });
+          continue;
         }
-        if (!frameEl) break;
-        const fr = frameEl.getBoundingClientRect();
-        topX += fr.left;
-        topY += fr.top;
-        win = win.parent;
+        // Scroll only the first element into view, once, before any
+        // measurement, so both boxes share one scroll state.
+        boxes.push({ ...topViewportBoxOf(el, i === 0), stale: false });
       }
-      return { viewportX: topX, viewportY: topY, width: rect.width, height: rect.height, crossOrigin: win !== win.top };
+      // Deliberately NOT returned as {error: "STALE_ELEMENT"}: runPageOp
+      // turns an error field into a bare STALE_ELEMENT that names neither
+      // ref. The per-box stale flags let the dom.drag handler throw a
+      // precise error naming exactly which ref went stale.
+      return { boxes };
     }
     case "selectIndex": {
       const el = resolve(request.ref) as HTMLSelectElement | null;
@@ -808,9 +901,12 @@ export function pageAgent(request: PageOp): any {
         return { selectedIndex: -1, optionIndex: -1, value: "", multiple: false, notSelect: true, tagName: el.tagName };
       }
       const options = Array.from(el.options);
-      let optionIndex = -1;
-      if (request.value !== undefined) optionIndex = options.findIndex((o) => o.value === request.value);
-      else if (request.label !== undefined) optionIndex = options.findIndex((o) => o.text.trim() === request.label!.trim());
+      // Same lookup as the select op (see findSelectOption): an empty
+      // value must not shadow a label, and a value miss must fall back
+      // to the label. A -1 here used to make dom.select return
+      // selected:false without ever trying the DOM path.
+      const found = findSelectOption(options, request.value, request.label);
+      const optionIndex = found ? options.indexOf(found) : -1;
       return { selectedIndex: el.selectedIndex, optionIndex, value: el.value, multiple: el.multiple };
     }
     case "checkedState": {
@@ -1312,6 +1408,30 @@ export function pageAgent(request: PageOp): any {
     }
     case "setFile": {
       const el = (deepQuerySelectorAll(request.selector)[0] ?? null) as HTMLInputElement | null;
+      if (!el) return { error: "STALE_ELEMENT" };
+      if (el.tagName !== "INPUT" || el.type !== "file") return { error: "UNSUPPORTED" };
+      const transfer = new DataTransfer();
+      for (const file of request.files) {
+        const binary = atob(file.dataBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        transfer.items.add(new File([bytes], file.name, { type: file.mimeType || "application/octet-stream" }));
+      }
+      el.files = transfer.files;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { set: true, files: Array.from(el.files).map((f) => ({ name: f.name, mimeType: f.type || "application/octet-stream", size: f.size })) };
+    }
+    case "setFileByRef": {
+      // The ref path exists because a ref is an opaque registry id
+      // (e.g. "r3xab"), NOT a CSS selector: passing it to
+      // querySelectorAll silently matches nothing and reports
+      // STALE_ELEMENT even for a live element — exactly the unified
+      // submit set_file failure. resolve() is an exact registry lookup
+      // for the element the ref was minted for: a dead/detached ref
+      // still returns null and still reports STALE_ELEMENT, so a stale
+      // ref is never silently re-resolved to a different element.
+      const el = resolve(request.ref) as HTMLInputElement | null;
       if (!el) return { error: "STALE_ELEMENT" };
       if (el.tagName !== "INPUT" || el.type !== "file") return { error: "UNSUPPORTED" };
       const transfer = new DataTransfer();

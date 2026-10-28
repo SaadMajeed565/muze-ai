@@ -227,9 +227,10 @@ export interface DeprecatedActionInfo {
  * registry 3.0, and only with live-usage evidence — see the Phase 4
  * removal guard in the report). Returns null for non-deprecated actions.
  *
- * - navigate tab/window actions: any tab action (the handler's tab branch
- *   wins even under category=window), plus window update. URL and sync
- *   actions are NOT deprecated.
+ * - navigate tab/window actions: any tab action, plus the window-branch
+ *   actions (list/create/update/close under category=window, which the
+ *   handler routes to windows.*). Tab-only actions under category=window
+ *   still route to tabs.*. URL and sync actions are NOT deprecated.
  * - data devtools / clipboard domains: every action in those domains.
  *   data bookmarks/history/downloads/files actions are NOT deprecated.
  */
@@ -242,6 +243,9 @@ export function deprecatedUnifiedAction(
     if (domain === "tab" || domain === "window") {
       if (action === "update") {
         return { deprecated: true, useInstead: "windows.update", note: "Deprecated: navigate window update is superseded by windows.update; it still works in 2.x and will be removed in registry 3.0." };
+      }
+      if (domain === "window" && (action === "list" || action === "create" || action === "close")) {
+        return { deprecated: true, useInstead: `windows.${action}`, note: `Deprecated: navigate window action "${action}" is superseded by windows.${action}; it still works in 2.x and will be removed in registry 3.0.` };
       }
       if (NAVIGATE_TAB_ACTIONS.has(action)) {
         const useInstead = action === "switch" ? "tabs.activate" : action === "zoom" ? "tabs.setZoom" : `tabs.${action}`;

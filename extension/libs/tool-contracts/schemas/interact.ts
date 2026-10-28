@@ -489,7 +489,8 @@ export const formsSetFile: ToolDefinition = {
   input: z
     .object({
       ...tabRef,
-      selector: z.string().min(1).max(512).describe("CSS selector for the input[type=file] element"),
+      selector: z.string().min(1).max(512).optional().describe("CSS selector for the input[type=file] element"),
+      ref: z.string().min(1).max(128).optional().describe("Element ref of the input[type=file] element (from forms.inspect / dom.find); an exact registry lookup, never a re-query. Takes effect only when selector is absent."),
       fileId: z.string().min(1).max(128).optional().describe("File id from the files store"),
       files: z
         .array(
@@ -502,6 +503,9 @@ export const formsSetFile: ToolDefinition = {
         .min(1)
         .max(5)
         .optional(),
+    })
+    .refine((data: any) => Boolean(data.selector) || Boolean(data.ref), {
+      message: "Either selector or ref must be provided",
     })
     .refine((data: any) => Boolean(data.fileId) || Boolean(data.files?.length), {
       message: "Either fileId or files must be provided",
@@ -568,7 +572,7 @@ export const screenshotsFullPage: ToolDefinition = {
       quality: z.number().int().min(1).max(100).default(80),
     })
     .strict(),
-  output: z.object({ dataUrl: z.string(), format: z.string(), width: z.number(), height: z.number(), pages: z.number().int() }).strict(),
+  output: z.object({ dataUrl: z.string(), format: z.string(), width: z.number(), height: z.number(), pages: z.number().int(), partial: z.boolean().optional(), partialReason: z.string().optional() }).strict(),
 };
 
 export const interactTools: ToolDefinition[] = [

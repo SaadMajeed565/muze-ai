@@ -17,11 +17,26 @@ describe("gateway resolver agrees with the shared action-risk table", () => {
     expect(resolveUnifiedAction("data", "delete", "bookmarks")?.granularTool).toBe("bookmarks.delete");
   });
 
-  it("navigate tab-before-window precedence agrees in both layers", () => {
+  it("navigate window-branch actions resolve to windows.* in both layers", () => {
     expect(resolveUnifiedToolForScope("navigate", { category: "window", action: "close" })?.granular).toBe(
-      "tabs.close",
+      "windows.close",
     );
-    expect(resolveUnifiedAction("navigate", "close", "window")?.granularTool).toBe("tabs.close");
+    expect(resolveUnifiedAction("navigate", "close", "window")?.granularTool).toBe("windows.close");
+    expect(resolveUnifiedToolForScope("navigate", { category: "window", action: "list" })?.granular).toBe(
+      "windows.list",
+    );
+    expect(resolveUnifiedAction("navigate", "list", "window")?.granularTool).toBe("windows.list");
+  });
+
+  it("navigate tab open/reload resolve to tabs.navigate/tabs.reload in both layers", () => {
+    expect(resolveUnifiedToolForScope("navigate", { category: "tab", action: "open" })?.granular).toBe(
+      "tabs.navigate",
+    );
+    expect(resolveUnifiedAction("navigate", "open", "tab")?.granularTool).toBe("tabs.navigate");
+    expect(resolveUnifiedToolForScope("navigate", { category: "tab", action: "reload" })?.granular).toBe(
+      "tabs.reload",
+    );
+    expect(resolveUnifiedAction("navigate", "reload", "tab")?.granularTool).toBe("tabs.reload");
   });
 
   it("local delay waits stay unresolvable in both layers", () => {

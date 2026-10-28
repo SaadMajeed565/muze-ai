@@ -255,7 +255,11 @@ export const navigateTool: ToolDefinition = {
     tabs: z.array(TabInfo).optional(),
     window: WindowInfo.optional(),
     windows: z.array(WindowInfo).optional(),
-    navigationId: z.string().optional(),
+    // navigation.open/back/forward and tabs.navigate return
+    // navigationId: null by design (the browser APIs expose no navigation
+    // id); the unified output must accept null or every navigate URL
+    // action fails output validation after dispatching successfully.
+    navigationId: z.string().nullable().optional(),
     searchUrl: z.string().optional(),
     loaded: z.boolean().optional(),
     status: z.enum(["complete", "loading"]).optional(),
@@ -303,9 +307,22 @@ export const observeTool: ToolDefinition = {
     name: z.string().max(256).optional(),
     maxChars: z.number().int().min(1).max(200000).default(8000),
     maxNodes: z.number().int().min(1).max(2000).default(200),
-    maxDepth: z.number().int().min(1).max(20).default(8),
+    // Deliberately NO default for maxDepth/limit (retest3 observe-defaults
+    // fix): observe used to default to maxDepth=8 / limit=100 and forward
+    // those to every granular tool, but page.outline caps maxDepth at 6 and
+    // page.find / dom.find cap limit at 50, so a no-argument observe find /
+    // outline failed granular validation ("Invalid input for page.find" /
+    // "Invalid input for page.outline"). Forwarding an omitted value as
+    // undefined lets each granular tool apply its OWN default instead
+    // (outline 3, a11y 10, shadow 4, devtools.dom 8; find 20, dom.find 10,
+    // links 200). Explicit values are passed through unchanged and never
+    // silently truncated: an explicit value above a granular maximum still
+    // fails loudly at that tool's strict validation, which is the honest
+    // signal to retry with a smaller value. The granular maxima themselves
+    // are unchanged, so direct granular callers keep their output bounds.
+    maxDepth: z.number().int().min(1).max(20).optional(),
     maxRows: z.number().int().min(1).max(1000).default(50),
-    limit: z.number().int().min(1).max(1000).default(100),
+    limit: z.number().int().min(1).max(1000).optional(),
     interactiveOnly: z.boolean().default(true),
     sameOriginOnly: z.boolean().default(false),
     attributes: z.array(z.string().max(128)).max(20).default([]),
@@ -361,6 +378,7 @@ const stepSchema = z.object({
     z.object({ x: coordinateSchema, y: coordinateSchema, space: z.enum(["viewport", "screenshot"]).optional() }),
   ]).optional(),
   value: z.string().max(10_000).optional(),
+  label: z.string().max(512).optional().describe("select step only: visible option text to select (matched by the dom.select label path); value takes precedence when both are given"),
   key: z.string().min(1).max(32).optional(),
   modifiers: z.array(z.enum(["Control", "Shift", "Alt", "Meta"])).max(4).optional(),
   text: z.string().max(10_000).optional(),

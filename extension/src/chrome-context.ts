@@ -25,6 +25,7 @@ import type {
   UpdateWindowProperties,
 } from "../libs/browser-engine/index.js";
 import { pageAgent } from "../libs/browser-engine/page/agent.js";
+import { capFullPageCapture } from "../libs/browser-engine/page/stitch.js";
 import { ChromeObserverCapability } from "./observer-controller.js";
 import { ChromeCdpCapability } from "./cdp-controller.js";
 
@@ -470,6 +471,22 @@ export class ChromeBrowserContext implements BrowserContext {
   }
 
   private async captureVisibleTabUnlocked(tabId: number, options: { format: "png" | "jpeg"; quality?: number }): Promise<{ dataUrl: string; width: number; height: number }> {
+    const dataUrl = await this.captureVisibleDataUrlUnlocked(tabId, options);
+    const dims =
+      this.offscreen?.available()
+        ? await this.offscreen.request<{ width: number; height: number }>("imageDimensions", { dataUrl })
+        : { width: 0, height: 0 };
+    return { dataUrl, ...dims };
+  }
+
+  /**
+   * Visible-tab capture without the offscreen dimension decode. Full-page
+   * stitching used to pay that decode (a full dataUrl round-trip through
+   * chrome.runtime.sendMessage) once per slice even though the stitcher
+   * reads each slice's natural size itself — pure overhead that grows
+   * linearly with page height, on top of the capture itself.
+   */
+  private async captureVisibleDataUrlUnlocked(tabId: number, options: { format: "png" | "jpeg"; quality?: number }): Promise<string> {
     const tab = await chrome.tabs.get(tabId);
     // Chrome always captures the *active* tab of the window, whatever tabId is
     // passed here. Without forcing the target forward, a snapshot of a
@@ -484,15 +501,10 @@ export class ChromeBrowserContext implements BrowserContext {
       await this.waitForTabComplete(tabId);
     }
     try {
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+      return await chrome.tabs.captureVisibleTab(tab.windowId, {
         format: options.format,
         ...(options.quality !== undefined ? { quality: options.quality } : {}),
       });
-      const dims =
-        this.offscreen?.available()
-          ? await this.offscreen.request<{ width: number; height: number }>("imageDimensions", { dataUrl })
-          : { width: 0, height: 0 };
-      return { dataUrl, ...dims };
     } finally {
       if (previousActiveId !== undefined) {
         await chrome.tabs.update(previousActiveId, { active: true }).catch(() => undefined);
@@ -524,24 +536,31 @@ export class ChromeBrowserContext implements BrowserContext {
   async captureFullPage(
     tabId: number,
     options: { format: "png" | "jpeg"; quality?: number; maxHeight: number },
-  ): Promise<{ dataUrl: string; width: number; height: number; pages: number }> {
+  ): Promise<{ dataUrl: string; width: number; height: number; pages: number; partial?: boolean; partialReason?: string }> {
     return this.withCaptureLock(tabId, () => this.captureFullPageUnlocked(tabId, options));
   }
 
   private async captureFullPageUnlocked(
     tabId: number,
     options: { format: "png" | "jpeg"; quality?: number; maxHeight: number },
-  ): Promise<{ dataUrl: string; width: number; height: number; pages: number }> {
+  ): Promise<{ dataUrl: string; width: number; height: number; pages: number; partial?: boolean; partialReason?: string }> {
     if (!this.offscreen?.available()) {
       throw new ToolErrorException("UNSUPPORTED", "Full page capture needs the offscreen document");
     }
     const metrics = await this.executeInPage<undefined, PageMetrics>(tabId, pageMetricsOp, undefined);
     const viewportHeight = Math.max(1, metrics.viewportHeight);
-    const totalHeight = Math.min(metrics.scrollHeight, options.maxHeight);
-    const pages = Math.max(1, Math.ceil(totalHeight / viewportHeight));
-    if (pages > 40) {
-      throw new ToolErrorException("INVALID_INPUT", "The page is too tall to capture in one go");
-    }
+    const dpr = metrics.devicePixelRatio > 0 ? metrics.devicePixelRatio : 1;
+    const widthDev = Math.round(metrics.viewportWidth * dpr);
+    // Bound the stitch BEFORE capturing anything (see capFullPageCapture
+    // in libs/browser-engine/page/stitch.ts): the old code threw only
+    // when slices exceeded 40 but still attempted a 24,000 px tall canvas
+    // at 2x DPR and paid a per-slice offscreen decode on top of every
+    // capture. A capped capture is a partial result, never a hang.
+    const capped = capFullPageCapture(metrics.scrollHeight, viewportHeight, metrics.viewportWidth, dpr, options.maxHeight);
+    const totalHeight = capped.totalHeight;
+    const pages = capped.pages;
+    const partial = capped.partial;
+    const partialReason = capped.partialReason;
 
     // `chrome.tabs.captureVisibleTab` can only see the active tab of a window,
     // so the target has to be brought to the front for the duration of the
@@ -567,9 +586,9 @@ export class ChromeBrowserContext implements BrowserContext {
         // Named constant (FULL_PAGE_SLICE_SETTLE_MS): slice waits are kept
         // deliberately, because scrolling does not synchronously repaint.
         await new Promise((r) => setTimeout(r, FULL_PAGE_SLICE_SETTLE_MS));
-        const shot = await this.captureVisibleTabUnlocked(tabId, { format: options.format, quality: options.quality });
+        const dataUrl = await this.captureVisibleDataUrlUnlocked(tabId, { format: options.format, quality: options.quality });
         slices.push({
-          dataUrl: shot.dataUrl,
+          dataUrl,
           docStart: i * viewportHeight,
           docEnd: Math.min((i + 1) * viewportHeight, totalHeight),
           scrollY,
@@ -583,8 +602,8 @@ export class ChromeBrowserContext implements BrowserContext {
       }
     }
 
-    const width = Math.round(metrics.viewportWidth * metrics.devicePixelRatio);
-    const height = Math.round(totalHeight * metrics.devicePixelRatio);
+    const width = widthDev;
+    const height = Math.round(totalHeight * dpr);
     const stitched = await this.offscreen.request<{ dataUrl: string; width: number; height: number; pages: number }>(
       "stitchImages",
       {
@@ -597,7 +616,7 @@ export class ChromeBrowserContext implements BrowserContext {
         quality: options.quality,
       },
     );
-    return stitched;
+    return { ...stitched, ...(partial ? { partial: true as const, partialReason } : {}) };
   }
 
   private createDownloads(): DownloadsCapability {

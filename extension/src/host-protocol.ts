@@ -498,7 +498,7 @@ export function resolveUnifiedToolCall(tool: string, input: unknown): UnifiedRes
         case "preview": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, ref: d.ref ?? d.formRef }), calledAs: tool, action: phase };
         case "fill": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, fields: formFieldsCanonical(d.fields) ?? [] }), calledAs: tool, action: phase };
         case "upload": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, ref: d.ref, files: d.files ?? [] }), calledAs: tool, action: phase };
-        case "set_file": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, ref: d.ref, fileId: d.fileId }), calledAs: tool, action: phase };
+        case "set_file": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, selector: d.selector, ref: d.ref, fileId: d.fileId, files: d.files }), calledAs: tool, action: phase };
         case "submit": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, formRef: d.formRef ?? d.ref, expectedAction: d.expectedAction }), calledAs: tool, action: phase };
         default: return null;
       }
@@ -511,7 +511,7 @@ export function resolveUnifiedToolCall(tool: string, input: unknown): UnifiedRes
       switch (action) {
         case "submit": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, formRef: d.formRef, expectedAction: d.expectedAction }), calledAs: tool, action };
         case "upload": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, ref: d.ref, files: d.files ?? [] }), calledAs: tool, action };
-        case "set_file": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, ref: d.ref, fileId: d.fileId }), calledAs: tool, action };
+        case "set_file": return { tool: entry.granularTool, input: clean({ tabId: d.tabId, frameId: d.frameId, selector: d.selector, ref: d.ref, fileId: d.fileId, files: d.files }), calledAs: tool, action };
         default: return null;
       }
     }

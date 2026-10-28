@@ -16,7 +16,7 @@ const EXPECTED_COUNTS: Record<string, number> = {
   browser: 5,
   tabs: 19,
   windows: 4,
-  navigate: 73,
+  navigate: 75,
   observe: 13,
   act: 13,
   wait: 4,
@@ -84,8 +84,9 @@ describe("unified per-action risk table", () => {
     for (const entry of UNIFIED_ACTION_RISK) counts[entry.unifiedTool] = (counts[entry.unifiedTool] ?? 0) + 1;
     expect(counts).toEqual(EXPECTED_COUNTS);
     // 175 at the 2026-10-28 retest, + tabs.reload and data history list
-    // added by the retest fixes (see retest-fixes-2026-10-28.md).
-    expect(UNIFIED_ACTION_RISK.length).toBe(177);
+    // added by the retest fixes (see retest-fixes-2026-10-28.md),
+    // + navigate tab open and tab reload added by the navfix.
+    expect(UNIFIED_ACTION_RISK.length).toBe(179);
   });
 
   it("has valid risk, sideEffect and requiresApproval on every entry", () => {
@@ -158,10 +159,13 @@ describe("unified per-action risk table", () => {
     // reaches the tab branch and goes to tabs.search.
     expect(resolveUnifiedAction("navigate", "search")?.granularTool).toBe("navigation.search");
     expect(resolveUnifiedAction("navigate", "search", "tab")?.granularTool).toBe("tabs.search");
-    // The tab branch is checked before the window branch, so window+create
-    // and window+close land on tabs, not windows; only update reaches windows.
-    expect(resolveUnifiedAction("navigate", "create", "window")?.granularTool).toBe("tabs.create");
-    expect(resolveUnifiedAction("navigate", "close", "window")?.granularTool).toBe("tabs.close");
+    // Window-branch actions under category=window reach windows.* (the
+    // handler diverts exactly list/create/update/close away from the tab
+    // branch); tab-only actions under category=window still land on tabs.
+    expect(resolveUnifiedAction("navigate", "list", "window")?.granularTool).toBe("windows.list");
+    expect(resolveUnifiedAction("navigate", "create", "window")?.granularTool).toBe("windows.create");
+    expect(resolveUnifiedAction("navigate", "close", "window")?.granularTool).toBe("windows.close");
+    expect(resolveUnifiedAction("navigate", "get", "window")?.granularTool).toBe("tabs.get");
     expect(resolveUnifiedAction("navigate", "update", "window")?.granularTool).toBe("windows.update");
     expect(resolveUnifiedAction("navigate", "update")?.granularTool).toBe("windows.update");
     // Sync dispatch is by `for`, carried in the domain column.
@@ -178,9 +182,12 @@ describe("unified per-action risk table", () => {
         expect(entry?.requiresApproval).toBe(true);
       }
     }
+    // Category=tab open/reload are real dispatches (tab open navigates
+    // the given tab, tab reload maps to tabs.reload).
+    expect(resolveUnifiedAction("navigate", "open", "tab")?.granularTool).toBe("tabs.navigate");
+    expect(resolveUnifiedAction("navigate", "reload", "tab")?.granularTool).toBe("tabs.reload");
     // Unknown combinations resolve to undefined (the handler throws).
     expect(resolveUnifiedAction("navigate", "search", "window")).toBeUndefined();
-    expect(resolveUnifiedAction("navigate", "open", "tab")).toBeUndefined();
   });
 
   it("flags the unmappable local delay actions as restricted with approval", () => {

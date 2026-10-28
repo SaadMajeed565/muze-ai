@@ -144,8 +144,8 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("navigate", "list", "tabs.list", "read-only", false, "none", { idempotent: true }),
   e("navigate", "get", "tabs.get", "read-only", false, "none", { idempotent: true }),
   e("navigate", "active", "tabs.active", "read-only", false, "none", { idempotent: true }),
-  e("navigate", "create", "tabs.create", "reversible", false, "browser-state", { idempotent: false, note: "Action-only create is a tab create. Window create needs category=window AND an action outside the tab list, which create is not, so window+create also lands here (see window variant)." }),
-  e("navigate", "close", "tabs.close", "reversible", false, "browser-state", { idempotent: false, note: "Action-only close is a tab close; window+close also lands here (see window variant)." }),
+  e("navigate", "create", "tabs.create", "reversible", false, "browser-state", { idempotent: false, note: "Action-only create is a tab create. With category=window, create is a window-branch action and lands on windows.create (see window variant)." }),
+  e("navigate", "close", "tabs.close", "reversible", false, "browser-state", { idempotent: false, note: "Action-only close is a tab close. With category=window, close is a window-branch action and lands on windows.close (see window variant)." }),
   e("navigate", "activate", "tabs.activate", "reversible", false, "browser-state", { idempotent: true }),
   e("navigate", "switch", "tabs.activate", "reversible", false, "browser-state", { idempotent: true, note: "Alias: switch is rewritten to activate by the handler." }),
   e("navigate", "duplicate", "tabs.duplicate", "reversible", false, "browser-state", { idempotent: false }),
@@ -169,6 +169,7 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("navigate", "active", "tabs.active", "read-only", false, "none", { domain: "tab", idempotent: true }),
   e("navigate", "search", "tabs.search", "read-only", false, "none", { domain: "tab", idempotent: true, note: "Category=tab search reaches the tab branch (which has a search case) and goes to tabs.search, unlike action-only search which goes to navigation.search." }),
   e("navigate", "create", "tabs.create", "reversible", false, "browser-state", { domain: "tab", idempotent: false }),
+  e("navigate", "open", "tabs.navigate", "reversible", false, "browser-state", { domain: "tab", idempotent: false, note: "Category=tab open: with a tabId the handler navigates that tab (tabs.navigate); without one it creates a tab (tabs.create, same risk). Distinct from action-only / category=url open, which maps to navigation.open." }),
   e("navigate", "close", "tabs.close", "reversible", false, "browser-state", { domain: "tab", idempotent: false }),
   e("navigate", "activate", "tabs.activate", "reversible", false, "browser-state", { domain: "tab", idempotent: true }),
   e("navigate", "switch", "tabs.activate", "reversible", false, "browser-state", { domain: "tab", idempotent: true, note: "Alias: switch is rewritten to activate by the handler." }),
@@ -180,21 +181,24 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("navigate", "zoom", "tabs.setZoom", "reversible", false, "browser-state", { domain: "tab", idempotent: true }),
   e("navigate", "group", "tabs.group", "reversible", false, "browser-state", { domain: "tab", idempotent: false }),
   e("navigate", "ungroup", "tabs.ungroup", "reversible", false, "browser-state", { domain: "tab", idempotent: true }),
+  e("navigate", "reload", "tabs.reload", "reversible", false, "browser-state", { domain: "tab", idempotent: true, note: "Category=tab reload maps to tabs.reload, the same target as unified tabs reload (which the gateway rewrites to this form). Distinct from action-only / category=url reload, which maps to navigation.reload." }),
   e("navigate", "save_session", "workflows.saveSession", "consequential", true, "browser-state", { domain: "tab", idempotent: false, note: "Unified handler dryRun-gates this through the granular workflow gate before executing." }),
   e("navigate", "restore_session", "workflows.restoreSession", "consequential", true, "browser-state", { domain: "tab", idempotent: false, note: "Unified handler dryRun-gates this through the granular workflow gate before executing." }),
   e("navigate", "organize", "workflows.organizeTabs", "consequential", true, "browser-state", { domain: "tab", idempotent: false, note: "Unified handler dryRun-gates this through the granular workflow gate before executing." }),
 
   // ---- navigate, category=window (19) ----
-  // The tab branch is checked before the window branch, so every tab action
-  // under category=window still lands on the tab granular tool; the window
-  // branch's own list/create/close cases are unreachable dead code. Only
-  // update reaches windows.update. Window+search throws (search is neither
-  // a tab action nor a window-branch case).
-  e("navigate", "list", "tabs.list", "read-only", false, "none", { domain: "window", idempotent: true, note: "Category=window does not override a tab action: the tab branch wins, so this is tabs.list, not windows.list." }),
-  e("navigate", "get", "tabs.get", "read-only", false, "none", { domain: "window", idempotent: true, note: "Tab branch wins over the window branch." }),
-  e("navigate", "active", "tabs.active", "read-only", false, "none", { domain: "window", idempotent: true, note: "Tab branch wins over the window branch." }),
-  e("navigate", "create", "tabs.create", "reversible", false, "browser-state", { domain: "window", idempotent: false, note: "Tab branch wins: this is tabs.create, not windows.create, even under category=window." }),
-  e("navigate", "close", "tabs.close", "reversible", false, "browser-state", { domain: "window", idempotent: false, note: "Tab branch wins: this is tabs.close, not windows.close, even under category=window." }),
+  // Window-branch actions (list/create/update/close) under category=window
+  // reach the window branch — the handler diverts exactly those actions
+  // away from the tab branch, so windows list/create/close return real
+  // WindowInfo shapes instead of tabs. Tab-only actions under
+  // category=window still land on the tab granular tool. Window+search
+  // throws (search is neither a tab action in the handler's gate nor a
+  // window-branch case).
+  e("navigate", "list", "windows.list", "read-only", false, "none", { domain: "window", idempotent: true, note: "Category=window list is a window-branch action: this is windows.list, not tabs.list." }),
+  e("navigate", "get", "tabs.get", "read-only", false, "none", { domain: "window", idempotent: true, note: "Tab branch wins over the window branch for tab-only actions." }),
+  e("navigate", "active", "tabs.active", "read-only", false, "none", { domain: "window", idempotent: true, note: "Tab branch wins over the window branch for tab-only actions." }),
+  e("navigate", "create", "windows.create", "reversible", false, "browser-state", { domain: "window", idempotent: false, note: "Category=window create is a window-branch action: this is windows.create, not tabs.create." }),
+  e("navigate", "close", "windows.close", "reversible", false, "browser-state", { domain: "window", idempotent: false, note: "Category=window close is a window-branch action: this is windows.close, not tabs.close." }),
   e("navigate", "activate", "tabs.activate", "reversible", false, "browser-state", { domain: "window", idempotent: true }),
   e("navigate", "switch", "tabs.activate", "reversible", false, "browser-state", { domain: "window", idempotent: true, note: "Alias: switch is rewritten to activate by the handler." }),
   e("navigate", "duplicate", "tabs.duplicate", "reversible", false, "browser-state", { domain: "window", idempotent: false }),

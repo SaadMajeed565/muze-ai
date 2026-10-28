@@ -4,18 +4,30 @@ import { ToolErrorException } from "../libs/tool-contracts/index.js";
 const CDP_VERSION = "1.3";
 
 /**
- * Bound for one CDP input sequence. The 2026-10-28 retest saw dom.click,
- * dom.hover and dom.setChecked time out at the 30s executor / 60s bridge
- * limits on a Wikipedia searchbox, while CDP focus/type/clear/fill/press
- * and clickAt on the same page succeeded — no code cause for a stall on
- * that element type was found (the click/hover paths are the same
- * attach → move → command → detach sequence as the passing paths, and
- * settlePage is a no-op without waitMs/waitForNetworkIdle). A stalled
- * debugger attach or sendCommand must therefore not hang until the
- * executor limit: it fails fast with a diagnosable TIMEOUT, detaches,
- * and leaves the caller free to retry or to use clickAt. This does NOT
- * claim the underlying stall is fixed — a live retest on a different
- * element is still needed to tell a page-specific stall from a CDP one.
+ * Bound for one CDP input sequence (unchanged from the 2026-10-28 bound:
+ * raising it was explicitly rejected as a fix). The retest3 evidence
+ * (live-test-2026-10-28-retest3.md) narrows the stall further: in the
+ * same session, dom.clickAt, the act click step and dom.setChecked-check
+ * PASS via CDP, while dom.click, dom.hover, dom.moveTo, dom.dragAt,
+ * dom.setRadio and dom.setChecked-uncheck hit this 15s bound. The
+ * passing and failing paths share attach → command → detach, and the
+ * failing handlers differ from clickAt only in ways that cannot stall a
+ * sendCommand on their own — so the sequence below was changed, not the
+ * bound. The command-stream difference that does distinguish them is
+ * position tracking: a first mouse sequence on a tab teleports with a
+ * single mouseMoved, while every later sequence on that tab interpolated
+ * from the tracked position in 6 mouseMoved steps, crossing every
+ * intermediate element (hover menus, suggestion overlays) on the way.
+ * That matches the pass/fail split exactly — check passes as the first
+ * mouse sequence on its tab, uncheck fails as the second; clickAt
+ * passes as the first mouse sequence on the wiki tab, later wiki mouse
+ * calls fail — so interpolation is removed: every move is now the
+ * single mouseMoved a first move always was. Sequences are also
+ * serialised per tab (below): the old refcount only guarded detach,
+ * so a timed-out sequence's commands and its capped detach could
+ * interleave with the next sequence on the same tab and stall that one
+ * too. Live verification is still required: no live browser is touched
+ * by this change's tests (mocked debugger only).
  */
 const CDP_SEQUENCE_TIMEOUT_MS = 15_000;
 const CDP_DETACH_TIMEOUT_MS = 2_000;
@@ -47,13 +59,19 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export class ChromeCdpCapability implements CdpCapability {
   private readonly attachedTabs = new Set<number>();
   private readonly attachingPromises = new Map<number, Promise<void>>();
-  /** CDP calls currently running per tab; auto-detach fires only at zero. */
-  private readonly inflight = new Map<number, number>();
-  /** Last genuine mouse position per tab, so a move/click can travel there
-   * instead of teleporting. A site that watches mouse behaviour can tell a
-   * single instant jump apart from a human move, even though both are
-   * isTrusted. Unknown on first use in a tab: the first move goes straight
-   * to its target, and later moves travel from the tracked position. */
+  /** Per-tab serialisation chain: every withTab sequence for a tab runs
+   * only after the previous sequence for that tab has finished AND
+   * detached. The old refcount let two sequences overlap (it only kept
+   * the last one out from detaching); overlapping sequences interleave
+   * their dispatchMouseEvent streams, and a timed-out sequence's detach
+   * could land mid-input on the next sequence. The stored chain promise
+   * never rejects, so one failed sequence can never wedge later ones. */
+  private readonly queues = new Map<number, Promise<void>>();
+  /** Last genuine mouse position per tab, recorded for bookkeeping.
+   * It is deliberately NOT used to interpolate any more (see the header
+   * comment): every move is a single mouseMoved to its target, exactly
+   * like a first move. It is cleared on a sequence timeout, because a
+   * timed-out sequence leaves the true cursor position unknown. */
   private readonly lastMouse = new Map<number, { x: number; y: number }>();
 
   constructor() {
@@ -66,7 +84,6 @@ export class ChromeCdpCapability implements CdpCapability {
       if (chrome.tabs?.onRemoved) {
         chrome.tabs.onRemoved.addListener((tabId) => {
           this.attachedTabs.delete(tabId);
-          this.inflight.delete(tabId);
           this.lastMouse.delete(tabId);
         });
       }
@@ -102,17 +119,26 @@ export class ChromeCdpCapability implements CdpCapability {
     return promise;
   }
 
-  /** Run one CDP sequence, detaching afterwards unless another call is in flight. */
+  /** Run one CDP sequence, serialised per tab, detaching afterwards.
+   * Detach is awaited inside the serialised section (capped, see detach):
+   * the old code raced detach against a 2s timer and returned while a
+   * detach was still in flight, so the next sequence could skip attach
+   * (attachedTabs still set) and send commands into a detaching session.
+   * On a sequence timeout the tracked position is cleared, so a retry
+   * starts from a clean state instead of interpolating from a position
+   * the timed-out sequence may never have reached. */
   private async withTab<T>(tabId: number, fn: () => Promise<T>): Promise<T> {
-    await this.ensureAttached(tabId);
-    this.inflight.set(tabId, (this.inflight.get(tabId) ?? 0) + 1);
-    try {
+    const previous = this.queues.get(tabId) ?? Promise.resolve();
+    const run = previous.then(async (): Promise<T> => {
+      await this.ensureAttached(tabId);
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
       try {
         return await Promise.race([
           fn(),
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => {
+              timedOut = true;
               reject(
                 new ToolErrorException(
                   "TIMEOUT",
@@ -124,44 +150,36 @@ export class ChromeCdpCapability implements CdpCapability {
         ]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
+        if (timedOut) this.lastMouse.delete(tabId);
+        // Detach must not itself hang the call, but it must complete
+        // (or be force-cleared) before the next queued sequence starts.
+        await this.detach(tabId).catch(() => undefined);
       }
-    } finally {
-      const remaining = (this.inflight.get(tabId) ?? 1) - 1;
-      if (remaining <= 0) {
-        this.inflight.delete(tabId);
-        // Detach must not itself hang the call: cap it and ignore errors.
-        await Promise.race([
-          this.detach(tabId),
-          new Promise<void>((resolve) => setTimeout(resolve, CDP_DETACH_TIMEOUT_MS)),
-        ]).catch(() => undefined);
-      } else {
-        this.inflight.set(tabId, remaining);
-      }
-    }
+    });
+    // The chain itself never rejects: a failed sequence must not wedge
+    // every later sequence queued behind it.
+    this.queues.set(tabId, run.then(
+      () => undefined,
+      () => undefined,
+    ));
+    return run;
   }
 
-  /** Move the genuine cursor to a point, travelling in steps from the last
-   * tracked position when one is known. Must run inside withTab. */
+  /** Move the genuine cursor to a point with a single mouseMoved event.
+   * Must run inside withTab. The old version interpolated from the last
+   * tracked position in 6 steps when one was known; that stepped stream
+   * is the one command-stream difference between the retest3 passing
+   * first mouse sequences and the failing later ones (see header), and
+   * it also drags the cursor across every intermediate element, whose
+   * hover handlers can re-render the page mid-sequence. A single move
+   * is what a first move — and the passing clickAt path — always did. */
   private async moveInside(tabId: number, x: number, y: number): Promise<void> {
-    const target = { tabId };
-    const from = this.lastMouse.get(tabId);
-    if (!from) {
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: Math.round(x),
-        y: Math.round(y),
-      });
-    } else {
-      const steps = 6;
-      for (let i = 1; i <= steps; i++) {
-        await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: Math.round(from.x + ((x - from.x) * i) / steps),
-          y: Math.round(from.y + ((y - from.y) * i) / steps),
-        });
-        await delay(12);
-      }
-    }
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: Math.round(x),
+      y: Math.round(y),
+      buttons: 0,
+    });
     this.lastMouse.set(tabId, { x, y });
   }
 
@@ -186,6 +204,7 @@ export class ChromeCdpCapability implements CdpCapability {
         x: Math.round(x),
         y: Math.round(y),
         button: cdpButton,
+        buttons: cdpButton === "left" ? 1 : cdpButton === "right" ? 2 : 4,
         clickCount,
       });
       await delay(60);
@@ -194,6 +213,7 @@ export class ChromeCdpCapability implements CdpCapability {
         x: Math.round(x),
         y: Math.round(y),
         button: cdpButton,
+        buttons: 0,
         clickCount,
       });
       this.lastMouse.set(tabId, { x, y });
@@ -246,14 +266,22 @@ export class ChromeCdpCapability implements CdpCapability {
         type: "mouseMoved",
         x: Math.round(fromX),
         y: Math.round(fromY),
+        buttons: 0,
       });
       await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
         type: "mousePressed",
         x: Math.round(fromX),
         y: Math.round(fromY),
         button: "left",
+        buttons: 1,
         clickCount: 1,
       });
+      // The old sequence fired press and all drag moves back to back
+      // with no timing gap: a renderer that starts a native drag on
+      // dragstart can still be dispatching it when the next
+      // sendCommand arrives. One short settle gap after press, and one
+      // before release, matches the click path's dwell/hold timing.
+      await delay(30);
       const steps = 5;
       for (let i = 1; i <= steps; i++) {
         const curX = fromX + ((toX - fromX) * i) / steps;
@@ -265,11 +293,13 @@ export class ChromeCdpCapability implements CdpCapability {
           buttons: 1,
         });
       }
+      await delay(30);
       await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
         type: "mouseReleased",
         x: Math.round(toX),
         y: Math.round(toY),
         button: "left",
+        buttons: 0,
         clickCount: 1,
       });
       this.lastMouse.set(tabId, { x: toX, y: toY });
@@ -301,7 +331,15 @@ export class ChromeCdpCapability implements CdpCapability {
   async detach(tabId: number): Promise<void> {
     if (!this.attachedTabs.has(tabId)) return;
     try {
-      await chrome.debugger.detach({ tabId });
+      // Capped, but the attached mark is cleared even if the detach
+      // itself hangs: the old version awaited detach unconditionally in
+      // its finally, so a hung detach left attachedTabs set and the next
+      // sequence skipped attach and sent commands into a detaching
+      // session. A late detach resolving afterwards is idempotent.
+      await Promise.race([
+        chrome.debugger.detach({ tabId }),
+        new Promise<void>((resolve) => setTimeout(resolve, CDP_DETACH_TIMEOUT_MS)),
+      ]);
     } catch {
       // ignore
     } finally {

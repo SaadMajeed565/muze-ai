@@ -24,8 +24,39 @@ import {
 } from "../../tool-contracts/index.js";
 import { isRestrictedUrl, redactUrl } from "../../security/index.js";
 import { diagnosticsHook, readDiagnosticsLog, type DiagnosticsLog } from "../page/diagnostics.js";
+import type { BrowserContext } from "../context.js";
 import { defineTool, type RegisteredTool } from "../registry.js";
 import { raceWithAbort, requireScriptableTab, resolveTabId, runPageOp, throwIfAborted, toTabInfo, validateDownloadPath, validateUrlInput } from "./helpers.js";
+
+/**
+ * Read the page's diagnostics log, never crashing on a null read (retest3:
+ * devtools.console / devtools.pageErrors failed with "Cannot read
+ * properties of null (reading 'console'/'errors')"). Why only these two:
+ * devtools.network / performance / dom go through the persistent page
+ * agent (ISOLATED world, always returns a value), while console/errors go
+ * through a MAIN-world scripting injection of diagnosticsHook +
+ * readDiagnosticsLog — a data source that only exists after the hook is
+ * installed, and whose read-back can come back null if the page navigated
+ * or MAIN-world injection did not stick. So: install, read, and if the
+ * read-back is null or malformed, lazily re-install and re-read once.
+ * If it is still unavailable, throw a clear error naming the cause instead
+ * of a TypeError — and return nothing, rather than pretending the log is
+ * empty (an empty array is only returned for a genuinely installed, empty
+ * log, which is the documented "messages since attach" semantics).
+ */
+async function readDiagnosticsLogSafe(ctx: BrowserContext, tabId: number, signal: AbortSignal | undefined, label: string): Promise<DiagnosticsLog> {
+  const isLog = (value: unknown): value is DiagnosticsLog =>
+    !!value && typeof value === "object" && Array.isArray((value as DiagnosticsLog).console) && Array.isArray((value as DiagnosticsLog).errors);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await raceWithAbort(ctx.executeInPage(tabId, diagnosticsHook, undefined, { world: "MAIN" }), signal);
+    const log = await raceWithAbort(ctx.executeInPage(tabId, readDiagnosticsLog, undefined, { world: "MAIN" }), signal);
+    if (isLog(log)) return log;
+  }
+  throw new ToolErrorException(
+    "INTERNAL",
+    `Devtools ${label} are unavailable for this tab: the page returned no diagnostics log even after the diagnostics hook was installed (the page may have navigated, or MAIN-world script injection was blocked). No ${label} data was returned; retry on a stable, scriptable page.`,
+  );
+}
 
 export const systemToolHandlers: RegisteredTool[] = [
   defineTool(downloadsList, async (input, { ctx, signal }) => {
@@ -88,14 +119,38 @@ export const systemToolHandlers: RegisteredTool[] = [
       text = await raceWithAbort(ctx.clipboard.read(), signal);
     } catch (error) {
       // navigator.clipboard in the offscreen document requires a focused
-      // document; Chrome reports this as "Document is not focused". That
-      // is a focus requirement, not a permission denial and not a
-      // clipboard write — surface it as such so the caller can focus a
-      // browser window and retry, instead of a bare INTERNAL error.
+      // document, and an offscreen document is NEVER focused — so the
+      // offscreen path cannot ever succeed for readText, whatever the
+      // browser window state. That is the retest3 failure, not a transient
+      // focus lapse. The legitimate fallback is the active tab's page
+      // context: the extension holds the clipboardRead permission, and a
+      // content-context readText succeeds whenever that tab's document is
+      // focused (i.e. the user is in a browser window). Only focus errors
+      // take this path — any other failure (e.g. a permission denial) is
+      // rethrown unchanged, so a real denial is never masked as a focus
+      // problem. Nothing is written to the clipboard on any path, and a
+      // failed read returns no content, real or fabricated.
       if (/not focused/i.test(error instanceof Error ? error.message : String(error))) {
+        try {
+          const tab = await requireScriptableTab(ctx, undefined, signal);
+          const pageResult = await runPageOp<{ text?: string; truncated?: boolean }>(
+            ctx,
+            tab.id!,
+            { op: "readClipboard" },
+            undefined,
+            signal,
+          );
+          if (typeof pageResult?.text === "string") {
+            const pageText = pageResult.text;
+            const truncated = pageResult.truncated ?? pageText.length > 100_000;
+            return { text: truncated ? pageText.slice(0, 100_000) : pageText, truncated };
+          }
+        } catch {
+          // Fall through to the honest focus-required error below.
+        }
         throw new ToolErrorException(
           "INTERNAL",
-          "Clipboard read failed: Chrome requires a focused document for navigator.clipboard.readText, and the offscreen document is not focused. Click a browser window to focus it and retry. No clipboard content was read.",
+          "Clipboard read failed: Chrome requires a focused document for navigator.clipboard.readText. The offscreen document is never focused, and the active tab's page context could not read it either — click a browser window so a normal (non-restricted) tab is focused, then retry. No clipboard content was read.",
         );
       }
       throw error;
@@ -299,18 +354,14 @@ export const systemToolHandlers: RegisteredTool[] = [
   defineTool(devtoolsPageErrors, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; limit: number };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    const resolved = tab.id!;
-    await raceWithAbort(ctx.executeInPage(resolved, diagnosticsHook, undefined, { world: "MAIN" }), signal);
-    const log = await raceWithAbort(ctx.executeInPage(resolved, readDiagnosticsLog, undefined, { world: "MAIN" }), signal);
+    const log = await readDiagnosticsLogSafe(ctx, tab.id!, signal, "page errors");
     return { errors: log.errors.slice(-data.limit) };
   }),
 
   defineTool(devtoolsConsole, async (input, { ctx, signal }) => {
     const data = input as { tabId?: number; limit: number; level: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
-    const resolved = tab.id!;
-    await raceWithAbort(ctx.executeInPage(resolved, diagnosticsHook, undefined, { world: "MAIN" }), signal);
-    const log = await raceWithAbort(ctx.executeInPage(resolved, readDiagnosticsLog, undefined, { world: "MAIN" }), signal);
+    const log = await readDiagnosticsLogSafe(ctx, tab.id!, signal, "console messages");
     const messages = data.level === "all" ? log.console : log.console.filter((m) => m.level === data.level);
     return { messages: messages.slice(-data.limit) };
   }),

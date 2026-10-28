@@ -9,11 +9,17 @@ export interface DiagnosticsLog {
   errors: { message: string; source?: string; at: string }[];
 }
 
-const GLOBAL_KEY = "__muzeDiagnostics";
-
+// NOTE (retest3 devtools null-read fix): these functions are injected with
+// chrome.scripting.executeScript in the MAIN world, which serialises the
+// function source and does NOT carry module scope with it. The storage key
+// therefore used to be a module-level constant (GLOBAL_KEY) that the
+// serialised function could not resolve in the page, so the read-back could
+// come back null instead of the log installed by the hook. The key is now a
+// literal inside each function, so each injected function is genuinely
+// self-contained; the hook and the reader must use the same literal.
 export function diagnosticsHook(): void {
   const w = window as unknown as Record<string, unknown>;
-  const existing = (w[GLOBAL_KEY] as DiagnosticsLog | undefined) ?? { console: [], errors: [] };
+  const existing = (w["__muzeDiagnostics"] as DiagnosticsLog | undefined) ?? { console: [], errors: [] };
   if ((existing as { __installed?: boolean }).__installed) return;
   (existing as { __installed?: boolean }).__installed = true;
 
@@ -58,10 +64,10 @@ export function diagnosticsHook(): void {
     if (existing.errors.length > bound) existing.errors.shift();
   });
 
-  w[GLOBAL_KEY] = existing;
+  w["__muzeDiagnostics"] = existing;
 }
 
 export function readDiagnosticsLog(): DiagnosticsLog {
   const w = window as unknown as Record<string, DiagnosticsLog | undefined>;
-  return w[GLOBAL_KEY] ?? { console: [], errors: [] };
+  return w["__muzeDiagnostics"] ?? { console: [], errors: [] };
 }
