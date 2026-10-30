@@ -40,8 +40,13 @@ export type IconName =
   | "file"
   | "logo";
 
-/** End-user tabs only. There is no Tools tab: developer tool data is never rendered (see ui-logic.ts). */
-export type TabId = "overview" | "permissions" | "files" | "activity" | "tasks" | "browsers";
+/**
+ * End-user tabs only, exactly four (v2): Home, Tasks, Files, Profile.
+ * Activity lives inside Tasks, and browsers/apps/permissions live
+ * inside Profile — there are no Browsers, Safety, or Activity tabs.
+ * Developer tool data is never rendered (see ui-logic.ts).
+ */
+export type TabId = "overview" | "tasks" | "files" | "profile";
 
 export interface TabDefinition {
   id: TabId;
@@ -51,11 +56,9 @@ export interface TabDefinition {
 
 export const TABS: TabDefinition[] = [
   { id: "overview", label: "Home", icon: "home" },
-  { id: "permissions", label: "Safety", icon: "shield" },
-  { id: "files", label: "Files", icon: "file" },
-  { id: "activity", label: "Activity", icon: "pulse" },
   { id: "tasks", label: "Tasks", icon: "clock" },
-  { id: "browsers", label: "Browsers", icon: "link" },
+  { id: "files", label: "Files", icon: "file" },
+  { id: "profile", label: "Profile", icon: "user" },
 ];
 
 export function isTabId(value: unknown): value is TabId {

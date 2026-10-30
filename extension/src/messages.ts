@@ -81,6 +81,9 @@ export type DashboardRequest =
   | { type: "muze/bridge/settings"; patch: Partial<BridgeSettings> }
   | { type: "muze/bridge/reconnect" }
   | { type: "muze/gateway/sign-in" }
+  | { type: "muze/gateway/sign-in-email"; email: string; password: string }
+  | { type: "muze/gateway/sign-up-email"; email: string; password: string }
+  | { type: "muze/gateway/delete-account" }
   | { type: "muze/gateway/sign-out" }
   | { type: "muze/gateway/rotate" }
   | { type: "muze/onboarding/set"; patch: Partial<OnboardingState> }

@@ -51,6 +51,9 @@ const RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
   "/session/pair-code": { max: 30, windowMs: 60_000 },
   "/session/status": { max: 120, windowMs: 60_000 },
   "/extension/auth": { max: 60, windowMs: 60_000 },
+  "/extension/auth/login": { max: 30, windowMs: 60_000 },
+  "/extension/auth/signup": { max: 20, windowMs: 60_000 },
+  "/extension/account/delete": { max: 20, windowMs: 60_000 },
   "/extension/redeem": { max: 60, windowMs: 60_000 },
   "/extension/reuse": { max: 60, windowMs: 60_000 },
   "/account/browsers": { max: 120, windowMs: 60_000 },
@@ -192,6 +195,9 @@ async function route(request: Request, env: GatewayEnv, issuer: string, url: URL
   if (path === "/terms") return handleTerms();
   if (path === "/support") return handleSupport();
   if (path === "/extension/auth") return handleExtensionAuth(request, env);
+  if (path === "/extension/auth/login" && request.method === "POST") return handleExtensionAuthLogin(request, env);
+  if (path === "/extension/auth/signup" && request.method === "POST") return handleExtensionAuthSignup(request, env);
+  if (path === "/extension/account/delete" && request.method === "POST") return handleExtensionAccountDelete(request, env);
   if (path === "/extension/redeem" && request.method === "POST") return handleExtensionRedeem(request, env);
 
   if (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp") {
@@ -398,6 +404,45 @@ async function listAccountBrowsers(request: Request, env: GatewayEnv): Promise<R
     ...(account.currentSessionId ? { currentSessionId: account.currentSessionId } : {}),
     mcpClients,
   });
+}
+
+/**
+ * In-extension sign-in / sign-up (no website page). The password travels
+ * only in this HTTPS request body and is never logged (the Worker logs
+ * method/path/status only, never bodies). The device token is returned
+ * to the extension only; it is never rendered on any website page.
+ */
+async function handleExtensionAuthLogin(request: Request, env: GatewayEnv): Promise<Response> {
+  return handleExtensionAuthPassword(request, env, "extensionLogin");
+}
+
+async function handleExtensionAuthSignup(request: Request, env: GatewayEnv): Promise<Response> {
+  return handleExtensionAuthPassword(request, env, "extensionSignup");
+}
+
+async function handleExtensionAuthPassword(
+  request: Request,
+  env: GatewayEnv,
+  action: "extensionLogin" | "extensionSignup",
+): Promise<Response> {
+  const body = await readJsonBody(request);
+  const info = (body.browserInfo && typeof body.browserInfo === "object" ? body.browserInfo : {}) as Record<string, unknown>;
+  const result = await dirCall(env, action, {
+    email: String(body.email ?? ""),
+    password: String(body.password ?? ""),
+    browserInfo: info,
+  });
+  if (result.ok === false) return json({ error: result.error ?? "sign-in failed" }, result.status ?? 400);
+  return json({ token: result.token, email: result.email, sessionId: result.sessionId });
+}
+
+/** Delete the calling extension's whole account, authenticated by its device token. */
+async function handleExtensionAccountDelete(request: Request, env: GatewayEnv): Promise<Response> {
+  const account = await resolveAccount(request, env);
+  if (!account) return json({ error: "not signed in" }, 401);
+  const result = await dirCall(env, "deleteAccountByUser", { userId: account.userId });
+  if (result.ok === false) return json({ error: result.error ?? "could not delete account" }, 400);
+  return json({ ok: true });
 }
 
 async function reuseBrowser(request: Request, env: GatewayEnv): Promise<Response> {

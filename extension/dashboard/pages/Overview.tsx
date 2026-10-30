@@ -12,9 +12,7 @@ export interface OverviewPageProps {
   state: DashboardState;
   busy: boolean;
   onGatewayToggle: (enabled: boolean) => void;
-  onSignIn: () => void;
   onReconnect: () => void;
-  onSignOut: () => void;
   onOpenWizard: () => void;
   onNavigate: (tab: TabId) => void;
 }
@@ -37,9 +35,7 @@ export function OverviewPage({
   state,
   busy,
   onGatewayToggle,
-  onSignIn,
   onReconnect,
-  onSignOut,
   onOpenWizard,
   onNavigate,
 }: OverviewPageProps): preact.JSX.Element {
@@ -72,26 +68,17 @@ export function OverviewPage({
     pendingApprovals: snapshot.pendingApprovals,
   });
 
-  const signOut = (): void => {
-    const ok = confirm("Sign out? This browser will be unlinked from your Muze account and the gateway connection will stop.");
-    if (ok) onSignOut();
-  };
-
   const nextAction =
-    next === "sign-in" ? (
-      <Button variant="primary" icon="link" disabled={busy} onClick={onSignIn}>
-        Sign in / Create account
-      </Button>
-    ) : next === "setup" ? (
+    next === "setup" ? (
       <Button variant="primary" icon="arrow-right" disabled={busy} onClick={onOpenWizard}>
         Resume setup
       </Button>
     ) : next === "approvals" ? (
-      <Button variant="primary" icon="alert" disabled={busy} onClick={() => onNavigate("activity")}>
+      <Button variant="primary" icon="alert" disabled={busy} onClick={() => onNavigate("tasks")}>
         Review requests
       </Button>
     ) : (
-      <Button variant="primary" icon="arrow-right" disabled={busy} onClick={() => onNavigate("browsers")}>
+      <Button variant="primary" icon="arrow-right" disabled={busy} onClick={() => onNavigate("profile")}>
         Manage browsers
       </Button>
     );
@@ -127,13 +114,9 @@ export function OverviewPage({
               ? "Connected to the gateway"
               : gateway.authRequired
                 ? "Sign in again to reconnect"
-                : "Gateway link is down"}
+                : "Not connected"}
           </span>
-          {gateway.authRequired ? (
-            <Button variant="primary" size="sm" icon="link" disabled={busy} onClick={onSignIn}>
-              Sign in again
-            </Button>
-          ) : snapshot.bridgeStatus === "disconnected" && gateway.enabled ? (
+          {snapshot.bridgeStatus === "disconnected" && gateway.enabled && !gateway.authRequired ? (
             <Button variant="secondary" size="sm" icon="refresh" disabled={busy} onClick={onReconnect}>
               Reconnect
             </Button>
@@ -163,8 +146,8 @@ export function OverviewPage({
             title="Connected apps"
             description={clients.length ? `${clients.length} paired` : undefined}
             action={
-              <Button variant="ghost" size="sm" icon="arrow-right" onClick={() => onNavigate("activity")}>
-                View activity
+              <Button variant="ghost" size="sm" icon="arrow-right" onClick={() => onNavigate("profile")}>
+                Manage apps
               </Button>
             }
           >
@@ -186,22 +169,9 @@ export function OverviewPage({
           <Section title="Connect your AI app" description="Add this to your AI app, then approve it when it asks.">
             <Field label="Connection" value={gateway.mcpUrl} copyable />
           </Section>
-
-          <Section title="Your account">
-            <div class="ui-row-inline">
-              <span>Signed in as {gateway.email || "your account"}</span>
-              <Button variant="ghost" size="sm" disabled={busy} onClick={signOut}>
-                Sign out
-              </Button>
-            </div>
-          </Section>
         </>
       ) : (
-        <Section title="Connect your browser" description="Sign in to link this browser to your account.">
-          <Button variant="primary" block icon="link" disabled={busy} onClick={onSignIn}>
-            Sign in / Create account
-          </Button>
-        </Section>
+        <Section title="Not signed in" description="Sign in to link this browser to your account." />
       )}
     </Page>
   );

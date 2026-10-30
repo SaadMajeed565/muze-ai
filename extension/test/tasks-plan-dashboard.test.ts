@@ -124,7 +124,7 @@ describe("TasksPage Phase 2 rendering", () => {
   function mount(): HTMLElement {
     root = document.createElement("div");
     document.body.appendChild(root);
-    render(h(TasksPage, {}), root);
+    render(h(TasksPage, { approvals: [] }), root);
     return root;
   }
 

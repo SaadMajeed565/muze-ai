@@ -12,7 +12,8 @@ import {
   normalizeGatewayUrl,
   rotateDeviceToken,
   reuseBrowserSession,
-  signInWithBrowser,
+  signInWithEmailPassword,
+  signUpWithEmailPassword,
   type BrowserInfo,
   type GatewayAccount,
 } from "./gateway-client.js";
@@ -529,6 +530,23 @@ function markGatewayAuthRequired(token: string, reason: string): void {
 }
 
 /**
+ * Map a gateway auth failure to one plain sentence for the dashboard.
+ * Gateway messages are already plain ("Invalid email or password."),
+ * but the browser-limit wording is technical, so it is rewritten here
+ * rather than shown raw.
+ */
+function plainAuthError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/invalid email or password/i.test(message)) return "Wrong email or password.";
+  if (/already exists/i.test(message)) return "That email already has an account.";
+  if (/browser limit/i.test(message)) return "You already have 10 browsers attached. Remove one, then try again.";
+  if (/timed out/i.test(message)) return "The gateway did not respond. Check the connection and try again.";
+  if (/valid email/i.test(message)) return "Enter a valid email address.";
+  if (/at least 8 characters/i.test(message)) return "Use a password with at least 8 characters.";
+  return message || "Sign-in failed. Try again.";
+}
+
+/**
  * Dial the gateway. The token is checked over HTTPS *before* opening the
  * socket: a revoked token then produces a clear sign-in prompt instead of a
  * reconnect loop. Network/preflight outages still attempt the socket, which
@@ -853,12 +871,46 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
       await connectGateway(activeSettings);
       return { ok: true, state: dashboardState() };
     case "muze/gateway/sign-in": {
+      // Legacy dashboard spelling: reuse a stored token's browser, or
+      // report that email sign-in is required. The dashboard no longer
+      // opens the website sign-in flow; use muze/gateway/sign-in-email.
       try {
+        if (!activeSettings.gatewayToken) {
+          return { ok: false, error: "Sign in with your email and password." };
+        }
+        const info = localBrowserInfo();
+        const reused = await reuseBrowserSession(GATEWAY_URL, activeSettings.gatewayToken, info);
+        const account: GatewayAccount = {
+          token: activeSettings.gatewayToken,
+          email: activeSettings.gatewayAccountEmail,
+          sessionId: reused.sessionId,
+        };
+        gatewayAuthRequired = false;
+        gatewayAuthToken = "";
+        activeSettings = await saveBridgeSettings({
+          gatewayAccountEmail: account.email,
+          gatewayToken: account.token,
+          gatewaySessionId: account.sessionId,
+          gatewayEnabled: true,
+        });
+        await connectGateway(activeSettings);
+        return { ok: true, state: dashboardState() };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    case "muze/gateway/sign-in-email":
+    case "muze/gateway/sign-up-email": {
+      // In-extension sign-in / sign-up: email + password go only to the
+      // gateway over HTTPS and are never stored in the extension. A
+      // stored token still reuses its own browser first, exactly as the
+      // legacy sign-in did; a fresh sign-in creates a new browser.
+      try {
+        const email = String(request.email ?? "").trim();
+        const password = String(request.password ?? "");
+        if (!email || !password) return { ok: false, error: "Enter your email and password." };
         const info = localBrowserInfo();
         let account: GatewayAccount;
-        // A stored token reuses its own browser (updates info/lastSeen,
-        // no new entry); a fresh install goes through the website flow,
-        // which adopts the signup placeholder or creates a new browser.
         if (activeSettings.gatewayToken) {
           try {
             const reused = await reuseBrowserSession(GATEWAY_URL, activeSettings.gatewayToken, info);
@@ -868,10 +920,16 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
               sessionId: reused.sessionId,
             };
           } catch {
-            account = await signInWithBrowser(GATEWAY_URL, info);
+            account =
+              request.type === "muze/gateway/sign-up-email"
+                ? await signUpWithEmailPassword(GATEWAY_URL, email, password, info)
+                : await signInWithEmailPassword(GATEWAY_URL, email, password, info);
           }
         } else {
-          account = await signInWithBrowser(GATEWAY_URL, info);
+          account =
+            request.type === "muze/gateway/sign-up-email"
+              ? await signUpWithEmailPassword(GATEWAY_URL, email, password, info)
+              : await signInWithEmailPassword(GATEWAY_URL, email, password, info);
         }
         gatewayAuthRequired = false;
         gatewayAuthToken = "";
@@ -880,6 +938,37 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
           gatewayToken: account.token,
           gatewaySessionId: account.sessionId,
           gatewayEnabled: true,
+        });
+        await connectGateway(activeSettings);
+        return { ok: true, state: dashboardState() };
+      } catch (error) {
+        return { ok: false, error: plainAuthError(error) };
+      }
+    }
+    case "muze/gateway/delete-account": {
+      if (!activeSettings.gatewayToken) return { ok: false, error: "Not signed in" };
+      try {
+        const response = await fetch(`${normalizeGatewayUrl(GATEWAY_URL)}/extension/account/delete`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${activeSettings.gatewayToken}` },
+        });
+        if (!response.ok) {
+          let message = "Could not delete the account.";
+          try {
+            const body = (await response.json()) as { error?: string };
+            if (body.error) message = body.error;
+          } catch {
+            // Keep the plain fallback.
+          }
+          return { ok: false, error: message };
+        }
+        gatewayAuthRequired = false;
+        gatewayAuthToken = "";
+        activeSettings = await saveBridgeSettings({
+          gatewayAccountEmail: "",
+          gatewayToken: "",
+          gatewaySessionId: "",
+          gatewayEnabled: false,
         });
         await connectGateway(activeSettings);
         return { ok: true, state: dashboardState() };

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "preact/hooks";
 import type { PermissionMode } from "../libs/security/index.js";
-import { ONBOARDING_STEPS, clampStep, onboardingProgress } from "./logic.js";
+import { ONBOARDING_STEPS, clampStep, onboardingProgress, type OnboardingStepDefinition } from "./logic.js";
 import { Icon } from "./components/Icon.js";
 import { Button, Callout, CopyButton, EmptyState } from "./components/primitives.js";
 import { PermissionLevelPicker } from "./PermissionLevelPicker.js";
@@ -19,7 +19,20 @@ export interface OnboardingProps {
   onSignIn: () => void;
   onFinish: () => void;
   onSkip: () => void;
+  /**
+   * Compact wizard (v2): only permission level + connect an AI app.
+   * The auth screen covers sign-in, so the old welcome and
+   * connect-browser steps are skipped. Implemented by mapping the two
+   * compact steps onto the old step 2 and step 4 content, so the
+   * non-compact wizard is untouched.
+   */
+  compact?: boolean;
 }
+
+const COMPACT_STEPS: OnboardingStepDefinition[] = [
+  { id: "level", title: "Permission level", caption: "How far may the agent go?" },
+  { id: "client", title: "Connect your AI app", caption: "Point your AI client here." },
+];
 
 function valueRows(): { icon: "key" | "shield" | "lock"; title: string; body: string }[] {
   return [
@@ -55,20 +68,28 @@ export function Onboarding({
   onSignIn,
   onFinish,
   onSkip,
+  compact = false,
 }: OnboardingProps): preact.JSX.Element {
   // Render is clamped, not just the progress math: an out-of-range persisted
   // step used to index ONBOARDING_STEPS[step - 1] directly and could crash
   // rendering. safeStep is the only step value the render below uses.
-  const safeStep = clampStep(step);
+  const steps = compact ? COMPACT_STEPS : ONBOARDING_STEPS;
+  const safeStep = compact ? Math.min(steps.length, Math.max(1, step)) : clampStep(step);
   const heading = useRef<HTMLHeadingElement>(null);
-  const progress = onboardingProgress(safeStep);
+  const progress = compact
+    ? { current: safeStep, total: steps.length, percent: Math.round((safeStep / steps.length) * 100) }
+    : onboardingProgress(safeStep);
+  // In compact mode, step 1 is the old level step and step 2 is the old
+  // connect-app step; all content below keys off oldStep, so the
+  // non-compact wizard renders exactly as before.
+  const oldStep = compact ? (safeStep === 1 ? 2 : 4) : safeStep;
 
   useEffect(() => {
     heading.current?.focus();
   }, [safeStep]);
 
   const back = (): void => onStep(Math.max(1, safeStep - 1));
-  const next = (): void => onStep(Math.min(ONBOARDING_STEPS.length, safeStep + 1));
+  const next = (): void => onStep(Math.min(steps.length, safeStep + 1));
 
   const footer = (
     <footer class="onboarding-foot">
@@ -80,7 +101,7 @@ export function Onboarding({
         ) : null}
       </div>
       <div class="onboarding-foot-right">
-        {safeStep < ONBOARDING_STEPS.length ? (
+        {safeStep < steps.length ? (
           <>
             <Button variant="ghost" onClick={onSkip} disabled={busy}>
               Skip setup
@@ -116,24 +137,24 @@ export function Onboarding({
       </header>
 
       <main class="onboarding-body">
-        <div class="onboarding-pane" key={ONBOARDING_STEPS[safeStep - 1].id}>
+        <div class="onboarding-pane" key={steps[safeStep - 1].id}>
           <div class="onboarding-intro">
-            <p class="eyebrow">{ONBOARDING_STEPS[safeStep - 1].caption}</p>
+            <p class="eyebrow">{steps[safeStep - 1].caption}</p>
             <h1 tabindex={-1} ref={heading}>
-              {safeStep === 1
+              {oldStep === 1
                 ? "Your browser, under your control."
-                : safeStep === 2
+                : oldStep === 2
                   ? "How far may the agent go?"
-                  : safeStep === 3
+                  : oldStep === 3
                     ? "Connect this browser."
                     : "Point your AI client here."}
             </h1>
             <p class="lede">
-              {safeStep === 1
+              {oldStep === 1
                 ? "Muze AI links this browser to your AI client over MCP. The agent only reaches what you allow, and every risky action can ask you first."
-                : safeStep === 2
-                  ? "Pick a starting point. You can change it at any time from Safety."
-                  : safeStep === 3
+                : oldStep === 2
+                  ? "Pick a starting point. You can change it at any time from Profile."
+                  : oldStep === 3
                     ? "Sign in to link this browser to your Muze account."
                     : "Add the endpoint to your MCP client, then sign in and authorise the client — no token paste needed."}
             </p>
@@ -141,7 +162,7 @@ export function Onboarding({
 
           {error ? <Callout tone="danger">{error}</Callout> : null}
 
-          {safeStep === 1 ? (
+          {oldStep === 1 ? (
             <ul class="value-list">
               {valueRows().map((row) => (
                 <li key={row.title}>
@@ -157,9 +178,9 @@ export function Onboarding({
             </ul>
           ) : null}
 
-          {safeStep === 2 ? <PermissionLevelPicker variant="cards" mode={mode} disabled={busy} onChange={onModeChange} /> : null}
+          {oldStep === 2 ? <PermissionLevelPicker variant="cards" mode={mode} disabled={busy} onChange={onModeChange} /> : null}
 
-          {safeStep === 3 ? (
+          {oldStep === 3 ? (
             <div class="connect-pane">
               {signedIn ? (
                 <Callout tone="success" icon="check">
@@ -181,7 +202,7 @@ export function Onboarding({
             </div>
           ) : null}
 
-          {safeStep === 4 ? (
+          {oldStep === 4 ? (
             signedIn ? (
               <div class="credential-list">
                 <div class="credential">

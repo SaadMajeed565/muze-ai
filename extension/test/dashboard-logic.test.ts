@@ -150,9 +150,11 @@ describe("appearance", () => {
 
 describe("tabs", () => {
   it("exposes the dashboard sections", () => {
-    expect(TABS.map((tab) => tab.id)).toEqual(["overview", "permissions", "files", "activity", "tasks", "browsers"]);
+    expect(TABS.map((tab) => tab.id)).toEqual(["overview", "tasks", "files", "profile"]);
     expect(isTabId("files")).toBe(true);
-    expect(isTabId("activity")).toBe(true);
+    expect(isTabId("activity")).toBe(false);
+    expect(isTabId("browsers")).toBe(false);
+    expect(isTabId("profile")).toBe(true);
     expect(isTabId("tasks")).toBe(true);
     expect(isTabId("nope")).toBe(false);
   });

@@ -108,6 +108,36 @@ async function readError(response: Response): Promise<string> {
 }
 
 /**
+ * Fetch with a hard timeout. A hung request must reject: without this,
+ * a caller awaiting a half-open connection waits forever and its
+ * try/catch never runs (the service-worker preflight hang). The race
+ * also aborts the request, so a signal-ignoring stub cannot mask the
+ * timeout in tests either.
+ */
+export async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<Response>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      try {
+        controller.abort();
+      } catch {
+        // Aborting is best-effort; the race below still rejects on time.
+      }
+      reject(new Error("request timed out"));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([fetch(input, { ...init, signal: controller.signal }), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Default time to wait for the gateway status preflight before dialling the socket anyway. */
+export const GATEWAY_PREFLIGHT_TIMEOUT_MS = 10_000;
+
+/**
  * Open the website sign-in flow in a browser popup. After the user signs up or
  * logs in, the website redirects back with a one-time code that the extension
  * exchanges for the account token.
@@ -193,11 +223,70 @@ export async function rotateDeviceToken(baseUrl: string, deviceToken: string): P
   return { deviceToken: next, sessionId: body.sessionId ?? "" };
 }
 
-export async function fetchGatewayStatus(baseUrl: string, deviceToken: string): Promise<GatewayStatus> {
+export async function fetchGatewayStatus(
+  baseUrl: string,
+  deviceToken: string,
+  timeoutMs: number = GATEWAY_PREFLIGHT_TIMEOUT_MS,
+): Promise<GatewayStatus> {
   const base = normalizeGatewayUrl(baseUrl);
-  const response = await fetch(`${base}/session/status`, {
-    headers: { authorization: `Bearer ${deviceToken}` },
-  });
+  const response = await fetchWithTimeout(
+    `${base}/session/status`,
+    {
+      headers: { authorization: `Bearer ${deviceToken}` },
+    },
+    timeoutMs,
+  );
   if (!response.ok) throw new GatewayHttpError(response.status, await readError(response));
   return (await response.json()) as GatewayStatus;
+}
+
+/**
+ * Sign in or sign up from inside the extension (no website page).
+ * The password is sent only over HTTPS to the gateway and is never
+ * stored in the extension; the returned device token is stored in
+ * extension storage exactly like the website-flow token and is never
+ * rendered in the UI. A 30-second timeout keeps a hung sign-in from
+ * spinning forever on the auth screen.
+ */
+async function extensionAuth(
+  baseUrl: string,
+  path: "/extension/auth/login" | "/extension/auth/signup",
+  email: string,
+  password: string,
+  info: BrowserInfo,
+): Promise<GatewayAccount> {
+  const base = normalizeGatewayUrl(baseUrl);
+  if (!base) throw new Error("Gateway URL is required");
+  const response = await fetchWithTimeout(
+    `${base}${path}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password, browserInfo: info }),
+    },
+    30_000,
+  );
+  if (!response.ok) throw new Error(await readError(response));
+  const account = (await response.json()) as Partial<GatewayAccount>;
+  const token = account.token ?? "";
+  if (!token) throw new Error("Sign-in did not return a token");
+  return { token, email: account.email ?? email, sessionId: account.sessionId ?? "" };
+}
+
+export async function signInWithEmailPassword(
+  baseUrl: string,
+  email: string,
+  password: string,
+  info: BrowserInfo,
+): Promise<GatewayAccount> {
+  return extensionAuth(baseUrl, "/extension/auth/login", email, password, info);
+}
+
+export async function signUpWithEmailPassword(
+  baseUrl: string,
+  email: string,
+  password: string,
+  info: BrowserInfo,
+): Promise<GatewayAccount> {
+  return extensionAuth(baseUrl, "/extension/auth/signup", email, password, info);
 }

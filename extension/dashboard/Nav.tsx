@@ -1,5 +1,5 @@
 import { TABS, type IconName, type TabId } from "./logic.js";
-import { NAV_GROUPS } from "./ui-logic.js";
+import { NAV_TABS } from "./ui-logic.js";
 import { Icon } from "./components/Icon.js";
 
 export interface NavProps {
@@ -24,13 +24,15 @@ function tabIcon(id: TabId): IconName {
 }
 
 /**
- * Grouped navigation: a left rail with group headings on wide windows
- * (options page) and a compact bottom tab bar inside the side panel.
- * CSS keeps exactly one of them in the accessibility tree at a time.
- * There is no Tools entry: developer tool data is never rendered.
+ * Navigation (v2): exactly four tabs on every breakpoint — a left rail
+ * on wide windows (options page) and a single-row bottom tab bar in
+ * the side panel. The tab bar never wraps: with four columns it has
+ * one row by construction, and labels truncate rather than wrap.
+ * The pending-requests badge lives on Tasks, where approvals are
+ * answered. There is no Tools, Browsers, Safety, or Activity tab:
+ * developer tool data is never rendered.
  */
 export function Nav({ active, onChange, status, clients, pending }: NavProps): preact.JSX.Element {
-  const allTabs = NAV_GROUPS.flatMap((group) => group.tabs);
   return (
     <>
       <nav class="rail" aria-label="Sections">
@@ -40,29 +42,24 @@ export function Nav({ active, onChange, status, clients, pending }: NavProps): p
             <span class="brand-name">Muze AI</span>
           </span>
         </div>
-        {NAV_GROUPS.map((group) => (
-          <div class="rail-group" key={group.label}>
-            <span class="rail-group-label">{group.label}</span>
-            <ul class="rail-links">
-              {group.tabs.map((id) => (
-                <li key={id}>
-                  <button
-                    type="button"
-                    class={"rail-link" + (active === id ? " is-on" : "")}
-                    aria-current={active === id ? "page" : undefined}
-                    onClick={() => onChange(id)}
-                  >
-                    <Icon name={tabIcon(id)} size={17} />
-                    <span>{tabLabel(id)}</span>
-                    {id === "activity" && pending > 0 ? (
-                      <span class="rail-badge">{pending > 9 ? "9+" : pending}</span>
-                    ) : null}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
+        <ul class="rail-links">
+          {NAV_TABS.map((id) => (
+            <li key={id}>
+              <button
+                type="button"
+                class={"rail-link" + (active === id ? " is-on" : "")}
+                aria-current={active === id ? "page" : undefined}
+                onClick={() => onChange(id)}
+              >
+                <Icon name={tabIcon(id)} size={17} />
+                <span>{tabLabel(id)}</span>
+                {id === "tasks" && pending > 0 ? (
+                  <span class="rail-badge">{pending > 9 ? "9+" : pending}</span>
+                ) : null}
+              </button>
+            </li>
+          ))}
+        </ul>
         <div class="rail-foot">
           <span class={"status-dot " + (status === "connected" ? "is-on" : "")} aria-hidden="true" />
           <span>{statusLabel(status, clients)}</span>
@@ -70,7 +67,7 @@ export function Nav({ active, onChange, status, clients, pending }: NavProps): p
       </nav>
 
       <nav class="tabbar" aria-label="Sections">
-        {allTabs.map((id) => (
+        {NAV_TABS.map((id) => (
           <button
             key={id}
             type="button"
@@ -80,10 +77,10 @@ export function Nav({ active, onChange, status, clients, pending }: NavProps): p
           >
             <span class="tabbar-icon">
               <Icon name={tabIcon(id)} size={19} />
-              {id === "activity" && pending > 0 ? <span class="tabbar-dot" aria-hidden="true" /> : null}
+              {id === "tasks" && pending > 0 ? <span class="tabbar-dot" aria-hidden="true" /> : null}
             </span>
             <span class="tabbar-label">{tabLabel(id)}</span>
-            {id === "activity" && pending > 0 ? (
+            {id === "tasks" && pending > 0 ? (
               <span class="sr-only">{pending} requests waiting for approval</span>
             ) : null}
           </button>

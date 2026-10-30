@@ -7,11 +7,10 @@ import { Icon } from "./components/Icon.js";
 import { Button, Callout, Card, Skeleton } from "./components/primitives.js";
 import { Nav } from "./Nav.js";
 import { Onboarding } from "./Onboarding.js";
-import { ActivityPage } from "./pages/Activity.js";
-import { BrowsersPage } from "./pages/Browsers.js";
+import { AuthPage, type AuthMode } from "./pages/Auth.js";
 import { FilesPage } from "./pages/Files.js";
 import { OverviewPage } from "./pages/Overview.js";
-import { PermissionsPage } from "./pages/Permissions.js";
+import { ProfilePage } from "./pages/Profile.js";
 import { TasksPage } from "./pages/Tasks.js";
 
 const POLL_MS = 5000;
@@ -133,7 +132,11 @@ export function App(): preact.JSX.Element {
   useEffect(() => {
     if (!state || initialised.current) return;
     initialised.current = true;
-    setWizardStep(state.onboarding.step);
+    // The v2 wizard is compact (permission level + connect an AI app)
+    // and only ever shows when signed in; the auth screen covers the
+    // signed-out case. Start it at step 1 regardless of the persisted
+    // step from the old four-step wizard.
+    setWizardStep(1);
     if (!state.onboarding.completed) setWizardOpen(true);
   }, [state]);
 
@@ -146,7 +149,7 @@ export function App(): preact.JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (tab === "activity") void loadAudit();
+    if (tab === "tasks") void loadAudit();
   }, [tab, loadAudit, state?.snapshot.auditEvents]);
 
   const request = async (message: unknown): Promise<boolean> => {
@@ -189,13 +192,21 @@ export function App(): preact.JSX.Element {
   };
 
   const setStep = (step: number): void => {
+    // Compact wizard steps are local only; only completion is persisted.
     setWizardStep(step);
-    void request({ type: "muze/onboarding/set", patch: { step } });
   };
 
   const finishWizard = async (): Promise<void> => {
     const ok = await request({ type: "muze/onboarding/set", patch: { completed: true, step: 4 } });
     if (ok) closeWizard(4);
+  };
+
+  const submitAuth = async (mode: AuthMode, email: string, password: string): Promise<boolean> => {
+    return request({
+      type: mode === "sign-up" ? "muze/gateway/sign-up-email" : "muze/gateway/sign-in-email",
+      email,
+      password,
+    });
   };
 
   const skipWizard = async (): Promise<void> => {
@@ -209,9 +220,18 @@ export function App(): preact.JSX.Element {
 
   if (!state) return <LoadingScreen error={loadError} />;
 
+  // Signed out (or the stored token was rejected): the auth screen
+  // replaces the dashboard entirely. There is no separate "not
+  // connected" dashboard state; Home handles the disconnected case
+  // inline once signed in.
+  if (!state.gateway.signedIn || state.gateway.authRequired) {
+    return <AuthPage busy={busy} error={error} onSubmit={submitAuth} />;
+  }
+
   if (wizardOpen) {
     return (
       <Onboarding
+        compact
         step={wizardStep}
         busy={busy}
         error={error}
@@ -222,7 +242,7 @@ export function App(): preact.JSX.Element {
         connectedClients={state.snapshot.connectedClients}
         onStep={setStep}
         onModeChange={(mode: PermissionMode) => void request({ type: "muze/policy/mode", mode })}
-        onSignIn={() => void request({ type: "muze/gateway/sign-in" })}
+        onSignIn={() => undefined}
         onFinish={() => void finishWizard()}
         onSkip={() => void skipWizard()}
       />
@@ -271,16 +291,28 @@ export function App(): preact.JSX.Element {
                 state={state}
                 busy={busy}
                 onGatewayToggle={(enabled) => void request({ type: "muze/bridge/settings", patch: { gatewayEnabled: enabled } })}
-                onSignIn={() => void request({ type: "muze/gateway/sign-in" })}
                 onReconnect={() => void request({ type: "muze/bridge/reconnect" })}
-                onSignOut={() => void request({ type: "muze/gateway/sign-out" })}
                 onOpenWizard={openWizard}
                 onNavigate={goToTab}
               />
             ) : null}
 
-            {tab === "permissions" ? (
-              <PermissionsPage
+            {tab === "files" ? <FilesPage /> : null}
+
+            {tab === "tasks" ? (
+              <TasksPage
+                approvals={approvals}
+                audit={audit}
+                auditLoading={auditLoading}
+                busy={busy}
+                onRespond={respond}
+                onCancelForClient={(clientId) => void request({ type: "muze/approvals/cancel-for-client", clientId })}
+                onRefreshAudit={() => void loadAudit()}
+              />
+            ) : null}
+
+            {tab === "profile" ? (
+              <ProfilePage
                 state={state}
                 busy={busy}
                 appearance={appearance}
@@ -290,24 +322,9 @@ export function App(): preact.JSX.Element {
                 onReadOnly={(enabled) => void request({ type: "muze/policy/readonly", enabled })}
                 onKillSwitch={(engaged) => void request({ type: "muze/killswitch", engaged })}
                 onGroupToggle={(group, enabled) => void request({ type: "muze/policy/group", group, enabled })}
-              />
-            ) : null}
-
-            {tab === "files" ? <FilesPage /> : null}
-
-            {tab === "tasks" ? <TasksPage /> : null}
-
-            {tab === "browsers" ? <BrowsersPage /> : null}
-
-            {tab === "activity" ? (
-              <ActivityPage
-                approvals={approvals}
-                audit={audit}
-                auditLoading={auditLoading}
-                busy={busy}
-                onRespond={respond}
-                onCancelForClient={(clientId) => void request({ type: "muze/approvals/cancel-for-client", clientId })}
-                onRefreshAudit={() => void loadAudit()}
+                onSignOut={() => void request({ type: "muze/gateway/sign-out" })}
+                onReconnect={() => void request({ type: "muze/bridge/reconnect" })}
+                onDeleteAccount={() => void request({ type: "muze/gateway/delete-account" })}
               />
             ) : null}
           </main>

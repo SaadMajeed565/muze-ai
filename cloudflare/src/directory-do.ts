@@ -179,12 +179,26 @@ export class DirectoryDO implements DurableObject {
         return this.signup(String(body.email ?? ""), String(body.password ?? ""));
       case "login":
         return this.login(String(body.email ?? ""), String(body.password ?? ""));
+      case "extensionSignup":
+        return this.extensionSignup(
+          String(body.email ?? ""),
+          String(body.password ?? ""),
+          (body.browserInfo ?? {}) as BrowserInfo,
+        );
+      case "extensionLogin":
+        return this.extensionLogin(
+          String(body.email ?? ""),
+          String(body.password ?? ""),
+          (body.browserInfo ?? {}) as BrowserInfo,
+        );
       case "accountBySession":
         return this.accountBySession(String(body.sessionToken ?? ""));
       case "logout":
         return this.logout(String(body.sessionToken ?? ""));
       case "deleteAccount":
         return this.deleteAccount(String(body.sessionToken ?? ""));
+      case "deleteAccountByUser":
+        return this.deleteAccountByUser(String(body.userId ?? ""));
       case "createExtensionCode":
         return this.createExtensionCode(
           String(body.userId ?? ""),
@@ -708,7 +722,16 @@ export class DirectoryDO implements DurableObject {
     return token;
   }
 
-  private async signup(email: string, password: string): Promise<Record<string, any>> {
+  /**
+   * Create a user row, shared by website signup and extension signup.
+   * It creates no browser: the caller decides what browser (if any)
+   * the new account gets — a placeholder for the website flow, a real
+   * claimed browser for the extension flow.
+   */
+  private async createUser(
+    email: string,
+    password: string,
+  ): Promise<{ userId: string; email: string } | { ok: false; error: string }> {
     const normalized = email.trim().toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalized)) return { ok: false, error: "Enter a valid email address." };
     if (password.length < 8) return { ok: false, error: "Password must be at least 8 characters." };
@@ -719,9 +742,76 @@ export class DirectoryDO implements DurableObject {
     const user: UserRow = { userId, email: normalized, salt, passwordHash: hash, createdAt: nowMs() };
     await this.storage.put(`email:${normalized}`, userId);
     await this.storage.put(`u:${userId}`, user);
-    const account = await this.ensureAccount(userId, normalized);
-    const webToken = await this.newWebSession(userId);
-    return { userId, email: normalized, sessionId: account.defaultSessionId, webToken };
+    return { userId, email: normalized };
+  }
+
+  private async signup(email: string, password: string): Promise<Record<string, any>> {
+    const created = await this.createUser(email, password);
+    if ("ok" in created) return created;
+    const account = await this.ensureAccount(created.userId, created.email);
+    const webToken = await this.newWebSession(created.userId);
+    return { userId: created.userId, email: created.email, sessionId: account.defaultSessionId, webToken };
+  }
+
+  /**
+   * Extension sign-up (POST /extension/auth/signup): creates the account
+   * and immediately creates a real, claimed browser for this extension
+   * with its own device token — no unclaimed placeholder, because this
+   * extension already owns the browser. The token is returned to the
+   * extension only; it is never rendered on any website page.
+   */
+  private async extensionSignup(email: string, password: string, info: BrowserInfo): Promise<Record<string, any>> {
+    const created = await this.createUser(email, password);
+    if ("ok" in created) return created;
+    const account: AccountRow = { userId: created.userId, browsers: [], defaultSessionId: "", createdAt: nowMs() };
+    await this.storage.put(`acct:${created.userId}`, account);
+    if (account.browsers.length >= DirectoryDO.MAX_BROWSERS) {
+      return { ok: false, error: "browser limit reached (10 browsers per account)" };
+    }
+    const browser = await this.createBrowserRecord(account, this.cleanBrowserInfo(info), true);
+    return { token: browser.deviceToken, email: created.email, sessionId: browser.sessionId };
+  }
+
+  /**
+   * Extension sign-in (POST /extension/auth/login): verifies the user
+   * and gives this extension a browser. If the account still has the
+   * unclaimed placeholder from a website signup, this extension adopts
+   * it (rotating its token, exactly as the website sign-in redeem
+   * does) instead of leaving a phantom browser row; otherwise it
+   * creates a new browser, cap-checked. The token is returned to the
+   * extension only.
+   */
+  private async extensionLogin(email: string, password: string, info: BrowserInfo): Promise<Record<string, any>> {
+    const normalized = email.trim().toLowerCase();
+    const userId = await this.storage.get<string>(`email:${normalized}`);
+    if (!userId) return { ok: false, error: "Invalid email or password." };
+    const user = await this.storage.get<UserRow>(`u:${userId}`);
+    if (!user || !(await verifyPassword(password, user.salt, user.passwordHash))) {
+      return { ok: false, error: "Invalid email or password." };
+    }
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    const cleaned = this.cleanBrowserInfo(info);
+    const unclaimed = account.browsers.find((entry) => !entry.claimed);
+    if (unclaimed) {
+      const rotated = await this.rotateDeviceToken(unclaimed.sessionId);
+      if (rotated.ok === false) return rotated;
+      const fresh = await this.loadAccount(userId);
+      if (!fresh) return { ok: false, error: "unknown account", status: 404 };
+      const browser = fresh.browsers.find((entry) => entry.sessionId === unclaimed.sessionId);
+      if (!browser) return { ok: false, error: "unknown browser", status: 404 };
+      if (cleaned.name) browser.name = cleaned.name;
+      if (cleaned.browser) browser.browser = cleaned.browser;
+      if (cleaned.os) browser.os = cleaned.os;
+      if (cleaned.version) browser.version = cleaned.version;
+      browser.claimed = true;
+      browser.lastSeenAt = nowMs();
+      await this.storage.put(`acct:${userId}`, fresh);
+      return { token: rotated.deviceToken, email: user.email, sessionId: browser.sessionId };
+    }
+    const created = await this.createBrowserSession(userId, cleaned);
+    if ("ok" in created && created.ok === false) return created;
+    return { token: created.deviceToken, email: user.email, sessionId: created.sessionId };
   }
 
   private async login(email: string, password: string): Promise<Record<string, any>> {
@@ -759,7 +849,12 @@ export class DirectoryDO implements DurableObject {
     if (!sessionToken) return { ok: false, error: "not signed in", status: 401 };
     const row = await this.storage.get<WebSessionRow>(`ws:${await sha256Hex(sessionToken)}`);
     if (!row) return { ok: false, error: "not signed in", status: 401 };
-    const userId = row.userId;
+    return this.deleteAccountByUser(row.userId);
+  }
+
+  /** Same deletion, authenticated by user id (extension device-token route). */
+  private async deleteAccountByUser(userId: string): Promise<Record<string, any>> {
+    if (!userId) return { ok: false, error: "unknown account", status: 404 };
     const user = await this.storage.get<UserRow>(`u:${userId}`);
     const account = await this.loadAccount(userId);
     if (account) {

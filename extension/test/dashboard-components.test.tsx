@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Onboarding } from "../dashboard/Onboarding.js";
 import { PermissionLevelPicker } from "../dashboard/PermissionLevelPicker.js";
 import { Nav } from "../dashboard/Nav.js";
-import { PermissionsPage } from "../dashboard/pages/Permissions.js";
-import { ActivityPage } from "../dashboard/pages/Activity.js";
+import { PermissionsSections } from "../dashboard/components/permissions-sections.js";
+import { TasksPage } from "../dashboard/pages/Tasks.js";
 import type { DashboardState } from "../src/messages.js";
 import type { AuditEvent } from "../libs/security/index.js";
 import { Switch } from "../dashboard/components/primitives.js";
@@ -196,19 +196,24 @@ describe("Onboarding", () => {
 });
 
 describe("Nav", () => {
-  it("groups navigation and has no Tools entry", () => {
+  it("has exactly four tabs and no Tools, Browsers, Safety, or Activity entry", () => {
     const { container } = (getQueries(mount(
       <Nav active="overview" onChange={vi.fn()} status="connected" clients={1} pending={2} />,
     )));
     expect(container.textContent).toContain("Home");
-    expect(container.textContent).toContain("Devices");
-    expect(container.textContent).toContain("Safety");
-    expect(container.textContent).toContain("Activity");
+    expect(container.textContent).toContain("Tasks");
+    expect(container.textContent).toContain("Files");
+    expect(container.textContent).toContain("Profile");
     expect(container.textContent).not.toContain("Tools");
+    expect(container.textContent).not.toContain("Browsers");
+    expect(container.textContent).not.toContain("Safety");
+    // "Activity" must not appear as a tab; the word survives only inside
+    // the Tasks page sections, which this component does not render.
+    expect(container.querySelectorAll(".tabbar a, .tabbar button, .rail-links a, .rail-links button").length).toBeGreaterThan(0);
   });
 });
 
-describe("PermissionsPage end-user only", () => {
+describe("PermissionsSections end-user only", () => {
   function state(): DashboardState {
     return {
       snapshot: {
@@ -230,7 +235,7 @@ describe("PermissionsPage end-user only", () => {
   }
   it("shows plain capabilities and no tool names, counts, or overrides", () => {
     const { container } = (getQueries(mount(
-      <PermissionsPage state={state()} busy={false} appearance="system" onAppearance={vi.fn()} onModeChange={vi.fn()} onPolicyPatch={vi.fn()} onReadOnly={vi.fn()} onKillSwitch={vi.fn()} onGroupToggle={vi.fn()} />,
+      <PermissionsSections state={state()} busy={false} appearance="system" onAppearance={vi.fn()} onModeChange={vi.fn()} onPolicyPatch={vi.fn()} onReadOnly={vi.fn()} onKillSwitch={vi.fn()} onGroupToggle={vi.fn()} />,
     )));
     expect(container.textContent).toContain("What Muze can do");
     expect(container.textContent).toContain("Read pages");
@@ -241,7 +246,7 @@ describe("PermissionsPage end-user only", () => {
   });
 });
 
-describe("ActivityPage end-user only", () => {
+describe("TasksPage approvals and activity end-user only", () => {
   it("shows approvals without tool names or risk labels, and activity without tool names", () => {
     const approvals = [{
       id: "a1", tool: "downloads.start", title: "Start a download",
@@ -254,10 +259,12 @@ describe("ActivityPage end-user only", () => {
       client: { id: "c1", name: "Claude", transport: "remote" }, at: new Date().toISOString(),
     } as unknown as AuditEvent];
     const { container } = (getQueries(mount(
-      <ActivityPage approvals={approvals as never} audit={audit} auditLoading={false} busy={false} onRespond={vi.fn()} onCancelForClient={vi.fn()} onRefreshAudit={vi.fn()} />,
+      <TasksPage approvals={approvals as never} audit={audit} auditLoading={false} busy={false} onRespond={vi.fn()} onCancelForClient={vi.fn()} onRefreshAudit={vi.fn()} />,
     )));
+    expect(container.textContent).toContain("Waiting for you");
     expect(container.textContent).toContain("Start a download");
     expect(container.textContent).toContain("Claude");
+    expect(container.textContent).toContain("Recent activity");
     expect(container.textContent).toContain("Agent acted");
     expect(container.textContent).toContain("Allowed");
     expect(container.textContent).not.toContain("downloads.start");

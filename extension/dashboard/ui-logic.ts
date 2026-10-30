@@ -9,21 +9,15 @@ import type { TabId } from "./logic.js";
  * unchanged — only what is shown changes.
  */
 
-/** Grouped navigation: Home, Devices, Safety, Activity. No Tools tab. */
-export interface NavGroup {
-  label: string;
-  tabs: TabId[];
-}
-
-export const NAV_GROUPS: NavGroup[] = [
-  { label: "Home", tabs: ["overview"] },
-  { label: "Devices", tabs: ["browsers", "files"] },
-  { label: "Safety", tabs: ["permissions"] },
-  { label: "Activity", tabs: ["tasks", "activity"] },
-];
+/**
+ * Navigation (v2): exactly four tabs, the same on every breakpoint.
+ * No group headings are needed for four items. Activity lives inside
+ * Tasks; browsers, apps, and permissions live inside Profile.
+ */
+export const NAV_TABS: TabId[] = ["overview", "tasks", "files", "profile"];
 
 export function navGroupTabs(): TabId[] {
-  return NAV_GROUPS.flatMap((group) => group.tabs);
+  return [...NAV_TABS];
 }
 
 /** Truncate to at most maxChars characters, keeping whole words where possible. */

@@ -363,9 +363,12 @@ code {
   bottom: 0;
   z-index: 30;
   display: grid;
-  /* Five tabs (overview, permissions, tools, files, activity): four columns
-     used to wrap/overlap the fifth in the narrow side panel. */
-  grid-template-columns: repeat(5, 1fr);
+  /* v2: exactly four tabs, so four columns give one row by construction.
+     The old five-column grid for six tabs is what wrapped the sixth tab
+     (Activity) onto a new row in the narrow side panel. Labels truncate
+     rather than wrap, so the bar can never gain a second row. */
+  grid-template-columns: repeat(4, 1fr);
+  grid-auto-flow: row;
   background: var(--surface);
   border-top: 1px solid var(--border);
   padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -425,6 +428,10 @@ code {
 
 .tabbar-label {
   line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 /* -------------------------------------------------------------- pill/badge */
@@ -2584,4 +2591,34 @@ code {
     flex-direction: column;
     align-items: flex-end;
   }
+}
+
+/* -------------------------------------------------------------- auth form */
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  max-width: 420px;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.auth-field label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.auth-field input {
+  width: 100%;
+  padding: var(--s3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: var(--fs-md);
 }

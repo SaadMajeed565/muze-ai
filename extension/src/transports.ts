@@ -31,17 +31,33 @@ export interface TransportSink {
  * loopback development gateways, because a plaintext socket carrying a device
  * token is never acceptable for a deployed extension.
  */
+/** Default time to wait for a WebSocket handshake before giving up and retrying. */
+export const BRIDGE_CONNECT_TIMEOUT_MS = 15_000;
+/** Fallback retry delay when the network is down, even if no `online` event fires. */
+export const BRIDGE_OFFLINE_RETRY_MS = 30_000;
+
+export interface GatewaySocketTransportOptions {
+  /** Override for tests; defaults to BRIDGE_CONNECT_TIMEOUT_MS. */
+  connectTimeoutMs?: number;
+}
+
 export class GatewaySocketTransport implements BridgeTransport {
   private socket: WebSocket | null = null;
   private disposed = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private onlineListener: (() => void) | null = null;
   private retryDelay = 1000;
+  private readonly connectTimeoutMs: number;
 
   constructor(
     private readonly url: string,
     private readonly token: string,
     private readonly sink: TransportSink,
-  ) {}
+    options?: GatewaySocketTransportOptions,
+  ) {
+    this.connectTimeoutMs = options?.connectTimeoutMs ?? BRIDGE_CONNECT_TIMEOUT_MS;
+  }
 
   connect(): void {
     if (this.disposed) return;
@@ -70,8 +86,26 @@ export class GatewaySocketTransport implements BridgeTransport {
       return;
     }
     this.socket = socket;
+    // A stalled handshake must not sit in CONNECTING forever: without a
+    // timeout the socket never fires close, no reconnect is scheduled,
+    // and a later connect() early-returns because a socket is "still
+    // connecting". On timeout, close the socket so the close handler
+    // below runs the normal backoff reconnect.
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null;
+      if (this.socket === socket && socket.readyState === WebSocket.CONNECTING) {
+        try {
+          socket.close();
+        } catch {
+          // A failed close still leaves the close handler to run; if it
+          // never fires, the next connectGateway call disposes this
+          // transport and starts a fresh one.
+        }
+      }
+    }, this.connectTimeoutMs);
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
+      this.clearConnectTimer();
       this.retryDelay = 1000;
       // Authenticate as the first frame, before any bridge traffic. The
       // gateway closes with 4401/4403 if this fails; that close is handled
@@ -98,6 +132,7 @@ export class GatewaySocketTransport implements BridgeTransport {
       // A stale socket closing after a newer one took over must not clobber the
       // live reference or trigger another reconnect (that would thrash).
       if (this.socket !== socket) return;
+      this.clearConnectTimer();
       this.socket = null;
       const code = typeof (event as CloseEvent).code === "number" ? (event as CloseEvent).code : 1006;
       if (isAuthCloseCode(code)) {
@@ -125,15 +160,56 @@ export class GatewaySocketTransport implements BridgeTransport {
   dispose(): void {
     this.disposed = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.clearConnectTimer();
+    this.clearOnlineListener();
     this.socket?.close();
     this.socket = null;
   }
 
+  private clearConnectTimer(): void {
+    if (this.connectTimer) clearTimeout(this.connectTimer);
+    this.connectTimer = null;
+  }
+
+  private clearOnlineListener(): void {
+    if (!this.onlineListener) return;
+    const target = globalThis as { removeEventListener?: unknown };
+    if (typeof target.removeEventListener === "function") {
+      (target.removeEventListener as (type: string, listener: () => void) => void)("online", this.onlineListener);
+    }
+    this.onlineListener = null;
+  }
+
   private scheduleReconnect(): void {
     if (this.disposed || this.retryTimer) return;
-    // The MV3 keepalive alarm is the recovery path while offline; do not spin
-    // futile reconnects when the OS already knows the network is down.
-    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      // Offline used to be a dead end: this returned without scheduling
+      // anything and there was no `online` listener, so the transport
+      // stayed dead until the keepalive alarm or a manual reconnect.
+      // Now resume the moment the network returns, with a capped
+      // fallback retry in case the `online` event never fires.
+      const target = globalThis as { addEventListener?: unknown };
+      if (!this.onlineListener && typeof target.addEventListener === "function") {
+        const handler = (): void => {
+          this.onlineListener = null;
+          if (this.retryTimer) clearTimeout(this.retryTimer);
+          this.retryTimer = null;
+          if (!this.disposed) this.connect();
+        };
+        this.onlineListener = handler;
+        (target.addEventListener as (type: string, listener: () => void, options?: { once?: boolean }) => void)(
+          "online",
+          handler,
+          { once: true },
+        );
+      }
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = null;
+        this.connect();
+      }, BRIDGE_OFFLINE_RETRY_MS);
+      return;
+    }
     const jittered = Math.round(this.retryDelay * (0.5 + Math.random() * 0.5));
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;

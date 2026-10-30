@@ -219,7 +219,7 @@ describe("TasksPage", () => {
     root = document.createElement("div");
     document.body.appendChild(root);
     // No JSX here: this file is .ts (per the section spec), so mount via h().
-    render(h(TasksPage, {}), root);
+    render(h(TasksPage, { approvals: [] }), root);
     return root;
   }
 
@@ -424,7 +424,7 @@ describe("Phase D TasksPage push reload", () => {
     });
     root = document.createElement("div");
     document.body.appendChild(root);
-    render(h(TasksPage, {}), root);
+    render(h(TasksPage, { approvals: [] }), root);
     await flush();
     await flush();
     expect(listeners.length).toBe(1);

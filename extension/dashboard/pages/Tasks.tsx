@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { sanitizeTaskView, type TaskStatus, type TaskView } from "../../src/task-dashboard.js";
 import type { BrowsersDashboard } from "../../src/messages.js";
-import { sendRequest } from "../logic.js";
+import type { ApprovalRequestInfo, ClientIdentity } from "../../libs/tool-contracts/index.js";
+import type { AuditEvent } from "../../libs/security/index.js";
+import { formatCountdown, formatRelativeTime, sendRequest } from "../logic.js";
 import {
+  plainActivityKind,
+  plainDecision,
   plainFinalSummary,
   plainPauseReason,
   plainStep,
@@ -52,6 +56,34 @@ function currentStep(task: TaskView): TaskView["steps"][number] | null {
   return task.steps.find((step) => step.state !== "done") ?? null;
 }
 
+function decisionTone(decision: string): "ok" | "bad" | "warn" | "neutral" {
+  if (decision === "denied" || decision === "error") return "bad";
+  if (decision === "approval-required" || decision === "preflight-unavailable") return "warn";
+  if (decision === "allowed") return "ok";
+  return "neutral";
+}
+
+function pendingByClient(approvals: ApprovalRequestInfo[]): Map<string, { client: ClientIdentity; approvals: ApprovalRequestInfo[] }> {
+  const groups = new Map<string, { client: ClientIdentity; approvals: ApprovalRequestInfo[] }>();
+  for (const approval of approvals) {
+    const existing = groups.get(approval.client.id);
+    if (existing) existing.approvals.push(approval);
+    else groups.set(approval.client.id, { client: approval.client, approvals: [approval] });
+  }
+  return groups;
+}
+
+export interface TasksPageProps {
+  approvals?: ApprovalRequestInfo[];
+  audit?: AuditEvent[] | null;
+  auditLoading?: boolean;
+  busy?: boolean;
+  onRespond?: (approvalId: string, approved: boolean) => void;
+  onCancelForClient?: (clientId: string) => void;
+  onRefreshAudit?: () => void;
+}
+
+
 /**
  * Tasks, re-skinned onto Page / Section / ListRow with a detail rail
  * on wide windows and a full-panel detail view with a back action on
@@ -60,14 +92,28 @@ function currentStep(task: TaskView): TaskView["steps"][number] | null {
  * internals, never step-index lists. The browser line shows the
  * browser's name (resolved from the browsers list) or nothing at all.
  */
-export function TasksPage(): preact.JSX.Element {
+export function TasksPage({
+  approvals = [],
+  audit = null,
+  auditLoading = false,
+  busy = false,
+  onRespond,
+  onCancelForClient,
+  onRefreshAudit,
+}: TasksPageProps): preact.JSX.Element {
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [browsers, setBrowsers] = useState<BrowsersDashboard | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const narrow = useNarrow();
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const load = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -156,7 +202,10 @@ export function TasksPage(): preact.JSX.Element {
             Cancel
           </Button>
         </div>
-        <h3 class="ui-detail-heading">Steps</h3>
+        {task.status === "waiting_approval" ? (
+          <p class="ui-row-meta">This task is waiting for your approval — answer it in the Waiting for you section.</p>
+        ) : null}
+        <h3 class="ui-detail-heading">Activity log</h3>
         {steps.length === 0 ? (
           <p class="ui-row-meta">No steps recorded yet.</p>
         ) : (
@@ -233,6 +282,107 @@ export function TasksPage(): preact.JSX.Element {
   );
 
   const selected = tasks?.find((task) => task.id === selectedId) ?? null;
+  const approvalGroups = pendingByClient(approvals);
+  const multiClient = [...approvalGroups.values()].filter((group) => group.approvals.length > 1);
+
+  const waitingSection = (
+    <Section
+      title="Waiting for you"
+      description={
+        approvals.length > 0
+          ? `${approvals.length} request${approvals.length === 1 ? "" : "s"} pending. Each expires after two minutes.`
+          : "Requests appear here when an action needs your approval."
+      }
+    >
+      {approvals.length === 0 ? (
+        <EmptyState
+          icon="check"
+          title="Nothing waiting"
+          description="Actions that need your approval will pause here until you approve or deny them."
+        />
+      ) : (
+        <ul class="ui-list">
+          {approvals.map((approval) => (
+            <ListRow
+              key={approval.id}
+              title={approval.title}
+              meta={`${truncateText(approval.summary, 160)} · ${approval.client.name} · ${formatCountdown(approval.expiresAt, now)}`}
+              status="Waiting for you"
+              statusTone="warn"
+              actions={
+                onRespond ? (
+                  <>
+                    <Button variant="secondary" size="sm" disabled={busy} onClick={() => onRespond(approval.id, false)}>
+                      Deny
+                    </Button>
+                    <Button variant="primary" size="sm" icon="check" disabled={busy} onClick={() => onRespond(approval.id, true)}>
+                      Approve
+                    </Button>
+                  </>
+                ) : undefined
+              }
+            />
+          ))}
+        </ul>
+      )}
+      {multiClient.length > 0 && onCancelForClient ? (
+        <div class="ui-chip-row">
+          {multiClient.map((group) => (
+            <Button
+              key={group.client.id}
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                const ok = confirm(
+                  `Cancel all ${group.approvals.length} pending request${group.approvals.length === 1 ? "" : "s"} from ${group.client.name}? The waiting actions will be denied.`,
+                );
+                if (ok) onCancelForClient(group.client.id);
+              }}
+            >
+              Cancel {group.approvals.length} from {group.client.name}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+    </Section>
+  );
+
+  const recentSection = (
+    <Section
+      title="Recent activity"
+      description="What happened recently, in plain words."
+      action={
+        onRefreshAudit ? (
+          <Button variant="ghost" size="sm" icon="refresh" disabled={auditLoading} onClick={onRefreshAudit}>
+            Refresh
+          </Button>
+        ) : undefined
+      }
+    >
+      {auditLoading && !audit ? (
+        <SectionSkeleton />
+      ) : !audit || audit.length === 0 ? (
+        <EmptyState
+          icon="pulse"
+          title="No activity yet"
+          description="Actions, permission changes and approvals will be recorded here as they happen."
+        />
+      ) : (
+        <ul class="ui-list">
+          {audit.map((event) => (
+            <ListRow
+              key={event.id}
+              title={plainActivityKind(event.kind)}
+              meta={`${event.client ? event.client.name + " · " : ""}${formatRelativeTime(Date.parse(event.at), now)}`}
+              status={plainDecision(event.decision)}
+              statusTone={decisionTone(event.decision)}
+            />
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
 
   if (narrow && selected) {
     return (
@@ -254,6 +404,7 @@ export function TasksPage(): preact.JSX.Element {
       }
     >
       {error ? <ErrorState message={error} /> : null}
+      {waitingSection}
       {tasks === null ? (
         <SectionSkeleton />
       ) : tasks.length === 0 ? (
@@ -264,7 +415,7 @@ export function TasksPage(): preact.JSX.Element {
         />
       ) : (
         <div class="ui-grid">
-          <Section title="Tasks" description="Tap a task to see its steps.">
+          <Section title="Tasks" description="Tap a task to see its activity log.">
             {list(tasks)}
           </Section>
           {selected ? (
@@ -277,6 +428,7 @@ export function TasksPage(): preact.JSX.Element {
           ) : null}
         </div>
       )}
+      {recentSection}
     </Page>
   );
 }
