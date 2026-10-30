@@ -9,6 +9,7 @@ import { ApprovalsBanner } from "./ApprovalsBanner.js";
 import { Nav } from "./Nav.js";
 import { Onboarding } from "./Onboarding.js";
 import { ActivityPage } from "./pages/Activity.js";
+import { BrowsersPage } from "./pages/Browsers.js";
 import { FilesPage } from "./pages/Files.js";
 import { OverviewPage } from "./pages/Overview.js";
 import { PermissionsPage } from "./pages/Permissions.js";
@@ -326,6 +327,8 @@ export function App(): preact.JSX.Element {
             {tab === "files" ? <FilesPage /> : null}
 
             {isTasksTab ? <TasksPage /> : null}
+
+            {tab === "browsers" ? <BrowsersPage /> : null}
 
             {tab === "activity" ? (
               <ActivityPage

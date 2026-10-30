@@ -10,6 +10,50 @@ export interface GatewayAccount {
   sessionId: string;
 }
 
+/** Browser/OS identity sent at sign-in so the dashboard can name the browser. No token, no URLs. */
+export interface BrowserInfo {
+  name?: string;
+  browser?: string;
+  os?: string;
+  version?: string;
+}
+
+/**
+ * Pure user-agent parse for dashboard naming. Unknown agents degrade to
+ * empty fields (the gateway auto-names from "Browser N"), never to a guess
+ * presented as fact.
+ */
+export function browserInfoFromUserAgent(userAgent: string): BrowserInfo {
+  const ua = userAgent ?? "";
+  let browser = "";
+  let version = "";
+  const browserMatch =
+    /Edg\/([\d.]+)/.exec(ua) ??
+    /OPR\/([\d.]+)/.exec(ua) ??
+    /Brave\/([\d.]+)/.exec(ua) ??
+    /Chrome\/([\d.]+)/.exec(ua) ??
+    /Firefox\/([\d.]+)/.exec(ua) ??
+    /Version\/([\d.]+).*Safari/.exec(ua);
+  if (browserMatch) {
+    if (/Edg\//.test(ua)) browser = "Edge";
+    else if (/OPR\//.test(ua)) browser = "Opera";
+    else if (/Brave\//.test(ua)) browser = "Brave";
+    else if (/Chrome\//.test(ua)) browser = "Chrome";
+    else if (/Firefox\//.test(ua)) browser = "Firefox";
+    else browser = "Safari";
+    version = browserMatch[1].split(".").slice(0, 2).join(".");
+  }
+  let os = "";
+  if (/Windows NT/.test(ua)) os = "Windows";
+  else if (/Mac OS X/.test(ua)) os = "macOS";
+  else if (/CrOS/.test(ua)) os = "ChromeOS";
+  else if (/Android/.test(ua)) os = "Android";
+  else if (/iPhone|iPad/.test(ua)) os = "iOS";
+  else if (/Linux/.test(ua)) os = "Linux";
+  const name = [browser, os].filter(Boolean).join(" on ");
+  return { ...(name ? { name } : {}), ...(browser ? { browser } : {}), ...(os ? { os } : {}), ...(version ? { version } : {}) };
+}
+
 export interface GatewayStatus {
   connected: boolean;
   name?: string;
@@ -68,7 +112,27 @@ async function readError(response: Response): Promise<string> {
  * logs in, the website redirects back with a one-time code that the extension
  * exchanges for the account token.
  */
-export async function signInWithBrowser(baseUrl: string): Promise<GatewayAccount> {
+/**
+ * Reuse the browser bound to a stored device token (a reinstall or a
+ * re-sign-in that still holds its token): the gateway updates that
+ * browser's info/lastSeen instead of creating a second entry. Returns the
+ * session id; the token itself is unchanged and is never returned.
+ */
+export async function reuseBrowserSession(baseUrl: string, deviceToken: string, info: BrowserInfo): Promise<{ sessionId: string }> {
+  const base = normalizeGatewayUrl(baseUrl);
+  if (!base) throw new Error("Gateway URL is required");
+  const response = await fetch(`${base}/extension/reuse`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${deviceToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ browserInfo: info }),
+  });
+  if (!response.ok) throw new GatewayHttpError(response.status, await readError(response));
+  const body = (await response.json()) as { sessionId?: string };
+  if (!body.sessionId) throw new Error("Browser reuse did not return a session");
+  return { sessionId: body.sessionId };
+}
+
+export async function signInWithBrowser(baseUrl: string, info?: BrowserInfo): Promise<GatewayAccount> {
   const base = normalizeGatewayUrl(baseUrl);
   if (!base) throw new Error("Gateway URL is required");
   const redirectUri = chrome.identity.getRedirectURL();
@@ -76,6 +140,9 @@ export async function signInWithBrowser(baseUrl: string): Promise<GatewayAccount
   const authUrl = new URL(`${base}/extension/auth`);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("state", state);
+  if (info && Object.keys(info).length > 0) {
+    authUrl.searchParams.set("browser_info", JSON.stringify(info));
+  }
   const responseUrl = await chrome.identity.launchWebAuthFlow({ url: authUrl.toString(), interactive: true });
   if (!responseUrl) throw new Error("Sign-in was cancelled");
   const fragment = responseUrl.includes("#") ? responseUrl.slice(responseUrl.indexOf("#") + 1) : "";

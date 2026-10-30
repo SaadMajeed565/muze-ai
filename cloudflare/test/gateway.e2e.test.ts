@@ -372,9 +372,15 @@ describe("gateway e2e", () => {
     });
     expect(redeem.status).toBe(200);
     const redeemed = (await redeem.json()) as { token: string; email: string; sessionId: string };
-    expect(redeemed.token).toBe(account.token);
+    // Multi-browser model: createAccount already adopted the signup
+    // placeholder, so a second sign-in creates a NEW browser with its own
+    // token and session — the first browser's token keeps working.
+    expect(redeemed.token).not.toBe(account.token);
     expect(redeemed.email).toBe(account.email);
     expect(redeemed.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(redeemed.sessionId).not.toBe(account.sessionId);
+    expect((await http("/session/status", { headers: { authorization: `Bearer ${account.token}` } })).status).toBe(200);
+    expect((await http("/session/status", { headers: { authorization: `Bearer ${redeemed.token}` } })).status).toBe(200);
 
     const replay = await http("/extension/redeem", {
       method: "POST",
@@ -475,7 +481,9 @@ describe("gateway e2e", () => {
     expect(advertised).not.toContain("navigation.goto");
     const registry = new Set(TOOL_SCHEMAS.map((tool) => tool.name));
     for (const name of advertised) {
-      if (name === "tools.discover" || name === "tools.batch") continue;
+      // Gateway-native tools (discovery, batching, browser routing) are
+      // not registry tools: they never reach the bridge.
+      if (name === "tools.discover" || name === "tools.batch" || name === "browsers.list" || name === "browsers.select") continue;
       expect(registry.has(name), `${name} must exist in TOOL_SCHEMAS`).toBe(true);
     }
 
@@ -513,7 +521,11 @@ describe("gateway e2e", () => {
     const client = await makeClient(token);
 
     const tools = await client.listTools();
-    expect(tools.tools).toHaveLength(0);
+    // Exception, by design: the gateway-native browsers tools are not
+    // extension tools — they reveal no browser state and act on no
+    // browser, they only route the caller's own future calls — so they
+    // stay advertised even when the extension allows nothing.
+    expect(tools.tools.map((tool) => tool.name).sort()).toEqual(["browsers.list", "browsers.select"]);
 
     await client.close();
     browser.close();
@@ -687,12 +699,15 @@ describe("gateway e2e", () => {
     browser.close();
   });
 
-  test("account page masks the device token and never renders it in full", async () => {
+  test("account page never renders the device token, not even masked", async () => {
     const account = await createAccount();
     const page = await http("/account", { headers: { cookie: account.cookie } });
     const pageHtml = await page.text();
     expect(pageHtml).not.toContain(account.token);
-    expect(pageHtml).toContain(account.token.slice(-4));
+    // The old masked rendering (bullets + last 4) is gone: tokens live
+    // only in the extension. The page lists browser names instead.
+    expect(pageHtml).not.toContain(`••••••••${account.token.slice(-4)}`);
+    expect(pageHtml).toContain("Browsers");
     // The Rotate button posts to /session/rotate via the website session.
     expect(pageHtml).toContain('action="/session/rotate"');
   });

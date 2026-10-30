@@ -8,7 +8,6 @@ const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 export interface Account {
   userId: string;
   email: string;
-  token: string;
   sessionId: string;
 }
 
@@ -22,9 +21,45 @@ export async function currentAccount(request: Request, env: GatewayEnv): Promise
   return {
     userId: String(result.userId),
     email: String(result.email),
-    token: String(result.token),
     sessionId: String(result.sessionId),
   };
+}
+
+export interface PublicBrowser {
+  sessionId: string;
+  name: string;
+  browser: string;
+  os: string;
+  version: string;
+  isDefault: boolean;
+}
+
+async function accountBrowsers(env: GatewayEnv, userId: string): Promise<PublicBrowser[]> {
+  const result = await dirCall(env, "browsersForUser", { userId });
+  if (result.ok === false || !Array.isArray(result.browsers)) return [];
+  return (result.browsers as PublicBrowser[]).map((entry) => ({
+    sessionId: String(entry.sessionId ?? ""),
+    name: String(entry.name ?? "Browser"),
+    browser: String(entry.browser ?? ""),
+    os: String(entry.os ?? ""),
+    version: String(entry.version ?? ""),
+    isDefault: Boolean(entry.isDefault),
+  }));
+}
+
+/** Parse the extension's optional browser_info query parameter (JSON, capped). */
+export function parseBrowserInfo(value: string | null): Record<string, string> {
+  if (!value || value.length > 512) return {};
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const out: Record<string, string> = {};
+    for (const key of ["name", "browser", "os", "version"]) {
+      if (typeof parsed[key] === "string" && (parsed[key] as string).trim()) out[key] = (parsed[key] as string).trim().slice(0, 80);
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 /** Only allow same-site relative paths as post-login destinations. */
@@ -128,7 +163,8 @@ export async function handleAccount(request: Request, env: GatewayEnv, issuer: s
   const account = await currentAccount(request, env);
   if (!account) return loginRedirect("/account");
   const connected = await sessionConnected(env, account.sessionId);
-  return html(accountPage(account, issuer, connected));
+  const browsers = await accountBrowsers(env, account.userId);
+  return html(accountPage(account, issuer, connected, browsers));
 }
 
 export async function handleDeleteAccount(request: Request, env: GatewayEnv): Promise<Response> {
@@ -138,20 +174,23 @@ export async function handleDeleteAccount(request: Request, env: GatewayEnv): Pr
   if (String(form.get("confirm") ?? "") !== "delete") {
     return html(errorPage("Confirm the deletion to remove your account."), 400);
   }
+  const browsers = await accountBrowsers(env, account.userId);
   const cookies = parseCookies(request.headers.get("cookie"));
   const result = await dirCall(env, "deleteAccount", { sessionToken: cookies[SESSION_COOKIE] ?? "" });
   if (result.ok === false) {
     return html(errorPage("Could not delete the account. Please sign in again and retry."), 400);
   }
-  // Purge persisted MCP sessions in the browser's SessionDO after the
+  // Purge persisted MCP sessions in every browser's SessionDO after the
   // DirectoryDO account deletion, before clearing the website cookie.
   // The log carries no token, password, or session identifier.
-  try {
-    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(account.sessionId));
-    const purged = await stub.fetch("https://session/purge-mcp-sessions", { method: "POST" });
-    console.log(JSON.stringify({ event: "account_mcp_purge", ok: purged.ok }));
-  } catch {
-    console.log(JSON.stringify({ event: "account_mcp_purge", ok: false }));
+  for (const browser of browsers) {
+    try {
+      const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(browser.sessionId));
+      const purged = await stub.fetch("https://session/purge-mcp-sessions", { method: "POST" });
+      console.log(JSON.stringify({ event: "account_mcp_purge", ok: purged.ok }));
+    } catch {
+      console.log(JSON.stringify({ event: "account_mcp_purge", ok: false }));
+    }
   }
   return redirectTo("/", [clearCookie(SESSION_COOKIE)]);
 }
@@ -168,10 +207,10 @@ export async function handleExtensionAuth(request: Request, env: GatewayEnv): Pr
     return html(errorPage("This extension is not authorized to connect to this gateway."), 400);
   }
   const created = await dirCall(env, "createExtensionCode", {
-    sessionId: account.sessionId,
     userId: account.userId,
     extensionId: redirect.extensionId,
     redirectUri: redirect.redirectUri,
+    browserInfo: parseBrowserInfo(url.searchParams.get("browser_info")),
   });
   if (created.ok === false) return html(errorPage("Could not complete extension sign-in."), 400);
   const target = new URL(redirect.redirectUri);
@@ -502,28 +541,33 @@ ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
   );
 }
 
-function accountPage(account: Account, issuer: string, connected: boolean): string {
+function accountPage(account: Account, issuer: string, connected: boolean, browsers: PublicBrowser[]): string {
   const mcpUrl = `${issuer}/mcp`;
-  // Never render the full device token: only the last 4 characters, so a
-  // screenshot or shared page cannot leak the credential. The full token
-  // lives only in the extension (and in the signed-in account record the
-  // server holds for bridge authentication).
-  const last4 = account.token.length >= 4 ? account.token.slice(-4) : "••••";
-  const masked = `••••••••${last4}`;
+  // Device tokens are never rendered here at all (not even masked): they
+  // live only in the extension that owns them. The website shows browser
+  // names only; per-browser management lives in the extension dashboard.
+  const browserList =
+    browsers.length > 0
+      ? browsers
+          .map((entry) => {
+            const detail = [entry.browser, entry.os, entry.version].filter(Boolean).join(" · ");
+            return `<li>${escapeHtml(entry.name)}${entry.isDefault ? " (default)" : ""}${detail ? ` — <span class="muted">${escapeHtml(detail)}</span>` : ""}</li>`;
+          })
+          .join("")
+      : `<li class="muted">No browser attached yet — sign in from the extension to attach one.</li>`;
   return layout(
     "Account",
     `<h1>Your Muze AI account</h1>
 <p class="sub">${escapeHtml(account.email)}</p>
 
 <div class="card">
-  <strong>Device token</strong>
-  <p class="muted">Shown masked only. It is never displayed in full here and is never pasted to authorize a client.</p>
-  <code class="token">${escapeHtml(masked)}</code>
-  <p class="muted">Extension status: ${connected ? "connected" : "not connected"}.</p>
+  <strong>Browsers</strong>
+  <ul>${browserList}</ul>
+  <p class="muted">Default browser status: ${connected ? "connected" : "not connected"}. Manage browsers (rename, default, disconnect, remove) in the extension dashboard.</p>
   <form method="post" action="/session/rotate">
     <button class="secondary" type="submit">Rotate device token</button>
   </form>
-  <p class="muted">Rotating replaces the token immediately: the old token stops working at once. Sign in again in the extension to pick up the new token.</p>
+  <p class="muted">Rotating replaces the default browser's token immediately: the old token stops working at once. Sign in again in the extension to pick up the new token.</p>
 </div>
 
 <div class="card">
@@ -544,7 +588,7 @@ function accountPage(account: Account, issuer: string, connected: boolean): stri
 
 <details class="card">
   <summary><strong>Delete account</strong></summary>
-  <p class="muted">Removes your account, browser session, and every access token.
+  <p class="muted">Removes your account, every browser session, and every access token.
   The extension is signed out and must be paired again.</p>
   <form method="post" action="/account/delete">
     <button class="danger" type="submit" name="confirm" value="delete">Permanently delete my account</button>

@@ -210,8 +210,16 @@ export class SessionDO implements DurableObject {
    * share the same browser session without closing each other's transport.
    */
   private readonly mcpSessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
-  /** Client id per MCP session, for eviction pinning (in-memory only). */
-  private readonly sessionClients = new Map<string, string>();
+  /**
+   * Live MCP session metadata per transport (in-memory only): client id
+   * for eviction pinning, plus created/last-activity timestamps served on
+   * the internal /mcp-clients route for the Browsers dashboard. A cold DO
+   * has no live transports, so there is nothing stale to serve.
+   */
+  private readonly sessionClients = new Map<string, { clientId: string; createdAt: number; lastActivityAt: number }>();
+  /** Browser session id this DO serves, when known (set from the bridge
+   * route or the /mcp forward headers; needed for browsers.* tools). */
+  private browserSessionId = "";
   /**
    * Client id per task that currently mirrors as running (in-memory
    * only, never persisted in the mirror entry and never served on
@@ -278,6 +286,21 @@ export class SessionDO implements DurableObject {
         // (after DirectoryDO.deleteAccount, before the cookie is cleared).
         // It is not reachable from a public Worker route.
         return this.purgeMcpSessions();
+      case "/browser-tab-count":
+        return this.browserTabCount();
+      case "/mcp-clients":
+        return this.mcpClients();
+      case "/disconnect-bridge":
+        return this.disconnectBridge();
+      case "/drop-mcp-client": {
+        let body: { clientId?: unknown } = {};
+        try {
+          body = (await request.json()) as { clientId?: unknown };
+        } catch {
+          body = {};
+        }
+        return this.dropMcpClient(String(body.clientId ?? ""));
+      }
       default:
         return text("not found", 404);
     }
@@ -295,6 +318,80 @@ export class SessionDO implements DurableObject {
     this.taskMirror.clear();
     await this.state.storage.delete(TASK_MIRROR_KEY);
     return json({ ok: true, sessions: count });
+  }
+
+  /**
+   * Internal route: tab count for the Browsers dashboard, from the
+   * extension's own tabs.list (count only — tab URLs/titles are discarded
+   * here and never leave this DO). A 3s race bounds the dashboard list;
+   * any failure or disconnect reports null (unknown), never a guess.
+   */
+  private async browserTabCount(): Promise<Response> {
+    if (!this.slot.isConnected() || !this.bridge) return json({ tabCount: null });
+    try {
+      const outcome = await Promise.race([
+        this.bridge.callTool({ tool: "tabs.list", input: {} }),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("tab count timeout")), 3000)),
+      ]);
+      const tabs = (outcome.result as { tabs?: unknown[] } | undefined)?.tabs;
+      return json({ tabCount: Array.isArray(tabs) ? tabs.length : null });
+    } catch {
+      return json({ tabCount: null });
+    }
+  }
+
+  /** Internal route: live MCP transports for the Browsers dashboard. */
+  private mcpClients(): Response {
+    return json({
+      clients: [...this.sessionClients.entries()].map(([sessionId, meta]) => ({
+        // The transport id is internal routing state, not shown in the UI;
+        // the dashboard keys live sessions by client id.
+        clientId: meta.clientId,
+        createdAt: meta.createdAt,
+        lastActivityAt: meta.lastActivityAt,
+        transportSessionId: sessionId,
+      })),
+    });
+  }
+
+  /** Internal route: close the bridge socket only; the browser record and
+   * its token stay valid, so the extension can reconnect (Disconnect). */
+  private disconnectBridge(): Response {
+    if (this.activeSocket) {
+      try {
+        this.activeSocket.close(1000, "disconnected from dashboard");
+      } catch {
+        // ignore
+      }
+    }
+    this.bridge?.onClose("disconnected from dashboard");
+    this.bridge = null;
+    this.activeSocket = null;
+    this.slot.set(null);
+    return json({ ok: true });
+  }
+
+  /** Internal route: close live MCP transports for one OAuth client. */
+  private async dropMcpClient(clientId: string): Promise<Response> {
+    let dropped = 0;
+    for (const [sessionId, meta] of [...this.sessionClients.entries()]) {
+      if (meta.clientId !== clientId) continue;
+      const transport = this.mcpSessions.get(sessionId);
+      this.mcpSessions.delete(sessionId);
+      this.sessionClients.delete(sessionId);
+      void transport?.close().catch(() => undefined);
+      dropped++;
+    }
+    const stored = await this.loadSessions();
+    let changed = false;
+    for (const [sessionId, record] of Object.entries(stored)) {
+      if (record.client?.id === clientId) {
+        delete stored[sessionId];
+        changed = true;
+      }
+    }
+    if (changed) await this.state.storage.put(MCP_SESSIONS_KEY, stored);
+    return json({ dropped });
   }
 
   private clearPendingAuth(): void {
@@ -349,6 +446,7 @@ export class SessionDO implements DurableObject {
     // routed, so it is rejected here (400) rather than guessed.
     const routedSessionId = params.get("session") ?? "";
     if (!routedSessionId) return text("session query parameter is required", 400);
+    this.browserSessionId = routedSessionId;
 
     // Do NOT attach the bridge yet and do NOT close the existing authorized
     // socket: the new socket stays unauthenticated until its first message
@@ -409,6 +507,7 @@ export class SessionDO implements DurableObject {
       this.clearPendingAuth();
       return;
     }
+    this.browserSessionId = verifiedSessionId;
     this.clearPendingAuth();
     try {
       ws.serializeAttachment({ authorized: true } satisfies SocketAttachment);
@@ -523,6 +622,11 @@ export class SessionDO implements DurableObject {
 
   private async handleMcp(request: Request): Promise<Response> {
     this.touch();
+    // The Worker forwards the verified browser session id on every /mcp
+    // request (stripped from client input at the Worker boundary); this is
+    // how the DO learns which browser it serves, for browsers.* tools.
+    const forwardedBrowser = request.headers.get("x-muze-browser-session")?.trim();
+    if (forwardedBrowser) this.browserSessionId = forwardedBrowser;
     const baseSessionId = this.state.id.toString();
     const headerSession = request.headers.get("mcp-session-id");
     const initParams = await readInitializeParams(request);
@@ -551,6 +655,9 @@ export class SessionDO implements DurableObject {
         },
       });
       this.registerSession(headerSession, transport, record.client?.id);
+    } else {
+      const meta = this.sessionClients.get(headerSession);
+      if (meta) meta.lastActivityAt = Date.now();
     }
     return transport.handleRequest(request);
   }
@@ -580,16 +687,25 @@ export class SessionDO implements DurableObject {
 
   private registerSession(sessionId: string, transport: WebStandardStreamableHTTPServerTransport, clientId?: string): void {
     this.mcpSessions.set(sessionId, transport);
-    if (clientId) this.sessionClients.set(sessionId, clientId);
+    if (clientId) {
+      const existing = this.sessionClients.get(sessionId);
+      this.sessionClients.set(sessionId, {
+        clientId,
+        createdAt: existing?.createdAt ?? Date.now(),
+        lastActivityAt: Date.now(),
+      });
+    }
     // Evict the oldest client when a caller keeps opening sessions without
     // closing them, bounding memory and persisted state. Sessions whose
     // client owns a running task are skipped (Phase 3 pinning); when
     // every session is pinned the oldest is still evicted, so the bound
     // is never broken by pinning.
     while (this.mcpSessions.size > MAX_MCP_SESSIONS) {
+      const bySession: Record<string, string | undefined> = {};
+      for (const [id, meta] of this.sessionClients) bySession[id] = meta.clientId;
       const candidate = chooseEvictionCandidate(
         [...this.mcpSessions.keys()],
-        this.sessionClients,
+        bySession,
         new Set(this.runningTaskClients.values()),
       );
       if (!candidate) break;
@@ -736,6 +852,29 @@ export class SessionDO implements DurableObject {
         : {}),
       ...(sessionState?.initialDiscovered ? { initialDiscovered: sessionState.initialDiscovered } : {}),
       ...(sessionState?.onSessionStateChange ? { onSessionStateChange: sessionState.onSessionStateChange } : {}),
+      browsers: {
+        list: async () => {
+          if (!this.browserSessionId) throw new Error("browser session is unknown for this connection");
+          const result = await dirCall(this.env as GatewayEnv, "browsersForSession", { sessionId: this.browserSessionId });
+          if (result.ok === false) throw new Error(String(result.error ?? "could not list browsers"));
+          return {
+            browsers: result.browsers as Array<Record<string, unknown>>,
+            defaultSessionId: String(result.defaultSessionId ?? ""),
+            currentSessionId: String(result.currentSessionId ?? this.browserSessionId),
+          };
+        },
+        select: async (targetSessionId: string) => {
+          if (!client?.id) throw new Error("browser selection needs an OAuth client identity");
+          if (!this.browserSessionId) throw new Error("browser session is unknown for this connection");
+          const result = await dirCall(this.env as GatewayEnv, "setClientBrowser", {
+            clientId: client.id,
+            currentSessionId: this.browserSessionId,
+            targetSessionId,
+          });
+          if (result.ok === false) throw new Error(String(result.error ?? "could not select browser"));
+          return { sessionId: String(result.sessionId ?? targetSessionId), name: String(result.name ?? "") };
+        },
+      },
     });
     await server.connect(transport);
     if (initParams) await replayInitialize(transport, initParams);

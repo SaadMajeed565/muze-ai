@@ -93,7 +93,51 @@ export type DashboardRequest =
   | { type: "muze/tasks.pause"; taskId: string; reason?: string }
   | { type: "muze/tasks.resume"; taskId: string }
   | { type: "muze/tasks.cancel"; taskId: string }
-  | { type: "muze/tasks.approvePlan"; taskId: string; bounds?: unknown };
+  | { type: "muze/tasks.approvePlan"; taskId: string; bounds?: unknown }
+  | { type: "muze/browsers/list" }
+  | { type: "muze/browsers/set-default"; sessionId: string }
+  | { type: "muze/browsers/rename"; sessionId: string; name: string }
+  | { type: "muze/browsers/disconnect"; sessionId: string }
+  | { type: "muze/browsers/remove"; sessionId: string }
+  | { type: "muze/mcp-sessions/revoke"; clientId: string; sessionId?: string };
+
+/** One browser row for the dashboard. Never carries a device token. */
+export interface DashboardBrowser {
+  sessionId: string;
+  name: string;
+  browser: string;
+  os: string;
+  version: string;
+  createdAt: number | null;
+  lastSeenAt: number | null;
+  isDefault: boolean;
+  connected: boolean;
+  /** Tab count when connected and known; null means unknown, never a guess. */
+  tabCount: number | null;
+  /** True when this row is the browser running this dashboard. */
+  isLocal?: boolean;
+}
+
+/** One MCP client row for the dashboard. No tokens, no transport ids. */
+export interface DashboardMcpClient {
+  clientId: string;
+  clientName: string;
+  scope: string;
+  sessionId: string;
+  live: boolean;
+  connectedSince: number | null;
+  lastActivityAt: number | null;
+  authorizedSince: number | null;
+  lastRefreshedAt: number | null;
+  expiresAt: number | null;
+}
+
+export interface BrowsersDashboard {
+  browsers: DashboardBrowser[];
+  defaultSessionId: string;
+  currentSessionId?: string;
+  mcpClients: DashboardMcpClient[];
+}
 
 /** Legacy "uabb/*" spelling of a dashboard request, accepted inbound only. */
 export type LegacyDashboardRequestType = DashboardRequest["type"] extends `muze/${infer Rest}` ? `uabb/${Rest}` : never;
@@ -107,6 +151,8 @@ export interface DashboardResponse {
   /** Task progress views, present ONLY in response to "muze/tasks.*". Sanitised views only, never step inputs. */
   tasks?: TaskView[];
   task?: TaskView;
+  /** Present ONLY in response to "muze/browsers/list". */
+  browsers?: BrowsersDashboard;
 }
 
 export const OFFSCREEN_TARGET = "muze-offscreen";

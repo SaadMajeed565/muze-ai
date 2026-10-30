@@ -1,6 +1,8 @@
-import type { DashboardState } from "../../src/messages.js";
+import { useEffect, useState } from "preact/hooks";
+import type { BrowsersDashboard, DashboardState } from "../../src/messages.js";
 import type { Appearance, TabId } from "../logic.js";
-import { setupChecklist, setupRemaining } from "../logic.js";
+import { sendRequest, setupChecklist, setupRemaining } from "../logic.js";
+import { browserCounts } from "../browsers-logic.js";
 import { Icon } from "../components/Icon.js";
 import { Badge, Button, Card, Chip, EmptyState, Segmented, Switch } from "../components/primitives.js";
 
@@ -41,6 +43,18 @@ export function OverviewPage({
   onNavigate,
 }: OverviewPageProps): preact.JSX.Element {
   const { snapshot, gateway, clients, onboarding } = state;
+  const [browsersData, setBrowsersData] = useState<BrowsersDashboard | null>(null);
+  useEffect(() => {
+    if (!gateway.signedIn) return;
+    let cancelled = false;
+    void sendRequest({ type: "muze/browsers/list" }).then((response) => {
+      if (!cancelled && response.ok && response.browsers) setBrowsersData(response.browsers);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [gateway.signedIn]);
+  const counts = browsersData ? browserCounts(browsersData) : null;
   const remaining = setupRemaining({
     signedIn: gateway.signedIn,
     connectedClients: snapshot.connectedClients,
@@ -99,6 +113,34 @@ export function OverviewPage({
             tone={snapshot.pendingApprovals > 0 ? "warn" : undefined}
           />
         </div>
+
+        {gateway.signedIn && counts ? (
+          <div class="metrics">
+            <Metric value={`${counts.connected}/${counts.attached}`} label="Browsers connected" />
+            <Metric value={String(counts.liveClients)} label="MCP clients live" />
+            <Metric value={counts.defaultName ?? "—"} label="Default browser" />
+            <Metric
+              value={String(snapshot.pendingApprovals)}
+              label="Pending approvals"
+              tone={snapshot.pendingApprovals > 0 ? "warn" : undefined}
+            />
+          </div>
+        ) : null}
+        {gateway.signedIn && counts ? (
+          <div class="row-between">
+            <div class="connection">
+              <span class="status-dot" aria-hidden="true" />
+              <span>
+                {counts.attached === 0
+                  ? "No browsers attached yet"
+                  : `${counts.attached} browser${counts.attached === 1 ? "" : "s"} attached, default: ${counts.defaultName ?? "—"}`}
+              </span>
+            </div>
+            <Button variant="ghost" size="sm" icon="arrow-right" onClick={() => onNavigate("browsers")}>
+              Manage browsers
+            </Button>
+          </div>
+        ) : null}
 
         <div class="row-between">
           <div class="connection">

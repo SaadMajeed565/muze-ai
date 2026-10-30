@@ -52,6 +52,13 @@ const RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
   "/session/status": { max: 120, windowMs: 60_000 },
   "/extension/auth": { max: 60, windowMs: 60_000 },
   "/extension/redeem": { max: 60, windowMs: 60_000 },
+  "/extension/reuse": { max: 60, windowMs: 60_000 },
+  "/account/browsers": { max: 120, windowMs: 60_000 },
+  "/account/browsers/default": { max: 60, windowMs: 60_000 },
+  "/account/browsers/rename": { max: 60, windowMs: 60_000 },
+  "/account/browsers/remove": { max: 60, windowMs: 60_000 },
+  "/account/browsers/disconnect": { max: 60, windowMs: 60_000 },
+  "/account/mcp-clients/revoke": { max: 60, windowMs: 60_000 },
   "/bridge": { max: 60, windowMs: 60_000 },
   "/mcp": { max: 300, windowMs: 60_000 },
 };
@@ -242,6 +249,18 @@ async function route(request: Request, env: GatewayEnv, issuer: string, url: URL
   if (path === "/session/pair-code" && request.method === "POST") return newPairCode(request, env);
   if (path === "/session/status" && request.method === "GET") return sessionStatus(request, env);
 
+  // Multi-browser account management, for the extension dashboard (via the
+  // service worker) and the website session. Auth is either a device token
+  // (proves ownership of one of the account's browsers) or the website
+  // session cookie. Responses never contain device tokens.
+  if (path === "/extension/reuse" && request.method === "POST") return reuseBrowser(request, env);
+  if (path === "/account/browsers" && request.method === "GET") return listAccountBrowsers(request, env);
+  if (path === "/account/browsers/default" && request.method === "POST") return setAccountDefaultBrowser(request, env);
+  if (path === "/account/browsers/rename" && request.method === "POST") return renameAccountBrowser(request, env);
+  if (path === "/account/browsers/remove" && request.method === "POST") return removeAccountBrowser(request, env);
+  if (path === "/account/browsers/disconnect" && request.method === "POST") return disconnectAccountBrowser(request, env);
+  if (path === "/account/mcp-clients/revoke" && request.method === "POST") return revokeAccountMcpClient(request, env);
+
   if (path === "/bridge") return bridge(request, env, url);
   if (path === "/mcp") return mcp(request, env, url, requestId);
 
@@ -260,6 +279,218 @@ async function sessionStatus(request: Request, env: GatewayEnv): Promise<Respons
   const session = await authenticateDevice(request, env);
   if ("response" in session) return session.response;
   return forwardToSession(env, session.sessionId, "/status", request);
+}
+
+// --- Multi-browser account management ---------------------------------------
+
+interface AccountBrowsers {
+  userId: string;
+  browsers: Array<Record<string, unknown>>;
+  defaultSessionId: string;
+  currentSessionId?: string;
+}
+
+async function resolveAccount(request: Request, env: GatewayEnv): Promise<AccountBrowsers | null> {
+  const header = request.headers.get("authorization") ?? "";
+  if (header.toLowerCase().startsWith("bearer ")) {
+    const session = await authenticateDevice(request, env);
+    if ("response" in session) return null;
+    const result = await dirCall(env, "browsersForSession", { sessionId: session.sessionId });
+    if (result.ok === false || !Array.isArray(result.browsers)) return null;
+    return {
+      userId: String(result.userId ?? ""),
+      browsers: result.browsers as Array<Record<string, unknown>>,
+      defaultSessionId: String(result.defaultSessionId ?? ""),
+      currentSessionId: session.sessionId,
+    };
+  }
+  const account = await currentAccount(request, env);
+  if (!account) return null;
+  const result = await dirCall(env, "browsersForUser", { userId: account.userId });
+  if (result.ok === false || !Array.isArray(result.browsers)) return null;
+  return {
+    userId: account.userId,
+    browsers: result.browsers as Array<Record<string, unknown>>,
+    defaultSessionId: String(result.defaultSessionId ?? ""),
+  };
+}
+
+async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+  try {
+    const body = (await request.json()) as Record<string, unknown>;
+    return body && typeof body === "object" ? body : {};
+  } catch {
+    return {};
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+async function sessionDoJson(env: GatewayEnv, sessionId: string, path: string, init?: RequestInit): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await withTimeout(
+      sessionStub(env, sessionId).fetch(`https://session${path}`, init),
+      4000,
+      null,
+    );
+    if (!response || !response.ok) return null;
+    return (await response.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+async function listAccountBrowsers(request: Request, env: GatewayEnv): Promise<Response> {
+  const account = await resolveAccount(request, env);
+  if (!account) return json({ error: "not signed in" }, 401);
+  const clientsResult = await dirCall(env, "clientsForUser", { userId: account.userId });
+  const tokenClients = (clientsResult.ok === false ? [] : (clientsResult.clients as Array<Record<string, unknown>> | undefined) ?? []);
+  const browsers = [];
+  const liveByBrowser = new Map<string, Array<Record<string, unknown>>>();
+  for (const browser of account.browsers) {
+    const sessionId = String(browser.sessionId ?? "");
+    const status = await sessionDoJson(env, sessionId, "/status");
+    const connected = Boolean(status?.connected);
+    const tabCount = connected ? (await sessionDoJson(env, sessionId, "/browser-tab-count"))?.tabCount ?? null : null;
+    const live = connected ? ((await sessionDoJson(env, sessionId, "/mcp-clients"))?.clients as Array<Record<string, unknown>> | undefined) ?? [] : [];
+    liveByBrowser.set(sessionId, live);
+    browsers.push({
+      sessionId,
+      name: browser.name ?? "Browser",
+      browser: browser.browser ?? "",
+      os: browser.os ?? "",
+      version: browser.version ?? "",
+      createdAt: browser.createdAt ?? null,
+      lastSeenAt: browser.lastSeenAt ?? null,
+      isDefault: browser.sessionId === account.defaultSessionId,
+      connected,
+      // Tab count is known only for connected browsers; null means unknown,
+      // never a guess. (The local dashboard overlays its own exact count.)
+      tabCount: typeof tabCount === "number" ? tabCount : null,
+    });
+  }
+  const mcpClients = tokenClients.map((entry) => {
+    const sessionId = String(entry.sessionId ?? "");
+    const live = (liveByBrowser.get(sessionId) ?? []).find((item) => String(item.clientId ?? "") === String(entry.clientId ?? ""));
+    return {
+      clientId: entry.clientId ?? "",
+      clientName: entry.clientName ?? entry.clientId ?? "",
+      scope: entry.scope ?? "",
+      sessionId,
+      live: Boolean(live),
+      // Live transport timestamps when connected; otherwise the honest
+      // proxies are the authorization date and the last token refresh.
+      connectedSince: live ? Number(live.createdAt ?? 0) || null : null,
+      lastActivityAt: live ? Number(live.lastActivityAt ?? 0) || null : null,
+      authorizedSince: entry.createdAt ?? null,
+      lastRefreshedAt: entry.lastRefreshedAt ?? null,
+      expiresAt: entry.expiresAt ?? null,
+    };
+  });
+  return json({
+    browsers,
+    defaultSessionId: account.defaultSessionId,
+    ...(account.currentSessionId ? { currentSessionId: account.currentSessionId } : {}),
+    mcpClients,
+  });
+}
+
+async function reuseBrowser(request: Request, env: GatewayEnv): Promise<Response> {
+  const session = await authenticateDevice(request, env);
+  if ("response" in session) return session.response;
+  const body = await readJsonBody(request);
+  const info = (body.browserInfo && typeof body.browserInfo === "object" ? body.browserInfo : {}) as Record<string, unknown>;
+  const header = request.headers.get("authorization") ?? "";
+  const bearer = header.slice(7).trim();
+  const result = await dirCall(env, "reuseBrowserSession", { deviceToken: bearer, browserInfo: info });
+  if (result.ok === false) return json({ error: result.error ?? "could not reuse browser session" }, 400);
+  return json({ sessionId: result.sessionId });
+}
+
+async function setAccountDefaultBrowser(request: Request, env: GatewayEnv): Promise<Response> {
+  const account = await resolveAccount(request, env);
+  if (!account) return json({ error: "not signed in" }, 401);
+  const body = await readJsonBody(request);
+  const target = String(body.sessionId ?? "");
+  if (!account.browsers.some((entry) => String(entry.sessionId ?? "") === target)) {
+    return json({ error: "unknown browser" }, 404);
+  }
+  const result = await dirCall(env, "setDefaultBrowser", { userId: account.userId, targetSessionId: target });
+  if (result.ok === false) return json({ error: result.error ?? "could not set default browser" }, 400);
+  return json({ defaultSessionId: result.defaultSessionId });
+}
+
+async function renameAccountBrowser(request: Request, env: GatewayEnv): Promise<Response> {
+  const account = await resolveAccount(request, env);
+  if (!account) return json({ error: "not signed in" }, 401);
+  const body = await readJsonBody(request);
+  const target = String(body.sessionId ?? "");
+  const name = String(body.name ?? "");
+  if (!account.browsers.some((entry) => String(entry.sessionId ?? "") === target)) {
+    return json({ error: "unknown browser" }, 404);
+  }
+  const result = await dirCall(env, "renameBrowser", { userId: account.userId, targetSessionId: target, name });
+  if (result.ok === false) return json({ error: result.error ?? "could not rename browser" }, 400);
+  return json({ sessionId: result.sessionId, name: result.name });
+}
+
+async function removeAccountBrowser(request: Request, env: GatewayEnv): Promise<Response> {
+  const account = await resolveAccount(request, env);
+  if (!account) return json({ error: "not signed in" }, 401);
+  const body = await readJsonBody(request);
+  const target = String(body.sessionId ?? "");
+  if (!account.browsers.some((entry) => String(entry.sessionId ?? "") === target)) {
+    return json({ error: "unknown browser" }, 404);
+  }
+  const result = await dirCall(env, "removeBrowser", { userId: account.userId, targetSessionId: target });
+  if (result.ok === false) return json({ error: result.error ?? "could not remove browser" }, 400);
+  // Close the removed browser's bridge and live MCP sessions; the
+  // DirectoryDO record and tokens are already gone.
+  await sessionDoJson(env, target, "/disconnect-bridge", { method: "POST" });
+  await sessionDoJson(env, target, "/purge-mcp-sessions", { method: "POST" });
+  return json({ removed: result.removed, defaultSessionId: result.defaultSessionId });
+}
+
+async function disconnectAccountBrowser(request: Request, env: GatewayEnv): Promise<Response> {
+  const account = await resolveAccount(request, env);
+  if (!account) return json({ error: "not signed in" }, 401);
+  const body = await readJsonBody(request);
+  const target = String(body.sessionId ?? "");
+  if (!account.browsers.some((entry) => String(entry.sessionId ?? "") === target)) {
+    return json({ error: "unknown browser" }, 404);
+  }
+  await sessionDoJson(env, target, "/disconnect-bridge", { method: "POST" });
+  return json({ disconnected: target });
+}
+
+async function revokeAccountMcpClient(request: Request, env: GatewayEnv): Promise<Response> {
+  const account = await resolveAccount(request, env);
+  if (!account) return json({ error: "not signed in" }, 401);
+  const body = await readJsonBody(request);
+  const clientId = String(body.clientId ?? "");
+  const target = String(body.sessionId ?? "");
+  if (!clientId) return json({ error: "client is required" }, 400);
+  if (target && !account.browsers.some((entry) => String(entry.sessionId ?? "") === target)) {
+    return json({ error: "unknown browser" }, 404);
+  }
+  const result = await dirCall(env, "revokeClient", { userId: account.userId, clientId, sessionId: target });
+  if (result.ok === false) return json({ error: result.error ?? "could not revoke client" }, 400);
+  const affected = target
+    ? [target]
+    : account.browsers.map((entry) => String(entry.sessionId ?? "")).filter(Boolean);
+  for (const sessionId of affected) {
+    await sessionDoJson(env, sessionId, "/drop-mcp-client", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clientId }),
+    });
+  }
+  return json({ revoked: result.revoked ?? 0 });
 }
 
 /**
@@ -353,12 +584,15 @@ async function mcp(request: Request, env: GatewayEnv, url: URL, requestId: strin
     .filter((item) => item === "read:tools" || item === "call:tools")
     .join(" ");
   const headers = new Headers(request.headers);
-  for (const name of ["x-muze-client-id", "x-muze-client-name", "x-muze-client-version", "x-muze-client-scope"]) headers.delete(name);
+  for (const name of ["x-muze-client-id", "x-muze-client-name", "x-muze-client-version", "x-muze-client-scope", "x-muze-browser-session"]) headers.delete(name);
   const clientId = String(verified.clientId ?? "");
   if (clientId) {
     headers.set("x-muze-client-id", clientId);
     headers.set("x-muze-client-name", String(verified.clientName ?? clientId));
   }
+  // The browser this access token is bound to (after any browsers.select
+  // rebind): SessionDO uses it for browsers.* tools and for routing.
+  headers.set("x-muze-browser-session", String(verified.sessionId));
   if (sanitisedVersion) headers.set("x-muze-client-version", sanitisedVersion);
   if (verifiedScope) headers.set("x-muze-client-scope", verifiedScope);
   const forwarded = new Request(request, { headers });

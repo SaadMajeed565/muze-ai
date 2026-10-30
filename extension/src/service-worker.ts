@@ -4,8 +4,19 @@ import { ChromeWorkingTabGroup, ToolExecutor, createToolRegistry } from "../libs
 import { BridgeManager } from "./bridge-manager.js";
 import { ChromeBrowserContext } from "./chrome-context.js";
 import { ChromeOffscreenMessenger } from "./offscreen-messenger.js";
-import { fetchGatewayStatus, gatewayMcpUrl, isGatewayAuthError, normalizeGatewayUrl, rotateDeviceToken, signInWithBrowser } from "./gateway-client.js";
-import type { DashboardRequest, DashboardResponse, DashboardSnapshot, DashboardState, GatewayInfo } from "./messages.js";
+import {
+  browserInfoFromUserAgent,
+  fetchGatewayStatus,
+  gatewayMcpUrl,
+  isGatewayAuthError,
+  normalizeGatewayUrl,
+  rotateDeviceToken,
+  reuseBrowserSession,
+  signInWithBrowser,
+  type BrowserInfo,
+  type GatewayAccount,
+} from "./gateway-client.js";
+import type { BrowsersDashboard, DashboardBrowser, DashboardMcpClient, DashboardRequest, DashboardResponse, DashboardSnapshot, DashboardState, GatewayInfo } from "./messages.js";
 import { LEGACY_OFFSCREEN_TARGET, OFFSCREEN_TARGET } from "./messages.js";
 import {
   DEFAULT_BRIDGE_SETTINGS,
@@ -665,6 +676,96 @@ async function persistPolicy(): Promise<void> {
   await savePolicy(policy.getConfig());
 }
 
+/**
+ * Multi-browser dashboard data, via the gateway account routes. The
+ * service worker is the only caller: it holds the device token, the
+ * dashboard never sees it. A failed fetch is reported as
+ * "gateway-unreachable" so the dashboard can show its error state
+ * instead of an empty list. The local browser's tab count (exact, from
+ * chrome.tabs) overlays the gateway's count for the local row only;
+ * remote browsers keep the gateway's count (null when unknown).
+ */
+function localBrowserInfo(): BrowserInfo {
+  try {
+    return browserInfoFromUserAgent(typeof navigator !== "undefined" ? navigator.userAgent : "");
+  } catch {
+    return {};
+  }
+}
+
+async function gatewayAccountFetch(path: string, init?: RequestInit): Promise<Record<string, unknown>> {
+  const token = activeSettings.gatewayToken;
+  if (!token) throw new Error("Not signed in");
+  const url = normalizeGatewayUrl(GATEWAY_URL);
+  if (!url) throw new Error("Gateway URL is required");
+  let response: Response;
+  try {
+    response = await fetch(`${url}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(init?.headers ?? {}) },
+    });
+  } catch {
+    throw new Error("gateway-unreachable");
+  }
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await response.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `gateway request failed (${response.status})`);
+  return body;
+}
+
+async function loadBrowsersDashboard(): Promise<BrowsersDashboard> {
+  const body = await gatewayAccountFetch("/account/browsers");
+  const rawBrowsers = Array.isArray(body.browsers) ? (body.browsers as Array<Record<string, unknown>>) : [];
+  const rawClients = Array.isArray(body.mcpClients) ? (body.mcpClients as Array<Record<string, unknown>>) : [];
+  let localTabCount: number | null = null;
+  try {
+    const tabs = await chrome.tabs.query({});
+    localTabCount = tabs.length;
+  } catch {
+    localTabCount = null;
+  }
+  const localSessionId = activeSettings.gatewaySessionId;
+  const browsers: DashboardBrowser[] = rawBrowsers.map((entry) => {
+    const sessionId = String(entry.sessionId ?? "");
+    const isLocal = Boolean(localSessionId) && sessionId === localSessionId;
+    return {
+      sessionId,
+      name: String(entry.name ?? "Browser"),
+      browser: String(entry.browser ?? ""),
+      os: String(entry.os ?? ""),
+      version: String(entry.version ?? ""),
+      createdAt: typeof entry.createdAt === "number" ? entry.createdAt : null,
+      lastSeenAt: typeof entry.lastSeenAt === "number" ? entry.lastSeenAt : null,
+      isDefault: Boolean(entry.isDefault),
+      connected: Boolean(entry.connected),
+      tabCount: isLocal && localTabCount !== null ? localTabCount : typeof entry.tabCount === "number" ? entry.tabCount : null,
+      isLocal,
+    };
+  });
+  const mcpClients: DashboardMcpClient[] = rawClients.map((entry) => ({
+    clientId: String(entry.clientId ?? ""),
+    clientName: String(entry.clientName ?? entry.clientId ?? ""),
+    scope: String(entry.scope ?? ""),
+    sessionId: String(entry.sessionId ?? ""),
+    live: Boolean(entry.live),
+    connectedSince: typeof entry.connectedSince === "number" ? entry.connectedSince : null,
+    lastActivityAt: typeof entry.lastActivityAt === "number" ? entry.lastActivityAt : null,
+    authorizedSince: typeof entry.authorizedSince === "number" ? entry.authorizedSince : null,
+    lastRefreshedAt: typeof entry.lastRefreshedAt === "number" ? entry.lastRefreshedAt : null,
+    expiresAt: typeof entry.expiresAt === "number" ? entry.expiresAt : null,
+  }));
+  return {
+    browsers,
+    defaultSessionId: String(body.defaultSessionId ?? ""),
+    ...(typeof body.currentSessionId === "string" ? { currentSessionId: body.currentSessionId } : {}),
+    mcpClients,
+  };
+}
+
 async function handleRequest(request: DashboardRequest): Promise<DashboardResponse> {
   switch (request.type) {
     case "muze/state":
@@ -753,7 +854,25 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
       return { ok: true, state: dashboardState() };
     case "muze/gateway/sign-in": {
       try {
-        const account = await signInWithBrowser(GATEWAY_URL);
+        const info = localBrowserInfo();
+        let account: GatewayAccount;
+        // A stored token reuses its own browser (updates info/lastSeen,
+        // no new entry); a fresh install goes through the website flow,
+        // which adopts the signup placeholder or creates a new browser.
+        if (activeSettings.gatewayToken) {
+          try {
+            const reused = await reuseBrowserSession(GATEWAY_URL, activeSettings.gatewayToken, info);
+            account = {
+              token: activeSettings.gatewayToken,
+              email: activeSettings.gatewayAccountEmail,
+              sessionId: reused.sessionId,
+            };
+          } catch {
+            account = await signInWithBrowser(GATEWAY_URL, info);
+          }
+        } else {
+          account = await signInWithBrowser(GATEWAY_URL, info);
+        }
         gatewayAuthRequired = false;
         gatewayAuthToken = "";
         activeSettings = await saveBridgeSettings({
@@ -847,6 +966,51 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
         const fileReq = request as Extract<DashboardRequest, { type: "muze/files/remove" }>;
         await removeFile(fileReq.id);
         return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    case "muze/browsers/list": {
+      try {
+        return { ok: true, browsers: await loadBrowsersDashboard() };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    case "muze/browsers/set-default":
+    case "muze/browsers/rename":
+    case "muze/browsers/disconnect":
+    case "muze/browsers/remove": {
+      try {
+        const path =
+          request.type === "muze/browsers/set-default"
+            ? "/account/browsers/default"
+            : request.type === "muze/browsers/rename"
+              ? "/account/browsers/rename"
+              : request.type === "muze/browsers/disconnect"
+                ? "/account/browsers/disconnect"
+                : "/account/browsers/remove";
+        const payload =
+          request.type === "muze/browsers/rename"
+            ? { sessionId: request.sessionId, name: request.name }
+            : { sessionId: request.sessionId };
+        await gatewayAccountFetch(path, { method: "POST", body: JSON.stringify(payload) });
+        // Note: disconnecting the local browser closes its socket via the
+        // gateway; the extension's existing keepalive may reconnect it
+        // later, exactly as after any transient drop. Disconnect is a
+        // socket close, not a sign-out: the token stays valid.
+        return { ok: true, browsers: await loadBrowsersDashboard() };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    case "muze/mcp-sessions/revoke": {
+      try {
+        await gatewayAccountFetch("/account/mcp-clients/revoke", {
+          method: "POST",
+          body: JSON.stringify({ clientId: request.clientId, ...(request.sessionId ? { sessionId: request.sessionId } : {}) }),
+        });
+        return { ok: true, browsers: await loadBrowsersDashboard() };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }

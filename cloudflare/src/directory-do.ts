@@ -26,10 +26,38 @@ interface WebSessionRow {
   userId: string;
   expiresAt: number;
 }
+/**
+ * One browser attached to an account. The device token is deliberately NOT
+ * stored here: tokens live only in the `d:` hash index, so a browsers list
+ * can never leak one. `claimed` is false only for the placeholder browser
+ * created at website signup, which no extension has adopted yet; the first
+ * extension sign-in adopts it instead of creating a second entry.
+ */
+export interface BrowserSession {
+  sessionId: string;
+  name: string;
+  browser: string;
+  os: string;
+  version: string;
+  createdAt: number;
+  lastSeenAt: number;
+  claimed: boolean;
+}
+
+export interface BrowserInfo {
+  name?: string;
+  browser?: string;
+  os?: string;
+  version?: string;
+}
+
 interface AccountRow {
   userId: string;
-  sessionId: string;
-  deviceToken: string;
+  /** Legacy single-session fields, kept only so old rows can migrate. */
+  sessionId?: string;
+  deviceToken?: string;
+  browsers: BrowserSession[];
+  defaultSessionId: string;
   createdAt: number;
 }
 interface ClientRow {
@@ -67,13 +95,20 @@ interface TokenRow {
   clientId: string;
   scope: string;
   expiresAt: number;
+  /** Owning account, when known (older rows lack it; see setClientBrowser). */
+  userId?: string;
+  createdAt: number;
+  lastRefreshedAt: number;
 }
 interface ExtensionCodeRow {
+  /** Bound browser when adopting an existing one; empty when redeem creates one. */
   sessionId: string;
   userId: string;
   extensionId: string;
   redirectUri: string;
   expiresAt: number;
+  browserInfo?: BrowserInfo;
+  createNew?: boolean;
 }
 
 /** 32-bit numeric pairing code, rendered as two 5-digit groups (00000-00000). */
@@ -152,10 +187,10 @@ export class DirectoryDO implements DurableObject {
         return this.deleteAccount(String(body.sessionToken ?? ""));
       case "createExtensionCode":
         return this.createExtensionCode(
-          String(body.sessionId ?? ""),
           String(body.userId ?? ""),
           String(body.extensionId ?? ""),
           String(body.redirectUri ?? ""),
+          (body.browserInfo ?? {}) as BrowserInfo,
         );
       case "redeemExtensionCode":
         return this.redeemExtensionCode(
@@ -175,6 +210,30 @@ export class DirectoryDO implements DurableObject {
         return this.revokeToken(String(body.token ?? ""), String(body.clientId ?? ""));
       case "revokeSession":
         return this.revokeSession(String(body.sessionId ?? ""));
+      case "createBrowserSession":
+        return this.createBrowserSession(String(body.userId ?? ""), (body.browserInfo ?? {}) as BrowserInfo);
+      case "reuseBrowserSession":
+        return this.reuseBrowserSession(String(body.deviceToken ?? ""), (body.browserInfo ?? {}) as BrowserInfo);
+      case "browsersForSession":
+        return this.browsersForSession(String(body.sessionId ?? ""));
+      case "browsersForUser":
+        return this.browsersForUser(String(body.userId ?? ""));
+      case "clientsForUser":
+        return this.clientsForUser(String(body.userId ?? ""));
+      case "setDefaultBrowser":
+        return this.setDefaultBrowser(String(body.userId ?? ""), String(body.targetSessionId ?? ""));
+      case "renameBrowser":
+        return this.renameBrowser(String(body.userId ?? ""), String(body.targetSessionId ?? ""), String(body.name ?? ""));
+      case "removeBrowser":
+        return this.removeBrowser(String(body.userId ?? ""), String(body.targetSessionId ?? ""));
+      case "setClientBrowser":
+        return this.setClientBrowser(
+          String(body.clientId ?? ""),
+          String(body.currentSessionId ?? ""),
+          String(body.targetSessionId ?? ""),
+        );
+      case "revokeClient":
+        return this.revokeClient(String(body.userId ?? ""), String(body.clientId ?? ""), String(body.sessionId ?? ""));
       case "sessionExists": {
         const row = await this.storage.get<SessionRow>(`s:${body.sessionId}`);
         return row ? { name: row.name } : { ok: false, error: "unknown session" };
@@ -210,6 +269,18 @@ export class DirectoryDO implements DurableObject {
     const sessionId = await this.deviceSession(deviceToken);
     if (!sessionId) return { ok: false, error: "invalid device token", status: 401 };
     const session = await this.storage.get<SessionRow>(`s:${sessionId}`);
+    if (session?.userId) {
+      // A placeholder browser that actually connects stops being a
+      // placeholder: a later extension sign-in must create a new browser
+      // instead of adopting (and re-tokening) this one.
+      const account = await this.loadAccount(session.userId);
+      const browser = account?.browsers.find((entry) => entry.sessionId === sessionId);
+      if (browser) {
+        browser.claimed = true;
+        browser.lastSeenAt = nowMs();
+        await this.storage.put(`acct:${session.userId}`, account);
+      }
+    }
     return { sessionId, name: session?.name ?? "Browser" };
   }
 
@@ -218,8 +289,9 @@ export class DirectoryDO implements DurableObject {
    * (Worker) must already have authenticated the old token or the website
    * session that owns this session; this method only verifies the session
    * exists. The old token stops working immediately: every `d:` index entry
-   * for this session is deleted before the new one is written, and the
-   * account row (if any) is updated to the new token.
+   * for this session is deleted before the new one is written. Browser
+   * records carry no token, so the account row needs no token update;
+   * rotation also refreshes the browser's lastSeenAt.
    */
   private async rotateDeviceToken(sessionId: string): Promise<Record<string, any>> {
     const session = await this.storage.get<SessionRow>(`s:${sessionId}`);
@@ -231,12 +303,297 @@ export class DirectoryDO implements DurableObject {
     }
     await this.storage.put(`d:${deviceTokenHash}`, sessionId);
     if (session.userId) {
-      const account = await this.storage.get<AccountRow>(`acct:${session.userId}`);
-      if (account && account.sessionId === sessionId) {
-        await this.storage.put(`acct:${session.userId}`, { ...account, deviceToken });
+      const account = await this.loadAccount(session.userId);
+      if (account) {
+        const browser = account.browsers.find((entry) => entry.sessionId === sessionId);
+        if (browser) {
+          browser.lastSeenAt = nowMs();
+          await this.storage.put(`acct:${session.userId}`, account);
+        }
       }
     }
     return { deviceToken, sessionId };
+  }
+
+  // --- Multi-browser account model -----------------------------------------
+
+  private static readonly MAX_BROWSERS = 10;
+
+  private cleanBrowserInfo(info: BrowserInfo | undefined): BrowserInfo {
+    const text = (value: unknown): string => (typeof value === "string" ? value.trim().slice(0, 80) : "");
+    return {
+      ...(text(info?.name) ? { name: text(info?.name) } : {}),
+      ...(text(info?.browser) ? { browser: text(info?.browser) } : {}),
+      ...(text(info?.os) ? { os: text(info?.os) } : {}),
+      ...(text(info?.version) ? { version: text(info?.version) } : {}),
+    };
+  }
+
+  private autoBrowserName(account: AccountRow, info: BrowserInfo): string {
+    const label = [info.browser, info.os].filter(Boolean).join(" on ");
+    if (label) {
+      const taken = new Set(account.browsers.map((entry) => entry.name));
+      if (!taken.has(label)) return label;
+    }
+    return `Browser ${account.browsers.length + 1}`;
+  }
+
+  private async createBrowserRecord(
+    account: AccountRow,
+    info: BrowserInfo,
+    claimed: boolean,
+  ): Promise<{ sessionId: string; deviceToken: string; browser: BrowserSession }> {
+    const sessionId = crypto.randomUUID();
+    const deviceToken = randomHex(32);
+    const now = nowMs();
+    const browser: BrowserSession = {
+      sessionId,
+      name: info.name ?? this.autoBrowserName(account, info),
+      browser: info.browser ?? "",
+      os: info.os ?? "",
+      version: info.version ?? "",
+      createdAt: now,
+      lastSeenAt: now,
+      claimed,
+    };
+    await this.storage.put(`s:${sessionId}`, {
+      sessionId,
+      name: browser.name,
+      userId: account.userId,
+      createdAt: now,
+    } satisfies SessionRow);
+    await this.storage.put(`d:${await sha256Hex(deviceToken)}`, sessionId);
+    account.browsers.push(browser);
+    if (!account.defaultSessionId) account.defaultSessionId = sessionId;
+    await this.storage.put(`acct:${account.userId}`, account);
+    return { sessionId, deviceToken, browser };
+  }
+
+  /**
+   * Load an account, migrating a legacy single-session row on first read:
+   * the old session becomes "Browser 1" with the same sessionId, and its
+   * token (in the `d:` index, untouched) keeps working, so the currently
+   * connected extension stays connected with no re-sign-in.
+   */
+  private async loadAccount(userId: string): Promise<AccountRow | null> {
+    if (!userId) return null;
+    const row = await this.storage.get<AccountRow>(`acct:${userId}`);
+    if (!row) return null;
+    if (Array.isArray(row.browsers) && row.browsers.length > 0) {
+      if (!row.defaultSessionId || !row.browsers.some((entry) => entry.sessionId === row.defaultSessionId)) {
+        row.defaultSessionId = row.browsers[0].sessionId;
+        await this.storage.put(`acct:${userId}`, row);
+      }
+      return row;
+    }
+    const legacySessionId = row.sessionId ?? "";
+    const legacySession = legacySessionId ? await this.storage.get<SessionRow>(`s:${legacySessionId}`) : undefined;
+    if (!legacySessionId || !legacySession) {
+      // No usable legacy session: start with an empty browser list rather
+      // than inventing a session no extension owns.
+      const migrated: AccountRow = { userId, browsers: [], defaultSessionId: "", createdAt: row.createdAt };
+      await this.storage.put(`acct:${userId}`, migrated);
+      return migrated;
+    }
+    const migrated: AccountRow = {
+      userId,
+      browsers: [
+        {
+          sessionId: legacySessionId,
+          name: "Browser 1",
+          browser: "",
+          os: "",
+          version: "",
+          createdAt: row.createdAt,
+          lastSeenAt: row.createdAt,
+          claimed: true,
+        },
+      ],
+      defaultSessionId: legacySessionId,
+      createdAt: row.createdAt,
+    };
+    await this.storage.put(`acct:${userId}`, migrated);
+    return migrated;
+  }
+
+  private async accountForSession(sessionId: string): Promise<AccountRow | null> {
+    if (!sessionId) return null;
+    const session = await this.storage.get<SessionRow>(`s:${sessionId}`);
+    if (!session?.userId) return null;
+    return this.loadAccount(session.userId);
+  }
+
+  /** Public browser fields only — never a device token. */
+  private publicBrowsers(account: AccountRow): Array<BrowserSession & { isDefault: boolean }> {
+    return account.browsers.map((entry) => ({ ...entry, isDefault: entry.sessionId === account.defaultSessionId }));
+  }
+
+  private async createBrowserSession(userId: string, info: BrowserInfo): Promise<Record<string, any>> {
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    if (account.browsers.length >= DirectoryDO.MAX_BROWSERS) {
+      return { ok: false, error: "browser limit reached (10 browsers per account)", status: 400 };
+    }
+    const created = await this.createBrowserRecord(account, this.cleanBrowserInfo(info), true);
+    return { sessionId: created.sessionId, deviceToken: created.deviceToken };
+  }
+
+  /**
+   * Reuse the browser bound to a stored device token (a reinstall or a
+   * re-sign-in that still holds its token), updating its info/lastSeen
+   * instead of creating a second entry for the same browser.
+   */
+  private async reuseBrowserSession(deviceToken: string, info: BrowserInfo): Promise<Record<string, any>> {
+    const sessionId = await this.deviceSession(deviceToken);
+    if (!sessionId) return { ok: false, error: "invalid device token", status: 401 };
+    const account = await this.accountForSession(sessionId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    const browser = account.browsers.find((entry) => entry.sessionId === sessionId);
+    if (!browser) return { ok: false, error: "unknown browser", status: 404 };
+    const cleaned = this.cleanBrowserInfo(info);
+    if (cleaned.name) browser.name = cleaned.name;
+    if (cleaned.browser) browser.browser = cleaned.browser;
+    if (cleaned.os) browser.os = cleaned.os;
+    if (cleaned.version) browser.version = cleaned.version;
+    browser.lastSeenAt = nowMs();
+    browser.claimed = true;
+    await this.storage.put(`acct:${account.userId}`, account);
+    return { sessionId };
+  }
+
+  private async browsersForSession(sessionId: string): Promise<Record<string, any>> {
+    const account = await this.accountForSession(sessionId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    return { userId: account.userId, browsers: this.publicBrowsers(account), defaultSessionId: account.defaultSessionId, currentSessionId: sessionId };
+  }
+
+  private async browsersForUser(userId: string): Promise<Record<string, any>> {
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    return { userId: account.userId, browsers: this.publicBrowsers(account), defaultSessionId: account.defaultSessionId };
+  }
+
+  /** Authorized OAuth clients, deduped by client + target browser. No tokens. */
+  private async clientsForUser(userId: string): Promise<Record<string, any>> {
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    const known = new Set(account.browsers.map((entry) => entry.sessionId));
+    const byKey = new Map<string, Record<string, unknown>>();
+    for (const prefix of ["at:", "rt:"] as const) {
+      for (const [key, row] of await this.storage.list<TokenRow>({ prefix })) {
+        void key;
+        if (!known.has(row.sessionId)) continue;
+        if (row.userId && row.userId !== userId) continue;
+        const client = row.clientId ? await this.storage.get<ClientRow>(`c:${row.clientId}`) : undefined;
+        const mapKey = `${row.clientId}:${row.sessionId}`;
+        const existing = byKey.get(mapKey);
+        if (!existing || (row.createdAt ?? 0) > Number(existing.createdAt ?? 0)) {
+          byKey.set(mapKey, {
+            clientId: row.clientId,
+            clientName: client?.clientName ?? row.clientId,
+            scope: row.scope,
+            sessionId: row.sessionId,
+            expiresAt: row.expiresAt,
+            createdAt: row.createdAt ?? null,
+            lastRefreshedAt: row.lastRefreshedAt ?? null,
+          });
+        }
+      }
+    }
+    return { clients: [...byKey.values()] };
+  }
+
+  private async setDefaultBrowser(userId: string, targetSessionId: string): Promise<Record<string, any>> {
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    if (!account.browsers.some((entry) => entry.sessionId === targetSessionId)) {
+      return { ok: false, error: "unknown browser", status: 404 };
+    }
+    account.defaultSessionId = targetSessionId;
+    await this.storage.put(`acct:${userId}`, account);
+    return { defaultSessionId: targetSessionId };
+  }
+
+  private async renameBrowser(userId: string, targetSessionId: string, name: string): Promise<Record<string, any>> {
+    const cleaned = name.trim().slice(0, 80);
+    if (!cleaned) return { ok: false, error: "browser name is required", status: 400 };
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    const browser = account.browsers.find((entry) => entry.sessionId === targetSessionId);
+    if (!browser) return { ok: false, error: "unknown browser", status: 404 };
+    browser.name = cleaned;
+    await this.storage.put(`acct:${userId}`, account);
+    return { sessionId: targetSessionId, name: cleaned };
+  }
+
+  /**
+   * Remove one browser and revoke only that browser: its session row, its
+   * device-token index entries, its OAuth tokens, and its pair codes are
+   * deleted; other browsers and their tokens are untouched. The last
+   * browser cannot be removed — deleting the account is the path for that.
+   * The caller (Worker) closes the browser's bridge and live MCP sessions.
+   */
+  private async removeBrowser(userId: string, targetSessionId: string): Promise<Record<string, any>> {
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    if (!account.browsers.some((entry) => entry.sessionId === targetSessionId)) {
+      return { ok: false, error: "unknown browser", status: 404 };
+    }
+    if (account.browsers.length <= 1) {
+      return { ok: false, error: "cannot remove the last browser", status: 400 };
+    }
+    await this.revokeSession(targetSessionId);
+    account.browsers = account.browsers.filter((entry) => entry.sessionId !== targetSessionId);
+    if (account.defaultSessionId === targetSessionId) account.defaultSessionId = account.browsers[0].sessionId;
+    await this.storage.put(`acct:${userId}`, account);
+    return { removed: targetSessionId, defaultSessionId: account.defaultSessionId };
+  }
+
+  /**
+   * Move an OAuth client's future MCP routing to another browser of the
+   * same account. Every access/refresh token for that client bound to the
+   * current browser is rebound; tokens bound to other browsers are left
+   * alone. Live transports on the old browser are NOT moved — the client
+   * re-initializes on the new browser (see browsers.select).
+   */
+  private async setClientBrowser(clientId: string, currentSessionId: string, targetSessionId: string): Promise<Record<string, any>> {
+    if (!clientId) return { ok: false, error: "client is required", status: 400 };
+    const account = await this.accountForSession(currentSessionId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    const target = account.browsers.find((entry) => entry.sessionId === targetSessionId);
+    if (!target) return { ok: false, error: "unknown browser", status: 404 };
+    let moved = 0;
+    for (const prefix of ["at:", "rt:"] as const) {
+      for (const [key, row] of await this.storage.list<TokenRow>({ prefix })) {
+        const sameAccount = row.sessionId === currentSessionId || (row.userId !== undefined && row.userId === account.userId);
+        if (row.clientId === clientId && sameAccount) {
+          await this.storage.put(key, { ...row, sessionId: targetSessionId });
+          moved++;
+        }
+      }
+    }
+    if (moved === 0) return { ok: false, error: "no tokens for this client on this browser", status: 404 };
+    return { sessionId: targetSessionId, name: target.name };
+  }
+
+  /** Revoke one client's tokens, optionally scoped to a single browser. */
+  private async revokeClient(userId: string, clientId: string, sessionId: string): Promise<Record<string, any>> {
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "unknown account", status: 404 };
+    if (sessionId && !account.browsers.some((entry) => entry.sessionId === sessionId)) {
+      return { ok: false, error: "unknown browser", status: 404 };
+    }
+    let revoked = 0;
+    for (const prefix of ["at:", "rt:"] as const) {
+      for (const [key, row] of await this.storage.list<TokenRow>({ prefix })) {
+        if (row.clientId !== clientId) continue;
+        if (sessionId && row.sessionId !== sessionId) continue;
+        if (!sessionId && !account.browsers.some((entry) => entry.sessionId === row.sessionId)) continue;
+        await this.storage.delete(key);
+        revoked++;
+      }
+    }
+    return { revoked };
   }
 
   private async newPairCode(sessionId: string): Promise<Record<string, any>> {
@@ -299,16 +656,17 @@ export class DirectoryDO implements DurableObject {
     const redirectUri = request.redirectUri;
     const state = request.state;
     if (!userId) return { ok: false, error: "not signed in", redirectUri, state };
-    const account = await this.storage.get<AccountRow>(`acct:${userId}`);
+    const account = await this.loadAccount(userId);
     if (!account) return { ok: false, error: "no browser session for this account", redirectUri, state };
-    const session = await this.storage.get<SessionRow>(`s:${account.sessionId}`);
+    const defaultSessionId = account.defaultSessionId;
+    const session = defaultSessionId ? await this.storage.get<SessionRow>(`s:${defaultSessionId}`) : undefined;
     if (!session || session.userId !== userId) {
       return { ok: false, error: "no browser session for this account", redirectUri, state };
     }
     const code = randomHex(24);
     const codeHash = await sha256Hex(code);
     const row: AuthCodeRow = {
-      sessionId: account.sessionId,
+      sessionId: defaultSessionId,
       clientId: request.clientId,
       redirectUri: request.redirectUri,
       codeChallenge: request.codeChallenge,
@@ -317,7 +675,7 @@ export class DirectoryDO implements DurableObject {
       expiresAt: nowMs() + AUTH_CODE_TTL_MS,
     };
     await this.storage.put(`ac:${codeHash}`, row);
-    return { code, redirectUri, state, sessionId: account.sessionId };
+    return { code, redirectUri, state, sessionId: defaultSessionId };
   }
 
   /**
@@ -328,16 +686,17 @@ export class DirectoryDO implements DurableObject {
    * signed-in website user instead).
    */
   private async ensureAccount(userId: string, email: string): Promise<AccountRow> {
-    const existing = await this.storage.get<AccountRow>(`acct:${userId}`);
+    const existing = await this.loadAccount(userId);
     if (existing) return existing;
-    const sessionId = crypto.randomUUID();
-    const deviceToken = randomHex(32);
-    const deviceTokenHash = await sha256Hex(deviceToken);
-    await this.storage.put(`s:${sessionId}`, { sessionId, name: email, userId, createdAt: nowMs() } satisfies SessionRow);
-    await this.storage.put(`d:${deviceTokenHash}`, sessionId);
-    const account: AccountRow = { userId, sessionId, deviceToken, createdAt: nowMs() };
+    const now = nowMs();
+    const account: AccountRow = { userId, browsers: [], defaultSessionId: "", createdAt: now };
     await this.storage.put(`acct:${userId}`, account);
-    return account;
+    // The signup browser is a placeholder: no extension owns it yet, so the
+    // first extension sign-in adopts it (claimed flips true at redeem)
+    // instead of creating a second entry. Its token is returned to the
+    // caller for compatibility but is never rendered on the website.
+    const created = await this.createBrowserRecord(account, { name: email }, false);
+    return { ...account, browsers: [created.browser], defaultSessionId: created.sessionId };
   }
 
   private async newWebSession(userId: string): Promise<string> {
@@ -362,7 +721,7 @@ export class DirectoryDO implements DurableObject {
     await this.storage.put(`u:${userId}`, user);
     const account = await this.ensureAccount(userId, normalized);
     const webToken = await this.newWebSession(userId);
-    return { userId, email: normalized, token: account.deviceToken, sessionId: account.sessionId, webToken };
+    return { userId, email: normalized, sessionId: account.defaultSessionId, webToken };
   }
 
   private async login(email: string, password: string): Promise<Record<string, any>> {
@@ -375,7 +734,7 @@ export class DirectoryDO implements DurableObject {
     }
     const account = await this.ensureAccount(userId, user.email);
     const webToken = await this.newWebSession(userId);
-    return { userId, email: user.email, token: account.deviceToken, sessionId: account.sessionId, webToken };
+    return { userId, email: user.email, sessionId: account.defaultSessionId, webToken };
   }
 
   private async accountBySession(sessionToken: string): Promise<Record<string, any>> {
@@ -383,9 +742,11 @@ export class DirectoryDO implements DurableObject {
     const row = await this.storage.get<WebSessionRow>(`ws:${await sha256Hex(sessionToken)}`);
     if (!row || row.expiresAt < nowMs()) return { ok: false, error: "not signed in" };
     const user = await this.storage.get<UserRow>(`u:${row.userId}`);
-    const account = await this.storage.get<AccountRow>(`acct:${row.userId}`);
+    const account = await this.loadAccount(row.userId);
     if (!user || !account) return { ok: false, error: "not signed in" };
-    return { userId: row.userId, email: user.email, token: account.deviceToken, sessionId: account.sessionId };
+    // Website callers use the default browser; the device token is never
+    // returned here (extension sign-in is the only route that issues one).
+    return { userId: row.userId, email: user.email, sessionId: account.defaultSessionId };
   }
 
   private async logout(sessionToken: string): Promise<Record<string, any>> {
@@ -393,15 +754,17 @@ export class DirectoryDO implements DurableObject {
     return { ok: true };
   }
 
-  /** Permanently remove an account, its browser session, and every token it owns. */
+  /** Permanently remove an account, every browser session, and every token it owns. */
   private async deleteAccount(sessionToken: string): Promise<Record<string, any>> {
     if (!sessionToken) return { ok: false, error: "not signed in", status: 401 };
     const row = await this.storage.get<WebSessionRow>(`ws:${await sha256Hex(sessionToken)}`);
     if (!row) return { ok: false, error: "not signed in", status: 401 };
     const userId = row.userId;
     const user = await this.storage.get<UserRow>(`u:${userId}`);
-    const account = await this.storage.get<AccountRow>(`acct:${userId}`);
-    if (account) await this.revokeSession(account.sessionId);
+    const account = await this.loadAccount(userId);
+    if (account) {
+      for (const browser of account.browsers) await this.revokeSession(browser.sessionId);
+    }
     if (user) await this.storage.delete(`email:${user.email}`);
     await this.storage.delete(`acct:${userId}`);
     await this.storage.delete(`u:${userId}`);
@@ -417,28 +780,37 @@ export class DirectoryDO implements DurableObject {
   /**
    * Mint a single-use, extension-bound code for the browser sign-in handoff.
    * The device token itself never travels through a redirect URL.
+   *
+   * Multi-browser rule: if the account still has its unclaimed signup
+   * placeholder browser, the code binds to it (the first extension adopts
+   * it); otherwise redeem creates a fresh browser. The cap is checked here
+   * so a sign-in that would exceed 10 browsers fails before the redirect.
    */
   private async createExtensionCode(
-    sessionId: string,
     userId: string,
     extensionId: string,
     redirectUri: string,
+    browserInfo: BrowserInfo,
   ): Promise<Record<string, any>> {
-    if (!sessionId || !userId || !extensionId || !redirectUri) {
+    if (!userId || !extensionId || !redirectUri) {
       return { ok: false, error: "invalid extension handoff" };
     }
-    const session = await this.storage.get<SessionRow>(`s:${sessionId}`);
-    const account = await this.storage.get<AccountRow>(`acct:${userId}`);
-    if (!session || !account || account.userId !== userId || account.sessionId !== sessionId) {
-      return { ok: false, error: "invalid extension handoff" };
+    const account = await this.loadAccount(userId);
+    if (!account) return { ok: false, error: "invalid extension handoff" };
+    const unclaimed = account.browsers.find((entry) => !entry.claimed);
+    const createNew = !unclaimed;
+    if (createNew && account.browsers.length >= DirectoryDO.MAX_BROWSERS) {
+      return { ok: false, error: "browser limit reached (10 browsers per account)" };
     }
     const code = randomHex(32);
     await this.storage.put(`ec:${await sha256Hex(code)}`, {
-      sessionId,
+      sessionId: unclaimed?.sessionId ?? "",
       userId,
       extensionId,
       redirectUri,
       expiresAt: nowMs() + EXTENSION_CODE_TTL_MS,
+      browserInfo: this.cleanBrowserInfo(browserInfo),
+      createNew,
     } satisfies ExtensionCodeRow);
     return { code, expiresAt: nowMs() + EXTENSION_CODE_TTL_MS };
   }
@@ -463,15 +835,35 @@ export class DirectoryDO implements DurableObject {
     });
     if (!row) return { ok: false, error: "invalid or expired code" };
     const user = await this.storage.get<UserRow>(`u:${row.userId}`);
-    const account = await this.storage.get<AccountRow>(`acct:${row.userId}`);
-    if (!user || !account || account.sessionId !== row.sessionId) {
-      return { ok: false, error: "invalid or expired code" };
+    const account = await this.loadAccount(row.userId);
+    if (!user || !account) return { ok: false, error: "invalid or expired code" };
+    if (row.createNew) {
+      // The browser did not exist at auth time: create it now. A second
+      // sign-in racing the cap fails here rather than minting an 11th.
+      if (account.browsers.length >= DirectoryDO.MAX_BROWSERS) {
+        return { ok: false, error: "browser limit reached (10 browsers per account)" };
+      }
+      const created = await this.createBrowserRecord(account, row.browserInfo ?? {}, true);
+      return { token: created.deviceToken, email: user.email, sessionId: created.sessionId };
     }
-    return {
-      token: account.deviceToken,
-      email: user.email,
-      sessionId: account.sessionId,
-    };
+    const browser = account.browsers.find((entry) => entry.sessionId === row.sessionId);
+    if (!browser) return { ok: false, error: "invalid or expired code" };
+    // Adopt: apply the signing-in browser's info and mark it claimed. The
+    // placeholder's signup token is stored only as a hash in the `d:`
+    // index, so it cannot be handed back; rotate to a fresh token here
+    // instead. The placeholder was never connected (a connected one is
+    // already claimed and would not reach this path), so nothing breaks.
+    const rotated = await this.rotateDeviceToken(browser.sessionId);
+    if (rotated.ok === false) return { ok: false, error: "invalid or expired code" };
+    const info = row.browserInfo ?? {};
+    if (info.name) browser.name = info.name;
+    if (info.browser) browser.browser = info.browser;
+    if (info.os) browser.os = info.os;
+    if (info.version) browser.version = info.version;
+    browser.claimed = true;
+    browser.lastSeenAt = nowMs();
+    await this.storage.put(`acct:${row.userId}`, account);
+    return { token: rotated.deviceToken, email: user.email, sessionId: browser.sessionId };
   }
 
   private async exchangeCode(body: Record<string, any>): Promise<Record<string, any>> {
@@ -498,15 +890,26 @@ export class DirectoryDO implements DurableObject {
     return { sessionId: row.sessionId, clientId: row.clientId, scope: row.scope };
   }
 
-  private async mintTokens(sessionId: string, clientId: string, scope: string): Promise<Record<string, any>> {
-    if (!(await this.storage.get(`s:${sessionId}`))) return { ok: false, error: "unknown session" };
+  private async mintTokens(sessionId: string, clientId: string, scope: string, previous?: TokenRow): Promise<Record<string, any>> {
+    const session = await this.storage.get<SessionRow>(`s:${sessionId}`);
+    if (!session) return { ok: false, error: "unknown session" };
     const accessToken = randomHex(32);
     const refreshToken = randomHex(32);
     const accessHash = await sha256Hex(accessToken);
     const refreshHash = await sha256Hex(refreshToken);
     const now = nowMs();
-    await this.storage.put(`at:${accessHash}`, { sessionId, clientId, scope, expiresAt: now + ACCESS_TTL_MS } satisfies TokenRow);
-    await this.storage.put(`rt:${refreshHash}`, { sessionId, clientId, scope, expiresAt: now + REFRESH_TTL_MS } satisfies TokenRow);
+    const base: Omit<TokenRow, "expiresAt"> = {
+      sessionId,
+      clientId,
+      scope,
+      ...(session.userId ? { userId: session.userId } : {}),
+      // A refresh keeps the original authorization date and stamps the
+      // refresh time, so the dashboard can show both honestly.
+      createdAt: previous?.createdAt ?? now,
+      lastRefreshedAt: now,
+    };
+    await this.storage.put(`at:${accessHash}`, { ...base, expiresAt: now + ACCESS_TTL_MS } satisfies TokenRow);
+    await this.storage.put(`rt:${refreshHash}`, { ...base, expiresAt: now + REFRESH_TTL_MS } satisfies TokenRow);
     return { accessToken, refreshToken, expiresIn: Math.floor(ACCESS_TTL_MS / 1000), scope };
   }
 
@@ -539,7 +942,7 @@ export class DirectoryDO implements DurableObject {
     });
     if (!row) return { ok: false, error: "invalid_grant" };
     if (!clientId || row.clientId !== clientId) return { ok: false, error: "invalid_grant" };
-    return this.mintTokens(row.sessionId, row.clientId, row.scope);
+    return this.mintTokens(row.sessionId, row.clientId, row.scope, row);
   }
 
   private async revokeToken(token: string, clientId: string): Promise<Record<string, any>> {
@@ -564,6 +967,9 @@ export class DirectoryDO implements DurableObject {
       if (value.sessionId === sessionId) await this.storage.delete(key);
     }
     for (const [key, value] of await this.storage.list<PairRow>({ prefix: "p:" })) {
+      if (value.sessionId === sessionId) await this.storage.delete(key);
+    }
+    for (const [key, value] of await this.storage.list<ExtensionCodeRow>({ prefix: "ec:" })) {
       if (value.sessionId === sessionId) await this.storage.delete(key);
     }
     return { revoked: true };

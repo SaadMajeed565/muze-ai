@@ -578,6 +578,69 @@ export function searchTools(
   });
 }
 
+/**
+ * Gateway-native browser-routing tools. These are NOT registry tools and
+ * NOT extension tools: they never reach the bridge, they act only on the
+ * caller's own account (via DirectoryDO), and they are therefore not
+ * gated by the extension's permission level — only by OAuth scope and
+ * agent mode. No registry bump and no version bump: the same precedent
+ * as the gateway-native handling of tools.discover/tools.batch.
+ *
+ * Honest limit, stated in the select result: selection rebinds the
+ * client's tokens, so it moves FUTURE MCP transports to the new browser.
+ * The live transport that called select still talks to the old browser
+ * until the client re-initializes there.
+ */
+export interface BrowsersHandler {
+  list: () => Promise<{
+    browsers: Array<Record<string, unknown>>;
+    defaultSessionId: string;
+    currentSessionId: string;
+  }>;
+  select: (sessionId: string) => Promise<{ sessionId: string; name: string }>;
+}
+
+export const BROWSER_TOOL_DESCRIPTORS: ToolDescriptor[] = [
+  {
+    name: "browsers.list",
+    title: "List browsers",
+    description:
+      "List the browsers attached to your account (name, browser/OS/version, created and last-seen dates, default marker). No device tokens are ever returned. Use browsers.select to move this client's future calls to another browser; the live transport keeps talking to its current browser until it re-initializes.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { title: "List browsers", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    category: "system",
+    risk: "read-only",
+    requiresApproval: false,
+    outputSchema: {},
+  } as unknown as ToolDescriptor,
+  {
+    name: "browsers.select",
+    title: "Select browser",
+    description:
+      "Move this OAuth client's future MCP calls to another browser of the same account, persisted across reconnects (the client's tokens are rebound to the target browser). The target must belong to the same account. The live transport that calls this still talks to the previous browser until the client re-initializes; dashboard default selection is respected for clients that never select.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Browser session id from browsers.list (never a device token)." },
+      },
+      required: ["sessionId"],
+    },
+    annotations: { title: "Select browser", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    category: "system",
+    risk: "reversible",
+    requiresApproval: false,
+    outputSchema: {},
+  } as unknown as ToolDescriptor,
+];
+
+/** Mode visibility for the gateway-native browsers tools. */
+export function isBrowsersToolVisible(mode: AgentMode, name: string): boolean {
+  if (mode === "summary" || mode === "compaction") return false;
+  if (name === "browsers.list") return true;
+  if (name === "browsers.select") return mode === "act" || mode === "plan" || mode === "explore";
+  return false;
+}
+
 function getDiscoverToolDescriptor(): ToolDescriptor {
   const descriptor = ALL_TOOL_DESCRIPTORS.find((tool) => tool.name === "tools.discover");
   if (descriptor) return descriptor;
@@ -1013,6 +1076,9 @@ export function createGatewayMcpServer(
      * (SessionDO) can persist them. Best-effort: a failing callback must
      * never break a tool call. */
     onSessionStateChange?: (state: GatewaySessionState) => void;
+    /** Gateway-native browsers.list/select handler (SessionDO supplies it
+     * via DirectoryDO). Absent in unit-test servers without a directory. */
+    browsers?: BrowsersHandler;
   },
 ): Server {
   // Client type is recorded ONLY if declared (session-do passes the
@@ -1152,6 +1218,17 @@ export function createGatewayMcpServer(
           coreNames.add(name);
         }
       }
+    }
+    // Gateway-native browsers tools: appended after the extension list
+    // (they never come from the bridge), gated by mode + scope only.
+    // They are NOT subject to the extension permission level, because
+    // they reveal no browser state and act on no browser — they only
+    // route the caller's own future calls.
+    for (const native of BROWSER_TOOL_DESCRIPTORS) {
+      if (listed.some((tool) => tool.name === native.name)) continue;
+      if (!isBrowsersToolVisible(sessionMode, native.name)) continue;
+      if (!scopeAllowsTool(oauthScope, native.risk)) continue;
+      listed = [...listed, native];
     }
     if (!showAllTools) listed = listed.slice(0, listToolsCap);
     return {
@@ -1329,6 +1406,41 @@ export function createGatewayMcpServer(
     // Confirmation flags never count as approval and are never forwarded.
     const input = stripConfirmationFlags(adapted.input);
     try {
+      // Gateway-native browsers tools: handled here, before the mode
+      // backstop, the scope gate for bridge tools, and the bridge-connected
+      // check — they need none of those (no bridge, no browser action).
+      // Mode + OAuth scope still gate them, explicitly.
+      if (name === "browsers.list" || name === "browsers.select") {
+        if (!options?.browsers) {
+          throw new ToolErrorException("CONFLICT", "Browser selection is not available on this gateway");
+        }
+        if (!isBrowsersToolVisible(sessionMode, name)) {
+          throw new ToolErrorException(
+            "PERMISSION_DENIED",
+            `Tool "${name}" is not visible in mode "${sessionMode}"`,
+            { details: { tool: name, mode: sessionMode } },
+          );
+        }
+        const native = BROWSER_TOOL_DESCRIPTORS.find((tool) => tool.name === name);
+        if (!scopeAllowsTool(oauthScope, native?.risk)) {
+          throw new ToolErrorException("PERMISSION_DENIED", `Tool "${name}" is not allowed by the OAuth scope`);
+        }
+        if (name === "browsers.list") {
+          const listed = await options.browsers.list();
+          return { content: toMcpContent(listed) };
+        }
+        const target = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
+        if (!target) {
+          throw new ToolErrorException("INVALID_INPUT", "browsers.select needs a sessionId from browsers.list");
+        }
+        const selected = await options.browsers.select(target);
+        return {
+          content: toMcpContent({
+            ...selected,
+            note: "Selection is persisted for this OAuth client. This live transport still talks to the previous browser; re-initialize to move to the selected browser.",
+          }),
+        };
+      }
       // Phase A mode backstop (visibility is not security): a tool hidden
       // in this session's mode is refused here too, so a client that
       // guesses a hidden tool name still cannot call it. Scope and policy
@@ -1399,6 +1511,11 @@ export function createGatewayMcpServer(
             throw new ToolErrorException("INVALID_INPUT", `tools.batch call ${index} needs an object input`);
           }
           const adapted = adaptLegacyToolCall(rec.tool, callInput as Record<string, unknown>);
+          // Gateway-native browsers tools are not bridge tools and cannot
+          // be batched through the extension; call them directly.
+          if (adapted.name === "browsers.list" || adapted.name === "browsers.select") {
+            throw new ToolErrorException("INVALID_INPUT", `tools.batch cannot run ${adapted.name}; call it directly`);
+          }
           // Scope is enforced per item, not just on the batch wrapper, and
           // confirmation flags are stripped from every item. Per-item scope
           // is checked against the canonical granular tool; the batch's

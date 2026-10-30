@@ -40,7 +40,7 @@ export type IconName =
   | "file"
   | "logo";
 
-export type TabId = "overview" | "permissions" | "tools" | "files" | "activity" | "tasks";
+export type TabId = "overview" | "permissions" | "tools" | "files" | "activity" | "tasks" | "browsers";
 
 export interface TabDefinition {
   id: TabId;
@@ -55,6 +55,7 @@ export const TABS: TabDefinition[] = [
   { id: "files", label: "Files", icon: "file" },
   { id: "activity", label: "Activity", icon: "pulse" },
   { id: "tasks", label: "Tasks", icon: "clock" },
+  { id: "browsers", label: "Browsers", icon: "link" },
 ];
 
 export function isTabId(value: unknown): value is TabId {
