@@ -12,6 +12,9 @@
   "main": "./dist/index.js",
   "compatibility_date": "2025-10-15",
   "compatibility_flags": ["nodejs_compat_v2"],
+    "vars": {
+    "EXTENSION_IDS": "iobbnfbdhkmjloanofenadaaaaleoibl"
+  },
   "observability": {
     "enabled": true,
     // 0.1 = 10% head sampling. Was 1 (100%) in 0.2.0, which is noisy and
