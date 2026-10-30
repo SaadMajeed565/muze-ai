@@ -1,25 +1,137 @@
 import { describe, expect, it } from "vitest";
 import {
-  NAV_GROUPS,
+  NAV_TABS,
+  activityRows,
+  activityVerb,
+  dedupeAppsByName,
   homeNextAction,
+  mergeActivity,
   navGroupTabs,
+  navRailGroups,
   plainActivityKind,
   plainCapabilities,
   plainDecision,
   plainPauseReason,
   plainStep,
   plainTaskStatus,
+  relativeTime,
+  resolveAppName,
+  shortDate,
   stripToolTokens,
   truncateText,
 } from "../dashboard/ui-logic.js";
 
 describe("end-user navigation", () => {
-  it("groups tabs with no Tools entry and covers every tab exactly once", () => {
-    expect(NAV_GROUPS.map((group) => group.label)).toEqual(["Home", "Devices", "Safety", "Activity"]);
+  it("has exactly five tabs with no Tools, Browsers, Safety, or Activity entry", () => {
+    expect(NAV_TABS).toEqual(["home", "tasks", "connections", "files", "account"]);
     const tabs = navGroupTabs();
-    expect(tabs).toEqual(["overview", "browsers", "files", "permissions", "tasks", "activity"]);
+    expect(tabs).toEqual(NAV_TABS);
     expect(tabs).not.toContain("tools");
+    expect(tabs).not.toContain("browsers");
+    expect(tabs).not.toContain("permissions");
+    expect(tabs).not.toContain("activity");
+    expect(tabs).not.toContain("overview");
+    expect(tabs).not.toContain("profile");
     expect(new Set(tabs).size).toBe(tabs.length);
+  });
+
+  it("groups the wide rail as This browser, then Account", () => {
+    expect(navRailGroups()).toEqual([
+      { label: "This browser", tabs: ["home", "tasks", "files"] },
+      { label: "Account", tabs: ["connections", "account"] },
+    ]);
+    // Rail order groups by section, so the flattened rail order differs
+    // from tab order (Connections sits in the Account group, after Files).
+    expect(navRailGroups().flatMap((group) => group.tabs)).toEqual(["home", "tasks", "files", "connections", "account"]);
+    expect([...navRailGroups().flatMap((group) => group.tabs)].sort()).toEqual([...NAV_TABS].sort());
+  });
+});
+
+describe("v3 audit presentation", () => {
+  const registered = [{ clientId: "oc_1", clientName: "ChatGPT" }];
+
+  it("resolves the gateway hello name to the registered app, and unknown actors to AI app", () => {
+    // Gateway name + a real registered client id resolves to that app.
+    expect(resolveAppName({ id: "oc_1", name: "Universal Browser Tools (remote MCP)" }, registered)).toBe("ChatGPT");
+    // A pure hello-client actor (id muze-gateway, no matching
+    // registration) honestly falls back to "AI app" — it cannot be
+    // guessed from a list that may hold several apps.
+    expect(resolveAppName({ id: "muze-gateway", name: "Universal Browser Tools (remote MCP)" }, registered)).toBe("AI app");
+    expect(resolveAppName({ id: "oc_1", name: "oc_1" }, registered)).toBe("ChatGPT");
+    expect(resolveAppName({ id: "oc_9", name: "Universal Browser Tools" }, registered)).toBe("AI app");
+    expect(resolveAppName(null, registered)).toBe("AI app");
+    expect(resolveAppName({ id: "c2", name: "Claude" }, registered)).toBe("Claude");
+  });
+
+  it("dedupes apps by name, keeping every underlying authorisation", () => {
+    const groups = dedupeAppsByName([
+      { clientId: "oc_1", clientName: "ChatGPT", sessionId: "s1", live: true } as never,
+      { clientId: "oc_2", clientName: "ChatGPT", sessionId: "s2", live: false } as never,
+      { clientId: "oc_3", clientName: "Claude", sessionId: "s1", live: false } as never,
+    ]);
+    expect(groups.map((group) => group.name)).toEqual(["ChatGPT", "Claude"]);
+    expect(groups[0].clients).toHaveLength(2);
+    expect(groups[0].live).toBe(true);
+  });
+
+  it("omits unknown dates instead of printing Unknown, and shortens known ones", () => {
+    expect(shortDate(null)).toBeNull();
+    expect(shortDate(0)).toBeNull();
+    expect(shortDate(new Date(2026, 9, 15).getTime())).toBe("Oct 15");
+    const now = new Date(2026, 9, 15, 12, 0, 0).getTime();
+    expect(relativeTime(now - 13_000, now)).toBe("13s");
+    expect(relativeTime(now - 2 * 60_000, now)).toBe("2m");
+    expect(relativeTime(now - 2 * 86_400_000, now)).toBe("2d ago");
+    expect(relativeTime(null, now)).toBeNull();
+    expect(relativeTime(now - 20 * 86_400_000, now)).toBe("Sep 25");
+  });
+
+  it("maps tool names to plain verbs, never the raw name", () => {
+    expect(activityVerb("tabs.list")).toBe("read a page");
+    expect(activityVerb("tabs.navigate")).toBe("opened a page");
+    expect(activityVerb("dom.click")).toBe("used the page");
+    expect(activityVerb("tabs.create")).toBe("opened a page");
+    expect(activityVerb("something.new")).toBe("acted in the browser");
+    expect(activityVerb(undefined)).toBe("acted in the browser");
+  });
+
+  it("merges only consecutive call/result pairs, and never drops unpaired records", () => {
+    const call = (id: string, tool: string, client = "c1") =>
+      ({ id, kind: "tool.call", tool, decision: "allowed", client: { id: client, name: "ChatGPT" }, at: new Date(1000).toISOString() }) as never;
+    const result = (id: string, tool: string, decision = "allowed", client = "c1") =>
+      ({ id, kind: "tool.result", tool, decision, client: { id: client, name: "ChatGPT" }, at: new Date(2000).toISOString() }) as never;
+    // Newest-first input: audit_3 result, audit_2 call merge; audit_1 stays.
+    expect(mergeActivity([result("audit_3", "tabs.list"), call("audit_2", "tabs.list"), call("audit_1", "tabs.list")])).toHaveLength(2);
+    // Interleaved concurrent call breaks consecutiveness: nothing merges.
+    const interleaved = [
+      result("audit_4", "tabs.list"),
+      call("audit_3", "dom.click"),
+      call("audit_2", "tabs.list"),
+    ];
+    expect(mergeActivity(interleaved as never)).toHaveLength(3);
+    // Different tool or different client: no merge.
+    expect(mergeActivity([result("audit_3", "dom.click"), call("audit_2", "tabs.list")] as never)).toHaveLength(2);
+    expect(mergeActivity([result("audit_3", "tabs.list", "allowed", "c2"), call("audit_2", "tabs.list")] as never)).toHaveLength(2);
+    // Non-sequential ids: no merge.
+    expect(mergeActivity([result("audit_9", "tabs.list"), call("audit_2", "tabs.list")] as never)).toHaveLength(2);
+  });
+
+  it("builds merged rows with one plain sentence, relative time, and Denied/Failed only", () => {
+    const events = [
+      { id: "audit_2", kind: "tool.result", tool: "tabs.list", decision: "denied", client: { id: "oc_1", name: "Universal Browser Tools (remote MCP)" }, at: new Date(2000).toISOString() },
+      { id: "audit_1", kind: "tool.call", tool: "tabs.list", decision: "allowed", client: { id: "oc_1", name: "Universal Browser Tools (remote MCP)" }, at: new Date(1000).toISOString() },
+    ] as never;
+    const rows = activityRows(events, registered, 2000);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sentence).toBe("ChatGPT read a page.");
+    expect(rows[0].state).toBe("Denied");
+    expect(rows[0].time).toBe("0s");
+    expect(rows[0].sentence).not.toContain("tabs.list");
+    const allowed = activityRows(
+      [{ id: "audit_5", kind: "tool.call", tool: "tabs.list", decision: "allowed", client: { id: "c1", name: "Claude" }, at: new Date(2000).toISOString() }] as never,
+      registered, 2000,
+    );
+    expect(allowed[0].state).toBeNull();
   });
 });
 

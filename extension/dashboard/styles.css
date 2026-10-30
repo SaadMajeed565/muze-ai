@@ -363,11 +363,11 @@ code {
   bottom: 0;
   z-index: 30;
   display: grid;
-  /* v2: exactly four tabs, so four columns give one row by construction.
-     The old five-column grid for six tabs is what wrapped the sixth tab
-     (Activity) onto a new row in the narrow side panel. Labels truncate
-     rather than wrap, so the bar can never gain a second row. */
-  grid-template-columns: repeat(4, 1fr);
+  /* v3: exactly five tabs, so five columns give one row by construction.
+     The column count MUST equal NAV_TABS.length (see the CSS regression
+     test); labels truncate rather than wrap, so the bar can never gain
+     a second row. */
+  grid-template-columns: repeat(5, 1fr);
   grid-auto-flow: row;
   background: var(--surface);
   border-top: 1px solid var(--border);
@@ -2566,10 +2566,6 @@ code {
 }
 
 @media (min-width: 900px) {
-  .ui-metrics {
-    grid-template-columns: repeat(4, 1fr);
-  }
-
   .ui-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 280px;
@@ -2621,4 +2617,290 @@ code {
   background: var(--surface);
   color: var(--fg);
   font-size: var(--fs-md);
+}
+
+/* ------------------------------------------------------------- v3 -- */
+/* Shared v3 components and layouts. Tokens only: no new colours,
+   spacing, or radii. The tab bar column count must equal the number
+   of destinations (see NAV_TABS); the wide topbar is brand-only and
+   the narrow side panel has no topbar at all. */
+
+.topbar {
+  display: none;
+}
+
+@media (min-width: 700px) {
+  .topbar {
+    display: flex;
+    min-height: var(--topbar-h);
+  }
+}
+
+.ui-row--compact {
+  padding: var(--s2) var(--s3);
+}
+
+.ui-row-menu {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.ui-empty-line {
+  color: var(--fg-muted);
+  font-size: var(--fs-md);
+  margin: 0;
+}
+
+.ui-row-spacer {
+  flex: 1;
+}
+
+.ui-progress {
+  display: block;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  margin-top: var(--s1);
+  overflow: hidden;
+}
+
+.ui-progress-bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.ui-menu {
+  position: relative;
+}
+
+.ui-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--s1));
+  z-index: 40;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  padding: var(--s1);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.ui-menu-item {
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.ui-menu-item:hover,
+.ui-menu-item:focus-visible {
+  background: var(--surface-3);
+}
+
+.ui-menu-item--danger {
+  color: var(--danger);
+}
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.sheet {
+  width: 100%;
+  max-height: 85vh;
+  overflow: auto;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  padding: var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+.sheet-title {
+  font-size: var(--fs-lg);
+  margin: 0;
+}
+
+.sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+@media (min-width: 700px) {
+  .sheet-backdrop {
+    align-items: center;
+    padding: var(--s4);
+  }
+
+  .sheet {
+    max-width: 480px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+  }
+}
+
+.nav-badge {
+  display: grid;
+  place-items: center;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.rail-link .nav-badge {
+  margin-left: auto;
+}
+
+.tabbar .nav-badge {
+  position: absolute;
+  top: 3px;
+  right: 6px;
+  min-width: 16px;
+  height: 16px;
+  font-size: 10px;
+}
+
+.pause-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.pause-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warning);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.plan-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s3) var(--s4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+}
+
+.plan-card--action {
+  cursor: pointer;
+}
+
+.plan-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plan-card-plan {
+  font-size: var(--fs-md);
+  font-weight: 700;
+}
+
+.plan-card-meta {
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+
+.plan-card-chevron {
+  color: var(--fg-subtle);
+  flex-shrink: 0;
+}
+
+.account-hub {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.account-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.account-avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--fg);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.account-email {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-disclosure {
+  border-top: 1px solid var(--border);
+  padding-top: var(--s3);
+}
+
+.ui-disclosure-summary {
+  cursor: pointer;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  padding: var(--s2) 0;
+}
+
+.ui-control-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.ui-row-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.ui-row-link:hover {
+  text-decoration: underline;
 }

@@ -9,8 +9,9 @@ import { Nav } from "./Nav.js";
 import { Onboarding } from "./Onboarding.js";
 import { AuthPage, type AuthMode } from "./pages/Auth.js";
 import { FilesPage } from "./pages/Files.js";
-import { OverviewPage } from "./pages/Overview.js";
-import { ProfilePage } from "./pages/Profile.js";
+import { HomePage } from "./pages/Home.js";
+import { ConnectionsPage } from "./pages/Connections.js";
+import { AccountPage } from "./pages/Account.js";
 import { TasksPage } from "./pages/Tasks.js";
 
 const POLL_MS = 5000;
@@ -55,7 +56,8 @@ export function App(): preact.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busyCount = useRef(0);
-  const [tab, setTab] = useState<TabId>("overview");
+  const [tab, setTab] = useState<TabId>("home");
+  const [connectionsSegment, setConnectionsSegment] = useState<"browsers" | "apps">("browsers");
   const [audit, setAudit] = useState<AuditEvent[] | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [appearance, setAppearance] = useState<Appearance>("system");
@@ -249,7 +251,7 @@ export function App(): preact.JSX.Element {
     );
   }
 
-  const { gateway, snapshot, approvals } = state;
+  const { snapshot, approvals } = state;
 
   return (
     <div class="app" data-tab={tab}>
@@ -262,17 +264,14 @@ export function App(): preact.JSX.Element {
       />
 
       <div class="shell">
+        {/* Slim 48px topbar with brand only, on the options page
+            (wide) only; the side panel (narrow) has no in-app brand
+            row and no email pill — see styles.css .topbar. */}
         <header class="topbar">
-          <span class="brand brand--narrow">
+          <span class="brand">
             <Icon name="logo" size={20} class="brand-mark" />
             <span class="brand-name">Muze AI</span>
           </span>
-          <div class="topbar-right">
-            <span class={"pill" + (gateway.signedIn ? " pill--ok" : "")}>
-              <span class={"status-dot " + (gateway.signedIn ? "is-on" : "")} aria-hidden="true" />
-              {gateway.signedIn ? gateway.email || "Signed in" : "Not signed in"}
-            </span>
-          </div>
         </header>
 
         <div class="page">
@@ -286,15 +285,22 @@ export function App(): preact.JSX.Element {
           ) : null}
 
           <main class="content" ref={content} tabIndex={-1} aria-label={tab}>
-            {tab === "overview" ? (
-              <OverviewPage
+            {tab === "home" ? (
+              <HomePage
                 state={state}
                 busy={busy}
-                onGatewayToggle={(enabled) => void request({ type: "muze/bridge/settings", patch: { gatewayEnabled: enabled } })}
+                approvals={approvals}
                 onReconnect={() => void request({ type: "muze/bridge/reconnect" })}
                 onOpenWizard={openWizard}
                 onNavigate={goToTab}
+                onRespond={respond}
+                onCancelForClient={(clientId) => void request({ type: "muze/approvals/cancel-for-client", clientId })}
+                onKillSwitch={(engaged) => void request({ type: "muze/killswitch", engaged })}
               />
+            ) : null}
+
+            {tab === "connections" ? (
+              <ConnectionsPage state={state} busy={busy} segment={connectionsSegment} onSegment={setConnectionsSegment} onNavigate={goToTab} />
             ) : null}
 
             {tab === "files" ? <FilesPage /> : null}
@@ -311,8 +317,8 @@ export function App(): preact.JSX.Element {
               />
             ) : null}
 
-            {tab === "profile" ? (
-              <ProfilePage
+            {tab === "account" ? (
+              <AccountPage
                 state={state}
                 busy={busy}
                 appearance={appearance}
@@ -323,7 +329,6 @@ export function App(): preact.JSX.Element {
                 onKillSwitch={(engaged) => void request({ type: "muze/killswitch", engaged })}
                 onGroupToggle={(group, enabled) => void request({ type: "muze/policy/group", group, enabled })}
                 onSignOut={() => void request({ type: "muze/gateway/sign-out" })}
-                onReconnect={() => void request({ type: "muze/bridge/reconnect" })}
                 onDeleteAccount={() => void request({ type: "muze/gateway/delete-account" })}
               />
             ) : null}

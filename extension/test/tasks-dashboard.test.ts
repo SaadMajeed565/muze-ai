@@ -289,8 +289,9 @@ describe("TasksPage", () => {
     const container = mount();
     await flush();
     await flush();
+    // v3: empty tasks = one muted line, not a tall illustrated state.
     expect(container.textContent).toContain("No tasks yet");
-    expect(container.textContent).toContain("Tasks created by your AI app will appear here as they run");
+    expect(container.textContent).toContain("Nothing waiting");
   });
 
   it("sends pause on Pause and confirms before Cancel", async () => {

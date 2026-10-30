@@ -166,12 +166,12 @@ describe("Onboarding", () => {
     const { container, getByText, queryByText } = (getQueries(mount(<Onboarding {...base} step={4} signedIn email="a@b.c" />)));
 
     expect(getByText("Point your AI client here.")).toBeTruthy();
-    expect(getByText("MCP endpoint")).toBeTruthy();
+    expect(getByText("Connection")).toBeTruthy();
     // No token credential, masked or otherwise, and no way to reveal one.
     expect(queryByText("Device token (advanced)")).toBeNull();
     expect([...container.querySelectorAll("button")].find((b) => b.textContent === "Reveal")).toBeUndefined();
     // The primary flow is sign-in authorisation, not a token paste.
-    expect(getByText("Sign in and authorise the client when it asks — the client is approved through your account, not by pasting a token.")).toBeTruthy();
+    expect(getByText("Sign in and authorise the app when it asks — the app is approved through your account, not by pasting a token.")).toBeTruthy();
   });
 
   it("clamps an out-of-range persisted step in render instead of crashing", () => {
@@ -196,20 +196,22 @@ describe("Onboarding", () => {
 });
 
 describe("Nav", () => {
-  it("has exactly four tabs and no Tools, Browsers, Safety, or Activity entry", () => {
+  it("has exactly five tabs and no Tools, Browsers, Safety, or Activity entry", () => {
     const { container } = (getQueries(mount(
-      <Nav active="overview" onChange={vi.fn()} status="connected" clients={1} pending={2} />,
+      <Nav active="home" onChange={vi.fn()} status="connected" clients={1} pending={2} />,
     )));
     expect(container.textContent).toContain("Home");
     expect(container.textContent).toContain("Tasks");
+    expect(container.textContent).toContain("Connections");
     expect(container.textContent).toContain("Files");
-    expect(container.textContent).toContain("Profile");
+    expect(container.textContent).toContain("Account");
     expect(container.textContent).not.toContain("Tools");
-    expect(container.textContent).not.toContain("Browsers");
     expect(container.textContent).not.toContain("Safety");
-    // "Activity" must not appear as a tab; the word survives only inside
-    // the Tasks page sections, which this component does not render.
-    expect(container.querySelectorAll(".tabbar a, .tabbar button, .rail-links a, .rail-links button").length).toBeGreaterThan(0);
+    // Rail (5 buttons) + tab bar (5 buttons) = 10, with the Tasks
+    // badge carrying its accessible label.
+    expect(container.querySelectorAll(".tabbar button, .rail-links button")).toHaveLength(10);
+    expect(container.textContent).toContain("This browser");
+    expect(container.querySelectorAll(".rail-group")).toHaveLength(2);
   });
 });
 
@@ -265,8 +267,9 @@ describe("TasksPage approvals and activity end-user only", () => {
     expect(container.textContent).toContain("Start a download");
     expect(container.textContent).toContain("Claude");
     expect(container.textContent).toContain("Recent activity");
-    expect(container.textContent).toContain("Agent acted");
-    expect(container.textContent).toContain("Allowed");
+    // Merged feed: one plain sentence, no tool name, no "Allowed" state word.
+    expect(container.textContent).toContain("Claude read a page.");
+    expect(container.textContent).not.toContain("Allowed");
     expect(container.textContent).not.toContain("downloads.start");
     expect(container.textContent).not.toContain("tabs.list");
     expect(container.textContent).not.toContain("consequential");

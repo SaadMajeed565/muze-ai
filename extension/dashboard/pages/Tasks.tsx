@@ -3,19 +3,20 @@ import { sanitizeTaskView, type TaskStatus, type TaskView } from "../../src/task
 import type { BrowsersDashboard } from "../../src/messages.js";
 import type { ApprovalRequestInfo, ClientIdentity } from "../../libs/tool-contracts/index.js";
 import type { AuditEvent } from "../../libs/security/index.js";
-import { formatCountdown, formatRelativeTime, sendRequest } from "../logic.js";
+import { formatCountdown, sendRequest } from "../logic.js";
 import {
-  plainActivityKind,
-  plainDecision,
+  activityRows,
   plainFinalSummary,
   plainPauseReason,
   plainStep,
   plainTaskStatus,
+  resolveAppName,
+  shortDate,
   stripToolTokens,
   truncateText,
 } from "../ui-logic.js";
-import { Button, EmptyState } from "../components/primitives.js";
-import { DetailBack, ErrorState, ListRow, Page, Section, SectionSkeleton, useNarrow } from "../components/layout.js";
+import { Button } from "../components/primitives.js";
+import { DetailBack, EmptyLine, ErrorState, ListRow, Page, Section, SectionSkeleton, useNarrow } from "../components/layout.js";
 
 const TASKS_POLL_MS = 5000;
 
@@ -56,13 +57,6 @@ function currentStep(task: TaskView): TaskView["steps"][number] | null {
   return task.steps.find((step) => step.state !== "done") ?? null;
 }
 
-function decisionTone(decision: string): "ok" | "bad" | "warn" | "neutral" {
-  if (decision === "denied" || decision === "error") return "bad";
-  if (decision === "approval-required" || decision === "preflight-unavailable") return "warn";
-  if (decision === "allowed") return "ok";
-  return "neutral";
-}
-
 function pendingByClient(approvals: ApprovalRequestInfo[]): Map<string, { client: ClientIdentity; approvals: ApprovalRequestInfo[] }> {
   const groups = new Map<string, { client: ClientIdentity; approvals: ApprovalRequestInfo[] }>();
   for (const approval of approvals) {
@@ -71,6 +65,18 @@ function pendingByClient(approvals: ApprovalRequestInfo[]): Map<string, { client
     else groups.set(approval.client.id, { client: approval.client, approvals: [approval] });
   }
   return groups;
+}
+
+function dayLabel(createdAt: number, now: number): string {
+  const startOf = (ms: number): number => {
+    const d = new Date(ms);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  };
+  const days = Math.floor((startOf(now) - startOf(createdAt)) / 86_400_000);
+  if (days <= 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return shortDate(createdAt) ?? "";
 }
 
 export interface TasksPageProps {
@@ -103,9 +109,9 @@ export function TasksPage({
 }: TasksPageProps): preact.JSX.Element {
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
   const [browsers, setBrowsers] = useState<BrowsersDashboard | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const narrow = useNarrow();
@@ -116,7 +122,6 @@ export function TasksPage({
   }, []);
 
   const load = useCallback(async (): Promise<void> => {
-    setLoading(true);
     const response = await sendRequest({ type: "muze/tasks.list" });
     if (response.ok) {
       const wire = response as unknown as TaskWireResponse;
@@ -127,7 +132,6 @@ export function TasksPage({
     } else {
       setError(response.error ?? "Could not load tasks");
     }
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -253,33 +257,60 @@ export function TasksPage({
     );
   };
 
-  const list = (taskList: TaskView[]): preact.JSX.Element => (
-    <ul class="ui-list">
-      {taskList.map((task) => {
-        const current = currentStep(task);
-        const pause = plainPauseReason(task.pauseReason);
-        const meta = [
-          `Step ${task.doneSteps.length} of ${task.totalSteps}`,
-          current ? plainStep(current).summary : null,
-          current?.outsideBoundsReason ? truncateText(stripToolTokens(current.outsideBoundsReason), 160) : null,
-          pause && (task.status === "paused" || task.status === "waiting_approval") ? pause : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-        return (
-          <ListRow
-            key={task.id}
-            title={task.goal || "Task"}
-            meta={meta}
-            status={plainTaskStatus(task.status)}
-            statusTone={statusTone(task.status)}
-            onSelect={() => setSelectedId(task.id)}
-            selected={selectedId === task.id}
-          />
-        );
-      })}
-    </ul>
-  );
+  // Running first, then history newest first, grouped by day, capped
+  // at ~10 rows with a "Show more" to reveal the rest. No scheduled
+  // or queued states are invented: only the runner's real statuses.
+  const list = (taskList: TaskView[]): preact.JSX.Element => {
+    const active = taskList.filter((task) => !isTerminal(task.status));
+    const history = taskList.filter((task) => isTerminal(task.status));
+    const ordered = [...active, ...history];
+    const shown = showAll ? ordered : ordered.slice(0, 10);
+    const groups = new Map<string, TaskView[]>();
+    for (const task of shown) {
+      const label = dayLabel(task.createdAt, now);
+      const bucket = groups.get(label);
+      if (bucket) bucket.push(task);
+      else groups.set(label, [task]);
+    }
+    const row = (task: TaskView): preact.JSX.Element => {
+      const current = currentStep(task);
+      const pause = plainPauseReason(task.pauseReason);
+      const meta = [
+        `Step ${task.doneSteps.length} of ${task.totalSteps}`,
+        current ? plainStep(current).summary : null,
+        current?.outsideBoundsReason ? truncateText(stripToolTokens(current.outsideBoundsReason), 160) : null,
+        pause && (task.status === "paused" || task.status === "waiting_approval") ? pause : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return (
+        <ListRow
+          key={task.id}
+          title={task.goal || "Task"}
+          meta={meta}
+          status={plainTaskStatus(task.status)}
+          statusTone={statusTone(task.status)}
+          onSelect={() => setSelectedId(task.id)}
+          selected={selectedId === task.id}
+        />
+      );
+    };
+    return (
+      <>
+        {[...groups.entries()].map(([label, group]) => (
+          <div key={label}>
+            <h3 class="ui-detail-heading">{label}</h3>
+            <ul class="ui-list">{group.map(row)}</ul>
+          </div>
+        ))}
+        {!showAll && ordered.length > 10 ? (
+          <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
+            Show more
+          </Button>
+        ) : null}
+      </>
+    );
+  };
 
   const selected = tasks?.find((task) => task.id === selectedId) ?? null;
   const approvalGroups = pendingByClient(approvals);
@@ -295,18 +326,14 @@ export function TasksPage({
       }
     >
       {approvals.length === 0 ? (
-        <EmptyState
-          icon="check"
-          title="Nothing waiting"
-          description="Actions that need your approval will pause here until you approve or deny them."
-        />
+        <EmptyLine text="Nothing waiting" />
       ) : (
         <ul class="ui-list">
           {approvals.map((approval) => (
             <ListRow
               key={approval.id}
               title={approval.title}
-              meta={`${truncateText(approval.summary, 160)} · ${approval.client.name} · ${formatCountdown(approval.expiresAt, now)}`}
+              meta={`${truncateText(approval.summary, 160)} · ${resolveAppName(approval.client, browsers?.mcpClients ?? [])} · ${formatCountdown(approval.expiresAt, now)}`}
               status="Waiting for you"
               statusTone="warn"
               actions={
@@ -335,12 +362,12 @@ export function TasksPage({
               disabled={busy}
               onClick={() => {
                 const ok = confirm(
-                  `Cancel all ${group.approvals.length} pending request${group.approvals.length === 1 ? "" : "s"} from ${group.client.name}? The waiting actions will be denied.`,
+                  `Cancel all ${group.approvals.length} pending request${group.approvals.length === 1 ? "" : "s"} from ${resolveAppName(group.client, browsers?.mcpClients ?? [])}? The waiting actions will be denied.`,
                 );
                 if (ok) onCancelForClient(group.client.id);
               }}
             >
-              Cancel {group.approvals.length} from {group.client.name}
+              Cancel {group.approvals.length} from {resolveAppName(group.client, browsers?.mcpClients ?? [])}
             </Button>
           ))}
         </div>
@@ -363,20 +390,16 @@ export function TasksPage({
       {auditLoading && !audit ? (
         <SectionSkeleton />
       ) : !audit || audit.length === 0 ? (
-        <EmptyState
-          icon="pulse"
-          title="No activity yet"
-          description="Actions, permission changes and approvals will be recorded here as they happen."
-        />
+        <EmptyLine text="No activity yet" />
       ) : (
         <ul class="ui-list">
-          {audit.map((event) => (
+          {activityRows(audit, browsers?.mcpClients ?? [], now).map((row) => (
             <ListRow
-              key={event.id}
-              title={plainActivityKind(event.kind)}
-              meta={`${event.client ? event.client.name + " · " : ""}${formatRelativeTime(Date.parse(event.at), now)}`}
-              status={plainDecision(event.decision)}
-              statusTone={decisionTone(event.decision)}
+              key={row.id}
+              title={row.sentence}
+              meta={row.time ?? undefined}
+              status={row.state ?? undefined}
+              statusTone={row.state === "Denied" || row.state === "Failed" ? "bad" : "neutral"}
             />
           ))}
         </ul>
@@ -394,25 +417,13 @@ export function TasksPage({
   }
 
   return (
-    <Page
-      title="Tasks"
-      subtitle="What your AI app is working on, newest first."
-      action={
-        <Button variant="ghost" size="sm" icon="refresh" disabled={loading} onClick={() => void load()}>
-          Refresh
-        </Button>
-      }
-    >
+    <Page title="Tasks" subtitle="What your AI app is working on, newest first.">
       {error ? <ErrorState message={error} /> : null}
       {waitingSection}
       {tasks === null ? (
         <SectionSkeleton />
       ) : tasks.length === 0 ? (
-        <EmptyState
-          icon="clock"
-          title="No tasks yet"
-          description="Tasks created by your AI app will appear here as they run, with live progress."
-        />
+        <EmptyLine text="No tasks yet" />
       ) : (
         <div class="ui-grid">
           <Section title="Tasks" description="Tap a task to see its activity log.">

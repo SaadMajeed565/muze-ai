@@ -2,9 +2,10 @@ import type { PermissionMode, PolicyConfig } from "../../libs/security/index.js"
 import type { DashboardState } from "../../src/messages.js";
 import type { Appearance } from "../logic.js";
 import { plainCapabilities, plainGroupName } from "../ui-logic.js";
-import { Callout, Chip, Segmented, Switch } from "./primitives.js";
+import { Segmented, Switch } from "./primitives.js";
 import { ListRow, Section } from "./layout.js";
 import { PermissionLevelPicker } from "../PermissionLevelPicker.js";
+import { PauseControl } from "./shared.js";
 
 export interface PermissionsSectionsProps {
   state: DashboardState;
@@ -18,38 +19,46 @@ export interface PermissionsSectionsProps {
   onGroupToggle: (group: string, enabled: boolean) => void;
 }
 
+/** Plain label for a switchable capability group. */
+export function groupCapabilityLabel(group: string): string {
+  if (group === "bookmarks") return "Use bookmarks";
+  if (group === "history") return "Use browsing history";
+  if (group === "downloads") return "Manage downloads";
+  if (group === "clipboard") return "Read and write the clipboard";
+  return `Use ${plainGroupName(group).toLowerCase()}`;
+}
+
+const PRIVACY_LINES = [
+  "Never reads saved passwords unless you ask it to work with them.",
+  "Never reads local storage or other site storage on its own.",
+  "Never sees the contents of network requests or responses — only which page was opened and when.",
+  "Never clears browsing data, cookies or cache on its own.",
+  "Runs locally: pages are read only when you ask the agent to do something.",
+];
+
 /**
- * Permissions & safety, in plain words only — the same sections that
- * used to be the Safety page, now a section group inside Profile (v2).
- * There is no per-tool list and no per-tool control: "What Muze can
- * do" is derived from the permission level and the capability groups,
- * never from tool names, categories, or risk levels. The underlying
- * policy is unchanged; only the per-tool override control is not
- * rendered.
+ * Permissions and safety (v3), labelled "Applies to this browser
+ * only" by its caller. The level cards, the "on top of your level"
+ * switches, and ONE merged "What Muze can do" list: level-derived
+ * items are plain rows, each switchable group gets a real switch, and
+ * there is no separate chip row. Stop all activity is the shared
+ * PauseControl with the existing kill-switch semantics — never a bare
+ * "Off" toggle. The underlying policy is unchanged; only layout and
+ * wording changed. No per-tool list, no tool names, categories, or
+ * risk levels are ever rendered.
  */
-export function PermissionsSections({
+export function PermissionsSafety({
   state,
   busy,
-  appearance,
-  onAppearance,
   onModeChange,
   onPolicyPatch,
   onReadOnly,
   onKillSwitch,
   onGroupToggle,
-}: PermissionsSectionsProps): preact.JSX.Element {
+}: Omit<PermissionsSectionsProps, "appearance" | "onAppearance">): preact.JSX.Element {
   const { policy, snapshot } = state;
+  const levelCapabilities = plainCapabilities(snapshot.mode, {});
   const groups = Object.entries(policy.enabledGroups);
-  const capabilities = plainCapabilities(snapshot.mode, policy.enabledGroups);
-
-  const toggleKillSwitch = (engaged: boolean): void => {
-    const ok = confirm(
-      engaged
-        ? "Stop all agent activity? Nothing the agent asks for will run until you turn this off again."
-        : "Turn activity back on? The agent will be able to act again under the current permission level.",
-    );
-    if (ok) onKillSwitch(engaged);
-  };
 
   return (
     <>
@@ -57,15 +66,7 @@ export function PermissionsSections({
         <PermissionLevelPicker mode={snapshot.mode} disabled={busy} onChange={onModeChange} />
       </Section>
 
-      <Section title="What Muze can do" description="In plain words, from your level and capabilities above.">
-        <ul class="ui-list">
-          {capabilities.map((capability) => (
-            <ListRow key={capability} title={capability} />
-          ))}
-        </ul>
-      </Section>
-
-      <Section title="Safety controls">
+      <Section title="On top of your level" description="These apply on top of your level.">
         <div class="ui-control-row">
           <div class="ui-control-text">
             <span class="ui-control-label">Ask before acting</span>
@@ -78,7 +79,6 @@ export function PermissionsSections({
             onToggle={(next) => onPolicyPatch({ approvalMode: next ? "risk" : "never" })}
           />
         </div>
-
         <div class="ui-control-row">
           <div class="ui-control-text">
             <span class="ui-control-label">Read-only mode</span>
@@ -86,42 +86,56 @@ export function PermissionsSections({
           </div>
           <Switch checked={policy.readOnlyMode} disabled={busy} label={policy.readOnlyMode ? "On" : "Off"} onToggle={onReadOnly} />
         </div>
+      </Section>
 
-        <div class={"ui-control-row ui-control-row--danger" + (policy.killSwitch ? " is-on" : "")}>
-          <div class="ui-control-text">
-            <span class="ui-control-label">
-              <span class="status-dot is-bad" aria-hidden="true" />
-              Stop all activity
-            </span>
-            <span class="ui-control-hint">Immediately stop everything the agent asks for, until you turn it off.</span>
+      <Section title="What Muze can do" description="In plain words, from your level and capabilities.">
+        <ul class="ui-list">
+          {levelCapabilities.map((capability) => (
+            <ListRow key={capability} title={capability} />
+          ))}
+        </ul>
+        {groups.length > 0 ? (
+          <div class="ui-control-list">
+            {groups.map(([group, enabled]) => (
+              <div class="ui-control-row" key={group}>
+                <div class="ui-control-text">
+                  <span class="ui-control-label">{groupCapabilityLabel(group)}</span>
+                </div>
+                <Switch
+                  checked={enabled}
+                  disabled={busy}
+                  label={enabled ? "On" : "Off"}
+                  onToggle={(next) => onGroupToggle(group, next)}
+                />
+              </div>
+            ))}
           </div>
-          <Switch
-            checked={policy.killSwitch}
-            disabled={busy}
-            label={policy.killSwitch ? "On" : "Off"}
-            onToggle={toggleKillSwitch}
-          />
-        </div>
-
-        {policy.killSwitch ? (
-          <Callout tone="danger" icon="power">
-            All agent activity is stopped right now. Turn this off to resume.
-          </Callout>
         ) : null}
       </Section>
 
-      {groups.length > 0 ? (
-        <Section title="Capabilities" description="Optional capabilities that can be switched off together.">
-          <div class="ui-chip-row">
-            {groups.map(([group, enabled]) => (
-              <Chip key={group} active={enabled} disabled={busy} onClick={() => onGroupToggle(group, !enabled)}>
-                {plainGroupName(group)}
-              </Chip>
-            ))}
+      <Section title="Stop all activity" description={policy.killSwitch ? "Paused" : "Agent is active"}>
+        <div class="ui-control-row">
+          <div class="ui-control-text">
+            <span class="ui-control-label">Stop all activity</span>
+            <span class="ui-control-hint">Immediately stop everything the agent asks for, until you resume.</span>
           </div>
-        </Section>
-      ) : null}
+          <PauseControl paused={policy.killSwitch} busy={busy} onToggle={onKillSwitch} />
+        </div>
+      </Section>
+    </>
+  );
+}
 
+/** Appearance + privacy (v3): appearance segmented control, privacy as a collapsed disclosure. */
+export function AppearancePrivacy({
+  appearance,
+  onAppearance,
+}: {
+  appearance: Appearance;
+  onAppearance: (value: Appearance) => void;
+}): preact.JSX.Element {
+  return (
+    <>
       <Section title="Appearance" description="Follows your system setting by default.">
         <Segmented
           ariaLabel="Appearance"
@@ -135,16 +149,25 @@ export function PermissionsSections({
         />
       </Section>
 
-      <Section title="Privacy" description="What Muze AI never touches.">
+      <details class="ui-disclosure">
+        <summary class="ui-disclosure-summary">Privacy</summary>
         <ul class="ui-privacy-list">
-          <li>Never reads saved passwords unless you ask it to work with them.</li>
-          <li>Never reads local storage or other site storage on its own.</li>
-          <li>Never sees the contents of network requests or responses — only which page was opened and when.</li>
-          <li>Never clears browsing data, cookies or cache on its own.</li>
-          <li>Runs locally: pages are read only when you ask the agent to do something.</li>
+          {PRIVACY_LINES.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
         </ul>
         <p class="ui-section-description">Changes here apply to this browser only.</p>
-      </Section>
+      </details>
+    </>
+  );
+}
+
+/** Backwards-compatible combined export (v2 callers): safety + appearance + privacy. */
+export function PermissionsSections(props: PermissionsSectionsProps): preact.JSX.Element {
+  return (
+    <>
+      <PermissionsSafety {...props} />
+      <AppearancePrivacy appearance={props.appearance} onAppearance={props.onAppearance} />
     </>
   );
 }

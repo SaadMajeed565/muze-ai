@@ -1,6 +1,7 @@
 import { TABS, type IconName, type TabId } from "./logic.js";
-import { NAV_TABS } from "./ui-logic.js";
+import { NAV_TABS, navRailGroups } from "./ui-logic.js";
 import { Icon } from "./components/Icon.js";
+import { NavBadge } from "./components/shared.js";
 
 export interface NavProps {
   active: TabId;
@@ -24,13 +25,14 @@ function tabIcon(id: TabId): IconName {
 }
 
 /**
- * Navigation (v2): exactly four tabs on every breakpoint — a left rail
- * on wide windows (options page) and a single-row bottom tab bar in
- * the side panel. The tab bar never wraps: with four columns it has
- * one row by construction, and labels truncate rather than wrap.
- * The pending-requests badge lives on Tasks, where approvals are
- * answered. There is no Tools, Browsers, Safety, or Activity tab:
- * developer tool data is never rendered.
+ * Navigation (v3): exactly five destinations. Narrow windows get a
+ * single-row bottom tab bar (five columns, one row, labels truncate).
+ * Wide windows get a 232px left rail with two group headings — "This
+ * browser" (Home, Tasks, Files) and "Account" (Connections, Account).
+ * The pending-requests badge lives on Tasks only, with an accessible
+ * label; there is no banner on every page. No Tools, Browsers,
+ * Safety, or Activity destination: developer tool data is never
+ * rendered.
  */
 export function Nav({ active, onChange, status, clients, pending }: NavProps): preact.JSX.Element {
   return (
@@ -42,24 +44,27 @@ export function Nav({ active, onChange, status, clients, pending }: NavProps): p
             <span class="brand-name">Muze AI</span>
           </span>
         </div>
-        <ul class="rail-links">
-          {NAV_TABS.map((id) => (
-            <li key={id}>
-              <button
-                type="button"
-                class={"rail-link" + (active === id ? " is-on" : "")}
-                aria-current={active === id ? "page" : undefined}
-                onClick={() => onChange(id)}
-              >
-                <Icon name={tabIcon(id)} size={17} />
-                <span>{tabLabel(id)}</span>
-                {id === "tasks" && pending > 0 ? (
-                  <span class="rail-badge">{pending > 9 ? "9+" : pending}</span>
-                ) : null}
-              </button>
-            </li>
-          ))}
-        </ul>
+        {navRailGroups().map((group) => (
+          <div class="rail-group" key={group.label}>
+            <span class="rail-group-label">{group.label}</span>
+            <ul class="rail-links">
+              {group.tabs.map((id) => (
+                <li key={id}>
+                  <button
+                    type="button"
+                    class={"rail-link" + (active === id ? " is-on" : "")}
+                    aria-current={active === id ? "page" : undefined}
+                    onClick={() => onChange(id)}
+                  >
+                    <Icon name={tabIcon(id)} size={17} />
+                    <span>{tabLabel(id)}</span>
+                    {id === "tasks" && pending > 0 ? <NavBadge count={pending} label="requests waiting" /> : null}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
         <div class="rail-foot">
           <span class={"status-dot " + (status === "connected" ? "is-on" : "")} aria-hidden="true" />
           <span>{statusLabel(status, clients)}</span>
@@ -77,11 +82,10 @@ export function Nav({ active, onChange, status, clients, pending }: NavProps): p
           >
             <span class="tabbar-icon">
               <Icon name={tabIcon(id)} size={19} />
-              {id === "tasks" && pending > 0 ? <span class="tabbar-dot" aria-hidden="true" /> : null}
             </span>
             <span class="tabbar-label">{tabLabel(id)}</span>
             {id === "tasks" && pending > 0 ? (
-              <span class="sr-only">{pending} requests waiting for approval</span>
+              <NavBadge count={pending} label="requests waiting" />
             ) : null}
           </button>
         ))}

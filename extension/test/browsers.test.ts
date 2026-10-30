@@ -6,7 +6,7 @@ import {
   browserDetail,
   canRemoveBrowser,
   defaultBrowser,
-  formatTimestamp,
+  shortDate,
   tabCountText,
 } from "../dashboard/browsers-logic.js";
 import type { BrowsersDashboard, DashboardBrowser, DashboardMcpClient } from "../src/messages.js";
@@ -78,17 +78,17 @@ const data: BrowsersDashboard = {
 };
 
 describe("browsers dashboard view logic", () => {
-  test("tab count shows only when connected, otherwise Unknown", () => {
+  test("tab count shows only when connected and known, otherwise omitted", () => {
     expect(tabCountText(data.browsers[0])).toBe("3 tabs");
-    expect(tabCountText(data.browsers[1])).toBe("Unknown");
-    expect(tabCountText(browser({ connected: true, tabCount: null }))).toBe("Unknown");
+    expect(tabCountText(data.browsers[1])).toBeNull();
+    expect(tabCountText(browser({ connected: true, tabCount: null }))).toBeNull();
     expect(tabCountText(browser({ connected: true, tabCount: 1 }))).toBe("1 tab");
   });
 
-  test("timestamps degrade to Unknown, never a fabricated date", () => {
-    expect(formatTimestamp(null)).toBe("Unknown");
-    expect(formatTimestamp(0)).toBe("Unknown");
-    expect(formatTimestamp(2000)).not.toBe("Unknown");
+  test("timestamps degrade to omission, never a fabricated date", () => {
+    expect(shortDate(null)).toBeNull();
+    expect(shortDate(0)).toBeNull();
+    expect(shortDate(2000)).not.toBeNull();
   });
 
   test("attached clients are filtered per browser", () => {

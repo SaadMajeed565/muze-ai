@@ -19,6 +19,8 @@ export interface ButtonProps {
   class?: string;
   title?: string;
   ariaLabel?: string;
+  ariaHasPopup?: "menu" | "dialog";
+  ariaExpanded?: boolean;
   onClick?: (event: MouseEvent) => void;
 }
 
@@ -34,6 +36,8 @@ export function Button({
   class: className,
   title,
   ariaLabel,
+  ariaHasPopup,
+  ariaExpanded,
   onClick,
 }: ButtonProps): preact.JSX.Element {
   return (
@@ -52,6 +56,8 @@ export function Button({
       disabled={disabled || busy}
       aria-busy={busy ? "true" : undefined}
       aria-label={ariaLabel}
+      aria-haspopup={ariaHasPopup}
+      aria-expanded={ariaExpanded}
       title={title}
       onClick={onClick}
     >

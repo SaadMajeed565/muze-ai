@@ -151,12 +151,12 @@ export function Onboarding({
             </h1>
             <p class="lede">
               {oldStep === 1
-                ? "Muze AI links this browser to your AI client over MCP. The agent only reaches what you allow, and every risky action can ask you first."
+                ? "Muze AI links this browser to your AI app. The agent only reaches what you allow, and every risky action can ask you first."
                 : oldStep === 2
-                  ? "Pick a starting point. You can change it at any time from Profile."
+                  ? "Pick a starting point. You can change it at any time from Account."
                   : oldStep === 3
                     ? "Sign in to link this browser to your Muze account."
-                    : "Add the endpoint to your MCP client, then sign in and authorise the client — no token paste needed."}
+                    : "Add the connection to your AI app, then sign in and authorise the app — no token paste needed."}
             </p>
           </div>
 
@@ -188,7 +188,7 @@ export function Onboarding({
                   <span>
                     {connectedClients > 0
                       ? `${connectedClients} client${connectedClients === 1 ? "" : "s"} connected.`
-                      : "This browser is linked. Add the endpoint to your client next."}
+                      : "This browser is linked. Add the connection to your app next."}
                   </span>
                 </Callout>
               ) : (
@@ -206,16 +206,16 @@ export function Onboarding({
             signedIn ? (
               <div class="credential-list">
                 <div class="credential">
-                  <span class="credential-label">MCP endpoint</span>
+                  <span class="credential-label">Connection</span>
                   <div class="credential-value">
                     <code>{mcpUrl}</code>
                     <CopyButton value={mcpUrl} label="Copy" />
                   </div>
                 </div>
                 <ol class="steps-list">
-                  <li>Copy the endpoint above.</li>
-                  <li>Add it to your MCP client as a remote server.</li>
-                  <li>Sign in and authorise the client when it asks — the client is approved through your account, not by pasting a token.</li>
+                  <li>Copy the connection above.</li>
+                  <li>Add it to your AI app as a remote server.</li>
+                  <li>Sign in and authorise the app when it asks — the app is approved through your account, not by pasting a token.</li>
                 </ol>
               </div>
             ) : (

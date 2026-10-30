@@ -62,8 +62,19 @@ export interface ListRowProps {
   statusTone?: StatusTone;
   badges?: preact.ComponentChildren;
   actions?: preact.ComponentChildren;
+  /** Overflow menu slot (v3): rendered beside the actions, never inside the title. */
+  menu?: preact.ComponentChildren;
+  /** Compact density (v3): tighter row for rows inside lists. */
+  compact?: boolean;
+  /** Thin progress bar (v3, 0–100) rendered under the meta line. */
+  progress?: number;
   onSelect?: () => void;
   selected?: boolean;
+}
+
+/** Compact one-line muted empty variant for sections inside lists (v3). The full EmptyState stays for whole empty pages. */
+export function EmptyLine({ text }: { text: string }): preact.JSX.Element {
+  return <p class="ui-empty-line">{text}</p>;
 }
 
 function statusDotClass(tone: StatusTone): string {
@@ -74,7 +85,7 @@ function statusDotClass(tone: StatusTone): string {
 }
 
 /** One standard row: title, one meta line, status dot + word, one action area. */
-export function ListRow({ title, meta, status, statusTone = "neutral", badges, actions, onSelect, selected }: ListRowProps): preact.JSX.Element {
+export function ListRow({ title, meta, status, statusTone = "neutral", badges, actions, menu, compact, progress, onSelect, selected }: ListRowProps): preact.JSX.Element {
   const inner = (
     <>
       <div class="ui-row-main">
@@ -89,20 +100,27 @@ export function ListRow({ title, meta, status, statusTone = "neutral", badges, a
           {badges}
         </div>
         {meta ? <p class="ui-row-meta">{meta}</p> : null}
+        {progress !== undefined ? (
+          <span class="ui-progress" aria-hidden="true">
+            <span class="ui-progress-bar" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} />
+          </span>
+        ) : null}
       </div>
       {actions ? <div class="ui-row-actions">{actions}</div> : null}
+      {menu ? <div class="ui-row-menu">{menu}</div> : null}
     </>
   );
+  const rowClass = "ui-row" + (compact ? " ui-row--compact" : "") + (selected ? " is-selected" : "");
   if (onSelect) {
     return (
-      <li class={"ui-row" + (selected ? " is-selected" : "")}>
+      <li class={rowClass}>
         <button type="button" class="ui-row-select" aria-pressed={selected ? "true" : "false"} onClick={onSelect}>
           {inner}
         </button>
       </li>
     );
   }
-  return <li class="ui-row">{inner}</li>;
+  return <li class={rowClass}>{inner}</li>;
 }
 
 export interface FieldProps {

@@ -1,19 +1,22 @@
 import type { BrowsersDashboard, DashboardBrowser, DashboardMcpClient } from "../src/messages.js";
+import { relativeTime, shortDate } from "./ui-logic.js";
 
-/** Pure view helpers for the Browsers page (unit-tested, no chrome APIs). */
+/** Pure view helpers for the Connections page (unit-tested, no chrome APIs). */
 
-export function formatTimestamp(value: number | null): string {
-  if (value === null || !Number.isFinite(value) || value <= 0) return "Unknown";
-  try {
-    return new Date(value).toLocaleString();
-  } catch {
-    return "Unknown";
-  }
+export { relativeTime, shortDate };
+
+/**
+ * Browser + OS for a row's meta line, e.g. "Chrome - Linux". Empty
+ * parts are dropped; an empty result means the meta part is omitted,
+ * never guessed.
+ */
+export function browserOsName(browser: DashboardBrowser): string {
+  return [browser.browser, browser.os].filter(Boolean).join(" - ");
 }
 
-/** Status is always a dot + a word, never colour alone. */
-export function browserStatus(browser: DashboardBrowser): "Connected" | "Disconnected" {
-  return browser.connected ? "Connected" : "Disconnected";
+/** Browser status is always a dot + a word, never colour alone. */
+export function browserStatus(browser: DashboardBrowser): "Online" | "Offline" {
+  return browser.connected ? "Online" : "Offline";
 }
 
 export function mcpClientStatus(client: DashboardMcpClient): "Connected" | "Not connected" {
@@ -37,9 +40,13 @@ export function browserDetail(browser: DashboardBrowser): string {
   return [browser.browser, browser.os, browser.version].filter(Boolean).join(" · ");
 }
 
-export function tabCountText(browser: DashboardBrowser): string {
-  if (!browser.connected) return "Unknown";
-  if (browser.tabCount === null) return "Unknown";
+/**
+ * Tab count, only when connected AND known. Unknown is null so the
+ * caller omits it — never "Unknown", never a guess.
+ */
+export function tabCountText(browser: DashboardBrowser): string | null {
+  if (!browser.connected) return null;
+  if (browser.tabCount === null) return null;
   return `${browser.tabCount} tab${browser.tabCount === 1 ? "" : "s"}`;
 }
 

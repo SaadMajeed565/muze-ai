@@ -1,4 +1,6 @@
 import type { PermissionMode } from "../libs/security/index.js";
+import type { AuditEvent } from "../libs/security/index.js";
+import type { DashboardMcpClient } from "../src/messages.js";
 import type { TabId } from "./logic.js";
 
 /**
@@ -10,14 +12,248 @@ import type { TabId } from "./logic.js";
  */
 
 /**
- * Navigation (v2): exactly four tabs, the same on every breakpoint.
- * No group headings are needed for four items. Activity lives inside
- * Tasks; browsers, apps, and permissions live inside Profile.
+ * Navigation (v3): exactly five destinations, in this order. Activity
+ * lives inside Tasks; browsers and apps live inside Connections;
+ * permissions, appearance, privacy, help and the account itself live
+ * inside Account. There is no sixth tab.
  */
-export const NAV_TABS: TabId[] = ["overview", "tasks", "files", "profile"];
+export const NAV_TABS: TabId[] = ["home", "tasks", "connections", "files", "account"];
 
 export function navGroupTabs(): TabId[] {
   return [...NAV_TABS];
+}
+
+/** Wide-rail group headings (v3): "This browser" then "Account". */
+export interface NavRailGroup {
+  label: string;
+  tabs: TabId[];
+}
+
+export function navRailGroups(): NavRailGroup[] {
+  return [
+    { label: "This browser", tabs: ["home", "tasks", "files"] },
+    { label: "Account", tabs: ["connections", "account"] },
+  ];
+}
+
+/**
+ * Short date, or null when the value is unknown. Unknown values are
+ * omitted by callers, never printed as "Unknown" and never guessed.
+ * Example: "Oct 15".
+ */
+export function shortDate(value: number | null | undefined): string | null {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) return null;
+  try {
+    return new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Relative time, or null when the value is unknown. Short forms only:
+ * "13s", "2m", "3h", "2d ago", falling back to shortDate() past a week.
+ * Never a raw locale timestamp, never "Unknown".
+ */
+export function relativeTime(value: number | null | undefined, now: number): string | null {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) return null;
+  const delta = Math.max(0, now - value);
+  const seconds = Math.floor(delta / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return shortDate(value);
+}
+
+/**
+ * App-name resolution (dashboard layer only). The bridge hello client
+ * is a single gateway identity ("Universal Browser Tools (remote
+ * MCP)") shared by every MCP client on one socket, so it can never be
+ * a per-app name — and one socket multiplexes many MCP clients, so
+ * renaming it is not a fix. When an audit/approval actor carries that
+ * constant, an id-like oc_… value, or no usable name at all, look the
+ * actor up in the registered MCP clients by client id and use its
+ * registered name. Nothing usable -> "AI app", never "Unknown".
+ */
+export const GATEWAY_CLIENT_NAMES = ["Universal Browser Tools (remote MCP)", "Universal Browser Tools"] as const;
+export const GATEWAY_CLIENT_IDS = ["muze-gateway", "unknown"] as const;
+
+export interface AppActor {
+  id?: string;
+  name?: string;
+}
+
+export function resolveAppName(
+  client: AppActor | null | undefined,
+  registeredClients: readonly { clientId: string; clientName: string }[],
+): string {
+  const lookup = (id: string | undefined): string | null => {
+    if (!id) return null;
+    const found = registeredClients.find((entry) => entry.clientId === id);
+    const name = found?.clientName?.trim();
+    return name ? name : null;
+  };
+  const name = client?.name?.trim() ?? "";
+  const id = client?.id?.trim() ?? "";
+  const isGatewayName = (GATEWAY_CLIENT_NAMES as readonly string[]).includes(name);
+  const isGatewayId = (GATEWAY_CLIENT_IDS as readonly string[]).includes(id);
+  const isIdLikeName = /^oc_[A-Za-z0-9_-]+$/.test(name);
+  const isUnknownName = name === "" || name === "Unknown client";
+  if (isGatewayName || isGatewayId || isIdLikeName || isUnknownName) {
+    // For an id-like name, the name itself may be the client id.
+    return lookup(id) ?? lookup(name) ?? "AI app";
+  }
+  return name;
+}
+
+/**
+ * Presentation dedupe by app name (dashboard layer only). The gateway
+ * creates a new ClientRow on every POST /register with no dedup by
+ * name + redirect URIs, so one app can hold several oc_ ids; this
+ * collapses them to one row per name for display. The underlying
+ * authorisations are untouched — revoking a deduped row must revoke
+ * every underlying clientId + sessionId (see Connections).
+ */
+export interface DedupedApp {
+  name: string;
+  clients: DashboardMcpClient[];
+  live: boolean;
+}
+
+export function dedupeAppsByName(clients: readonly DashboardMcpClient[]): DedupedApp[] {
+  const groups = new Map<string, DedupedApp>();
+  for (const client of clients) {
+    const key = client.clientName.trim().toLowerCase();
+    const existing = groups.get(key);
+    if (existing) {
+      existing.clients.push(client);
+      existing.live = existing.live || client.live;
+    } else {
+      groups.set(key, { name: client.clientName, clients: [client], live: client.live });
+    }
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Tool names are never rendered. They map to one plain verb each;
+ * anything unmapped falls back to the generic verb, never the raw name.
+ * Families: read (tabs.list, page.snapshot, observe, dom.read/find),
+ * navigation, input, tab/window management, everything else generic.
+ */
+export function activityVerb(tool: string | undefined): string {
+  if (!tool) return "acted in the browser";
+  const name = tool.toLowerCase();
+  if (
+    name === "tabs.list" ||
+    name === "page.snapshot" ||
+    name === "observe" ||
+    name === "dom.read" ||
+    name === "dom.find" ||
+    name.startsWith("page.read") ||
+    name.startsWith("dom.read")
+  ) {
+    return "read a page";
+  }
+  if (name === "tabs.navigate" || name === "tabs.create" || name.startsWith("page.navigate") || name === "tabs.go-back" || name === "tabs.go-forward") {
+    return "opened a page";
+  }
+  if (name === "dom.click" || name === "dom.type" || name === "dom.fill" || name === "dom.press" || name === "act") {
+    return "used the page";
+  }
+  if (name.startsWith("tabs.") || name.startsWith("window.") || name.startsWith("tab.")) {
+    return "organised tabs";
+  }
+  return "acted in the browser";
+}
+
+function auditSeq(id: string): number | null {
+  const match = /^audit_(\d+)$/.exec(id);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Merge audit events with the ONLY provably-safe pairing rule: the
+ * input is newest-first (audit.list() order), so chronological order
+ * is its reverse. A tool.call and the IMMEDIATELY NEXT event merge
+ * only when their numeric audit ids are consecutive, they share the
+ * same client id, the same tool, and the first is tool.call and the
+ * second tool.result. Any interleaved concurrent call breaks
+ * consecutiveness, so unrelated actions can never merge. Unpaired
+ * records are always kept, never dropped. There is no time-window
+ * heuristic here: AuditEvent carries no call id or correlation key,
+ * so no other pairing is safe.
+ */
+export function mergeActivity(events: readonly AuditEvent[]): AuditEvent[] {
+  const chronological = [...events].reverse();
+  const merged: AuditEvent[] = [];
+  for (let i = 0; i < chronological.length; i += 1) {
+    const current = chronological[i];
+    const next = chronological[i + 1];
+    const seq = auditSeq(current.id);
+    const nextSeq = next ? auditSeq(next.id) : null;
+    const pairable =
+      next !== undefined &&
+      seq !== null &&
+      nextSeq !== null &&
+      nextSeq === seq + 1 &&
+      current.kind === "tool.call" &&
+      next.kind === "tool.result" &&
+      (current.client?.id ?? null) === (next.client?.id ?? null) &&
+      (current.tool ?? null) === (next.tool ?? null);
+    if (pairable) {
+      merged.push(next);
+      i += 1;
+    } else {
+      merged.push(current);
+    }
+  }
+  return merged.reverse();
+}
+
+export interface ActivityRow {
+  id: string;
+  sentence: string;
+  actor: string;
+  time: string | null;
+  /** Only Denied / Failed are surfaced as a state word; "Allowed" and "Recorded" never render. */
+  state: "Denied" | "Failed" | null;
+}
+
+/** One merged-feed row: one plain sentence, resolved actor, relative time, no tool name. */
+export function activityRows(
+  events: readonly AuditEvent[],
+  registeredClients: readonly { clientId: string; clientName: string }[],
+  now: number,
+): ActivityRow[] {
+  return mergeActivity(events).map((event) => {
+    const actor = resolveAppName(event.client ?? null, registeredClients);
+    const state = event.decision === "denied" ? "Denied" : event.decision === "error" ? "Failed" : null;
+    const time = relativeTime(Date.parse(event.at), now);
+    let sentence: string;
+    if (event.kind === "tool.call" || event.kind === "tool.result") {
+      sentence = `${actor} ${activityVerb(event.tool)}.`;
+    } else if (event.kind === "policy.change") {
+      sentence = "Permissions changed.";
+    } else if (event.kind === "client.connect") {
+      sentence = `${actor} connected.`;
+    } else if (event.kind === "client.disconnect") {
+      sentence = `${actor} disconnected.`;
+    } else if (event.kind === "approval") {
+      sentence = "An approval was answered.";
+    } else if (event.kind === "kill-switch") {
+      sentence = "All activity stopped.";
+    } else if (event.kind === "token.rotate") {
+      sentence = "Connection refreshed.";
+    } else {
+      sentence = `${plainActivityKind(event.kind)}.`;
+    }
+    return { id: event.id, sentence, actor, time, state };
+  });
 }
 
 /** Truncate to at most maxChars characters, keeping whole words where possible. */

@@ -41,12 +41,13 @@ export type IconName =
   | "logo";
 
 /**
- * End-user tabs only, exactly four (v2): Home, Tasks, Files, Profile.
- * Activity lives inside Tasks, and browsers/apps/permissions live
- * inside Profile — there are no Browsers, Safety, or Activity tabs.
+ * End-user destinations only, exactly five (v3): Home, Tasks,
+ * Connections, Files, Account. Activity lives inside Tasks, browsers
+ * and apps live inside Connections, and permissions/appearance/
+ * privacy/help live inside Account. There is no sixth destination.
  * Developer tool data is never rendered (see ui-logic.ts).
  */
-export type TabId = "overview" | "tasks" | "files" | "profile";
+export type TabId = "home" | "tasks" | "connections" | "files" | "account";
 
 export interface TabDefinition {
   id: TabId;
@@ -55,10 +56,11 @@ export interface TabDefinition {
 }
 
 export const TABS: TabDefinition[] = [
-  { id: "overview", label: "Home", icon: "home" },
+  { id: "home", label: "Home", icon: "home" },
   { id: "tasks", label: "Tasks", icon: "clock" },
+  { id: "connections", label: "Connections", icon: "link" },
   { id: "files", label: "Files", icon: "file" },
-  { id: "profile", label: "Profile", icon: "user" },
+  { id: "account", label: "Account", icon: "user" },
 ];
 
 export function isTabId(value: unknown): value is TabId {
@@ -116,7 +118,7 @@ export function setupChecklist(input: SetupInput): SetupItem[] {
   return [
     { id: "level", label: "Choose a permission level", done: input.onboardingStep >= 2 },
     { id: "account", label: "Connect your Muze account", done: input.signedIn },
-    { id: "client", label: "Add the MCP endpoint to your AI client", done: input.connectedClients > 0 },
+    { id: "client", label: "Add the connection to your AI app", done: input.connectedClients > 0 },
   ];
 }
 
