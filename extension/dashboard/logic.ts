@@ -40,7 +40,8 @@ export type IconName =
   | "file"
   | "logo";
 
-export type TabId = "overview" | "permissions" | "tools" | "files" | "activity" | "tasks" | "browsers";
+/** End-user tabs only. There is no Tools tab: developer tool data is never rendered (see ui-logic.ts). */
+export type TabId = "overview" | "permissions" | "files" | "activity" | "tasks" | "browsers";
 
 export interface TabDefinition {
   id: TabId;
@@ -49,9 +50,8 @@ export interface TabDefinition {
 }
 
 export const TABS: TabDefinition[] = [
-  { id: "overview", label: "Overview", icon: "home" },
-  { id: "permissions", label: "Permissions", icon: "shield" },
-  { id: "tools", label: "Tools", icon: "grid" },
+  { id: "overview", label: "Home", icon: "home" },
+  { id: "permissions", label: "Safety", icon: "shield" },
   { id: "files", label: "Files", icon: "file" },
   { id: "activity", label: "Activity", icon: "pulse" },
   { id: "tasks", label: "Tasks", icon: "clock" },

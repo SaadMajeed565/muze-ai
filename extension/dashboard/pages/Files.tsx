@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import { MAX_FILE_SIZE, type StoredFile } from "../../libs/files/index.js";
 import { Icon } from "../components/Icon.js";
-import { Button, Callout, Card, EmptyState, Skeleton } from "../components/primitives.js";
+import { Button, EmptyState } from "../components/primitives.js";
+import { ErrorState, ListRow, Page, Section, SectionSkeleton } from "../components/layout.js";
 import { sendRequest } from "../logic.js";
 
 type FileSummary = Omit<StoredFile, "data">;
@@ -22,6 +23,11 @@ function toBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+/**
+ * Files, re-skinned onto Page / Section / ListRow. Files are shown by
+ * name and size only. The description no longer names a tool: the user
+ * attaches a file here, then asks the AI to use it.
+ */
 export function FilesPage(): preact.JSX.Element {
   const [files, setFiles] = useState<FileSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,8 +72,6 @@ export function FilesPage(): preact.JSX.Element {
   };
 
   const remove = async (id: string, name?: string): Promise<void> => {
-    // Removing a file is destructive (uploads referencing it break), so
-    // confirm first with a native dialog (documented dashboard choice).
     if (name !== undefined) {
       const ok = confirm(`Remove "${name}"? The AI will no longer be able to use this file.`);
       if (!ok) return;
@@ -81,17 +85,15 @@ export function FilesPage(): preact.JSX.Element {
   };
 
   return (
-    <div class="stack">
-      {error ? <Callout tone="danger">{error}</Callout> : null}
-
-      <Card
-        title="Files"
-        icon="file"
-        description="Files stay on this device. Attach one here, then ask the AI to set it on a file input with forms.setFile."
-        actions={files ? <span class="pill">{files.length} stored</span> : null}
-      >
+    <Page
+      title="Files"
+      subtitle="Files stay on this device."
+      action={files ? <span class="ui-pill">{files.length} stored</span> : null}
+    >
+      {error ? <ErrorState message={error} /> : null}
+      <Section title="Add a file" description="Attach a file here, then ask the AI to use it.">
         <div
-          class={"file-drop" + (dragging ? " is-over" : "")}
+          class={"ui-file-drop" + (dragging ? " is-over" : "")}
           role="button"
           tabIndex={0}
           aria-label="Add files"
@@ -114,8 +116,8 @@ export function FilesPage(): preact.JSX.Element {
           }}
         >
           <Icon name="file" size={22} />
-          <span class="file-drop-title">{busy ? "Adding files…" : "Drop files here or click to choose"}</span>
-          <span class="file-drop-hint">Up to {formatBytes(MAX_FILE_SIZE)} per file</span>
+          <span class="ui-file-drop-title">{busy ? "Adding files…" : "Drop files here or click to choose"}</span>
+          <span class="ui-file-drop-hint">Up to {formatBytes(MAX_FILE_SIZE)} per file</span>
         </div>
         <input
           ref={input}
@@ -127,46 +129,39 @@ export function FilesPage(): preact.JSX.Element {
             if (selected?.length) void upload(selected);
           }}
         />
+      </Section>
 
+      <Section title="Stored files">
         {files === null ? (
-          <div class="skeleton-list">
-            <Skeleton width="80%" />
-            <Skeleton width="65%" />
-          </div>
+          <SectionSkeleton />
         ) : files.length === 0 ? (
           <EmptyState
             icon="file"
             title="No files yet"
-            description="Add a PDF, image, or document to hand it to a page later."
+            description="Add a PDF, image, or document to hand it to the AI later."
           />
         ) : (
-          <ul class="file-list">
+          <ul class="ui-list">
             {files.map((file) => (
-              <li class="file-row" key={file.id}>
-                <span class="file-row-icon" aria-hidden="true">
-                  <Icon name="file" size={16} />
-                </span>
-                <div class="file-row-main">
-                  <span class="file-row-name" title={file.name}>
-                    {file.name}
-                  </span>
-                  <span class="file-row-meta">
-                    {formatBytes(file.size)} · {file.mimeType}
-                  </span>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon="close"
-                  ariaLabel={`Remove ${file.name}`}
-                  disabled={busy}
-                  onClick={() => void remove(file.id, file.name)}
-                />
-              </li>
+              <ListRow
+                key={file.id}
+                title={file.name}
+                meta={`${formatBytes(file.size)} · ${file.mimeType}`}
+                actions={
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon="close"
+                    ariaLabel={`Remove ${file.name}`}
+                    disabled={busy}
+                    onClick={() => void remove(file.id, file.name)}
+                  />
+                }
+              />
             ))}
           </ul>
         )}
-      </Card>
-    </div>
+      </Section>
+    </Page>
   );
 }

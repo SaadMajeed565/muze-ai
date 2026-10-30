@@ -165,26 +165,35 @@ describe("TasksPage Phase 2 rendering", () => {
     await flush();
     await flush();
     // Newest first: the created task renders before the cancelled one.
-    expect(container.textContent).toContain("Current step: 1. dom.click (waiting_approval)");
+    expect(container.textContent).toContain("click");
+    expect(container.textContent).not.toContain("dom.click");
     expect(container.textContent).toContain("domain other.com is not in the approved domains");
-    expect(container.textContent).toContain("Approve plan");
 
-    const title = [...container.querySelectorAll("button")].find((b) => b.textContent === "Organise tabs") ?? null;
+    const title = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Organise tabs")) ?? null;
     expect(title).not.toBeNull();
     await act(() => {
       title!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(container.textContent).toContain("Failed: 1");
-    expect(container.textContent).toContain("Browser: browser_9");
+    expect(container.textContent).toContain("Approve plan");
+    expect(container.textContent).toContain("1 step didn't finish");
+    expect(container.textContent).not.toContain("browser_9");
     expect(container.textContent).toContain("Final report");
-    expect(container.textContent).toContain("Compensation: Step 0 (tabs.list): close-tab — executed.");
-    expect(container.textContent).toContain("Manual cleanup: Step 1 (dom.click) failed");
+    expect(container.textContent).toContain("close-tab");
+    expect(container.textContent).not.toContain("tabs.list");
+    expect(container.textContent).toContain("Needs doing by hand:");
+    expect(container.textContent).not.toContain("dom.click");
   });
 
   it("sends muze/tasks.approvePlan after confirming", async () => {
     const container = mount();
     await flush();
+    await flush();
+    const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Click the form")) ?? null;
+    expect(row).not.toBeNull();
+    await act(() => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
     const approve = [...container.querySelectorAll("button")].find((b) => b.textContent === "Approve plan" && !(b as HTMLButtonElement).disabled) ?? null;
     expect(approve).not.toBeNull();

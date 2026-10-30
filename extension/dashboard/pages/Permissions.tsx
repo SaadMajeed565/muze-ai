@@ -1,71 +1,73 @@
 import type { PermissionMode, PolicyConfig } from "../../libs/security/index.js";
 import type { DashboardState } from "../../src/messages.js";
-import { Button, Callout, Card, Chip, Switch } from "../components/primitives.js";
+import type { Appearance } from "../logic.js";
+import { plainCapabilities, plainGroupName } from "../ui-logic.js";
+import { Callout, Chip, Segmented, Switch } from "../components/primitives.js";
+import { ListRow, Page, Section } from "../components/layout.js";
 import { PermissionLevelPicker } from "../PermissionLevelPicker.js";
 
 export interface PermissionsPageProps {
   state: DashboardState;
   busy: boolean;
+  appearance: Appearance;
+  onAppearance: (value: Appearance) => void;
   onModeChange: (mode: PermissionMode) => void;
   onPolicyPatch: (patch: Partial<PolicyConfig>) => void;
   onReadOnly: (enabled: boolean) => void;
   onKillSwitch: (engaged: boolean) => void;
   onGroupToggle: (group: string, enabled: boolean) => void;
-  onReset: () => void;
 }
 
+/**
+ * Safety, in plain words only. There is no per-tool list here and no
+ * per-tool control: "What Muze can do" is derived from the permission
+ * level and the capability groups, never from tool names, categories,
+ * or risk levels. The underlying policy is unchanged; only the
+ * per-tool override control is not rendered.
+ */
 export function PermissionsPage({
   state,
   busy,
+  appearance,
+  onAppearance,
   onModeChange,
   onPolicyPatch,
   onReadOnly,
   onKillSwitch,
   onGroupToggle,
-  onReset,
 }: PermissionsPageProps): preact.JSX.Element {
   const { policy, snapshot } = state;
   const groups = Object.entries(policy.enabledGroups);
-  const overrideCount = Object.keys(policy.toolOverrides ?? {}).length;
+  const capabilities = plainCapabilities(snapshot.mode, policy.enabledGroups);
 
-  /**
-   * Native confirm() dialogs for privilege-changing actions (documented:
-   * this dashboard has no custom dialog component). Engaging the kill
-   * switch refuses every tool call; disengaging it re-enables the agent,
-   * so both directions confirm. Resetting overrides discards choices the
-   * user made tool by tool. (Unrestricted switching confirms inside
-   * PermissionLevelPicker, which both picker placements share.)
-   */
   const toggleKillSwitch = (engaged: boolean): void => {
     const ok = confirm(
       engaged
-        ? "Engage the emergency stop? Every tool call will be refused until you turn it off again."
-        : "Turn the emergency stop off? The agent will be able to act again under the current permission level.",
+        ? "Stop all agent activity? Nothing the agent asks for will run until you turn this off again."
+        : "Turn activity back on? The agent will be able to act again under the current permission level.",
     );
     if (ok) onKillSwitch(engaged);
   };
 
-  const resetOverrides = (): void => {
-    if (overrideCount === 0) return;
-    const ok = confirm(`Reset all ${overrideCount} per-tool override${overrideCount === 1 ? "" : "s"}? Every tool goes back under the current permission level.`);
-    if (ok) onReset();
-  };
-
   return (
-    <div class="stack">
-      <Card
-        title="Permission level"
-        description="The starting point for every tool call. Per-tool overrides sit on top of it."
-        actions={<span class="pill">{snapshot.toolCount} tools</span>}
-      >
+    <Page title="Safety" subtitle="What the agent may do, and how to stop it.">
+      <Section title="Permission level" description="The starting point for everything the agent does.">
         <PermissionLevelPicker mode={snapshot.mode} disabled={busy} onChange={onModeChange} />
-      </Card>
+      </Section>
 
-      <Card title="Safety controls">
-        <div class="control-row">
-          <div class="control-text">
-            <span class="control-label">Approval prompts</span>
-            <span class="control-hint">Ask before sensitive reads and consequential actions.</span>
+      <Section title="What Muze can do" description="In plain words, from your level and capabilities above.">
+        <ul class="ui-list">
+          {capabilities.map((capability) => (
+            <ListRow key={capability} title={capability} />
+          ))}
+        </ul>
+      </Section>
+
+      <Section title="Safety controls">
+        <div class="ui-control-row">
+          <div class="ui-control-text">
+            <span class="ui-control-label">Ask before acting</span>
+            <span class="ui-control-hint">Ask before sensitive reads and actions that change things.</span>
           </div>
           <Switch
             checked={policy.approvalMode === "risk"}
@@ -75,64 +77,72 @@ export function PermissionsPage({
           />
         </div>
 
-        <div class="control-row">
-          <div class="control-text">
-            <span class="control-label">Read-only mode</span>
-            <span class="control-hint">Block every action that would change the page.</span>
+        <div class="ui-control-row">
+          <div class="ui-control-text">
+            <span class="ui-control-label">Read-only mode</span>
+            <span class="ui-control-hint">Block every action that would change a page.</span>
           </div>
           <Switch checked={policy.readOnlyMode} disabled={busy} label={policy.readOnlyMode ? "On" : "Off"} onToggle={onReadOnly} />
         </div>
 
-        <div class={"control-row control-row--danger" + (policy.killSwitch ? " is-on" : "")}>
-          <div class="control-text">
-            <span class="control-label">
+        <div class={"ui-control-row ui-control-row--danger" + (policy.killSwitch ? " is-on" : "")}>
+          <div class="ui-control-text">
+            <span class="ui-control-label">
               <span class="status-dot is-bad" aria-hidden="true" />
-              Emergency stop
+              Stop all activity
             </span>
-            <span class="control-hint">Immediately refuse every tool call until you turn it off.</span>
+            <span class="ui-control-hint">Immediately stop everything the agent asks for, until you turn it off.</span>
           </div>
           <Switch
             checked={policy.killSwitch}
             disabled={busy}
-            label={policy.killSwitch ? "Engaged" : "Off"}
+            label={policy.killSwitch ? "On" : "Off"}
             onToggle={toggleKillSwitch}
           />
         </div>
 
         {policy.killSwitch ? (
           <Callout tone="danger" icon="power">
-            All tool calls are being refused right now. Turn the emergency stop off to resume.
+            All agent activity is stopped right now. Turn this off to resume.
           </Callout>
         ) : null}
-      </Card>
+      </Section>
 
       {groups.length > 0 ? (
-        <Card title="Permission groups" description="Optional capabilities that can be switched off together.">
-          <div class="chip-row">
+        <Section title="Capabilities" description="Optional capabilities that can be switched off together.">
+          <div class="ui-chip-row">
             {groups.map(([group, enabled]) => (
               <Chip key={group} active={enabled} disabled={busy} onClick={() => onGroupToggle(group, !enabled)}>
-                {group}
+                {plainGroupName(group)}
               </Chip>
             ))}
           </div>
-        </Card>
+        </Section>
       ) : null}
 
-      <Card
-        title="Per-tool overrides"
-        description={
-          overrideCount > 0
-            ? `${overrideCount} tool${overrideCount === 1 ? "" : "s"} differ from the level above.`
-            : "No individual tools have been changed yet."
-        }
-        actions={
-          <Button variant="ghost" size="sm" icon="refresh" disabled={busy || overrideCount === 0} onClick={resetOverrides}>
-            Reset overrides
-          </Button>
-        }
-      >
-        <p class="hint">Overrides survive every level change, so switching the level never discards a choice you made. Reset puts every tool back under the level.</p>
-      </Card>
-    </div>
+      <Section title="Appearance" description="Follows your system setting by default.">
+        <Segmented
+          ariaLabel="Appearance"
+          value={appearance}
+          options={[
+            { id: "system", label: "System" },
+            { id: "light", label: "Light" },
+            { id: "dark", label: "Dark" },
+          ]}
+          onChange={onAppearance}
+        />
+      </Section>
+
+      <Section title="Privacy" description="What Muze AI never touches.">
+        <ul class="ui-privacy-list">
+          <li>Never reads saved passwords unless you ask it to work with them.</li>
+          <li>Never reads local storage or other site storage on its own.</li>
+          <li>Never sees the contents of network requests or responses — only which page was opened and when.</li>
+          <li>Never clears browsing data, cookies or cache on its own.</li>
+          <li>Runs locally: pages are read only when you ask the agent to do something.</li>
+        </ul>
+        <p class="ui-section-description">Changes here apply to this browser only.</p>
+      </Section>
+    </Page>
   );
 }

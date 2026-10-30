@@ -1,13 +1,5 @@
-import { TABS, type TabDefinition, type TabId } from "./logic.js";
-
-/**
- * Tasks nav entry, appended here rather than in logic.ts TABS (which this
- * section does not own). The cast + dedupe keep this working both before
- * and after the coordinator adds "tasks" to TabId/TABS in logic.ts: once
- * it is there, this append is skipped and no duplicate entry appears.
- */
-const TASKS_TAB: TabDefinition = { id: "tasks" as TabId, label: "Tasks", icon: "clock" };
-const NAV_TABS: TabDefinition[] = TABS.some((tab) => (tab.id as string) === "tasks") ? TABS : [...TABS, TASKS_TAB];
+import { TABS, type IconName, type TabId } from "./logic.js";
+import { NAV_GROUPS } from "./ui-logic.js";
 import { Icon } from "./components/Icon.js";
 
 export interface NavProps {
@@ -19,16 +11,26 @@ export interface NavProps {
 }
 
 function statusLabel(status: NavProps["status"], clients: number): string {
-  if (status === "connected") return clients > 0 ? `${clients} client${clients === 1 ? "" : "s"}` : "Connected";
+  if (status === "connected") return clients > 0 ? `${clients} app${clients === 1 ? "" : "s"} connected` : "Connected";
   return "Not connected";
 }
 
+function tabLabel(id: TabId): string {
+  return TABS.find((tab) => tab.id === id)?.label ?? id;
+}
+
+function tabIcon(id: TabId): IconName {
+  return TABS.find((tab) => tab.id === id)?.icon ?? "home";
+}
+
 /**
- * One component renders both navigation surfaces: a left rail on wide windows
- * (options page) and a bottom tab bar inside the side panel. CSS keeps exactly
- * one of them in the accessibility tree at a time.
+ * Grouped navigation: a left rail with group headings on wide windows
+ * (options page) and a compact bottom tab bar inside the side panel.
+ * CSS keeps exactly one of them in the accessibility tree at a time.
+ * There is no Tools entry: developer tool data is never rendered.
  */
 export function Nav({ active, onChange, status, clients, pending }: NavProps): preact.JSX.Element {
+  const allTabs = NAV_GROUPS.flatMap((group) => group.tabs);
   return (
     <>
       <nav class="rail" aria-label="Sections">
@@ -38,24 +40,29 @@ export function Nav({ active, onChange, status, clients, pending }: NavProps): p
             <span class="brand-name">Muze AI</span>
           </span>
         </div>
-        <ul class="rail-links">
-          {NAV_TABS.map((tab) => (
-            <li key={tab.id}>
-              <button
-                type="button"
-                class={"rail-link" + (active === tab.id ? " is-on" : "")}
-                aria-current={active === tab.id ? "page" : undefined}
-                onClick={() => onChange(tab.id)}
-              >
-                <Icon name={tab.icon} size={17} />
-                <span>{tab.label}</span>
-                {tab.id === "activity" && pending > 0 ? (
-                  <span class="rail-badge">{pending > 9 ? "9+" : pending}</span>
-                ) : null}
-              </button>
-            </li>
-          ))}
-        </ul>
+        {NAV_GROUPS.map((group) => (
+          <div class="rail-group" key={group.label}>
+            <span class="rail-group-label">{group.label}</span>
+            <ul class="rail-links">
+              {group.tabs.map((id) => (
+                <li key={id}>
+                  <button
+                    type="button"
+                    class={"rail-link" + (active === id ? " is-on" : "")}
+                    aria-current={active === id ? "page" : undefined}
+                    onClick={() => onChange(id)}
+                  >
+                    <Icon name={tabIcon(id)} size={17} />
+                    <span>{tabLabel(id)}</span>
+                    {id === "activity" && pending > 0 ? (
+                      <span class="rail-badge">{pending > 9 ? "9+" : pending}</span>
+                    ) : null}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
         <div class="rail-foot">
           <span class={"status-dot " + (status === "connected" ? "is-on" : "")} aria-hidden="true" />
           <span>{statusLabel(status, clients)}</span>
@@ -63,20 +70,20 @@ export function Nav({ active, onChange, status, clients, pending }: NavProps): p
       </nav>
 
       <nav class="tabbar" aria-label="Sections">
-        {NAV_TABS.map((tab) => (
+        {allTabs.map((id) => (
           <button
-            key={tab.id}
+            key={id}
             type="button"
-            class={"tabbar-item" + (active === tab.id ? " is-on" : "")}
-            aria-current={active === tab.id ? "page" : undefined}
-            onClick={() => onChange(tab.id)}
+            class={"tabbar-item" + (active === id ? " is-on" : "")}
+            aria-current={active === id ? "page" : undefined}
+            onClick={() => onChange(id)}
           >
             <span class="tabbar-icon">
-              <Icon name={tab.icon} size={19} />
-              {tab.id === "activity" && pending > 0 ? <span class="tabbar-dot" aria-hidden="true" /> : null}
+              <Icon name={tabIcon(id)} size={19} />
+              {id === "activity" && pending > 0 ? <span class="tabbar-dot" aria-hidden="true" /> : null}
             </span>
-            <span class="tabbar-label">{tab.label}</span>
-            {tab.id === "activity" && pending > 0 ? (
+            <span class="tabbar-label">{tabLabel(id)}</span>
+            {id === "activity" && pending > 0 ? (
               <span class="sr-only">{pending} requests waiting for approval</span>
             ) : null}
           </button>

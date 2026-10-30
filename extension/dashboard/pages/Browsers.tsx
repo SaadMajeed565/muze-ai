@@ -2,13 +2,10 @@ import { useCallback, useEffect, useState } from "preact/hooks";
 import type { BrowsersDashboard, DashboardBrowser, DashboardMcpClient } from "../../src/messages.js";
 import { sendRequest } from "../logic.js";
 import { attachedClients, browserDetail, browserStatus, canRemoveBrowser, formatTimestamp, mcpClientStatus, tabCountText } from "../browsers-logic.js";
-import { Badge, Button, Callout, Card, EmptyState, Skeleton } from "../components/primitives.js";
+import { Badge, Button, EmptyState } from "../components/primitives.js";
+import { ErrorState, ListRow, Page, Section, SectionSkeleton } from "../components/layout.js";
 
 const POLL_MS = 5000;
-
-function StatusDot({ connected }: { connected: boolean }): preact.JSX.Element {
-  return <span class={"status-dot " + (connected ? "is-on" : "")} aria-hidden="true" />;
-}
 
 function BrowserRow({
   data,
@@ -27,6 +24,17 @@ function BrowserRow({
   const clients = attachedClients(data, browser.sessionId);
   const detail = browserDetail(browser);
   const status = browserStatus(browser);
+  const meta = [
+    tabCountText(browser),
+    detail || null,
+    `Added ${formatTimestamp(browser.createdAt)}`,
+    `Last seen ${formatTimestamp(browser.lastSeenAt)}`,
+    clients.length > 0
+      ? `Apps: ${clients.map((client) => `${client.clientName}${client.live ? "" : " (not connected)"}`).join(", ")}`
+      : "No apps attached",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const saveRename = (): void => {
     const cleaned = name.trim();
@@ -39,116 +47,107 @@ function BrowserRow({
     onAction({ type: "muze/browsers/rename", sessionId: browser.sessionId, name: cleaned });
   };
 
-  return (
-    <li class="browser-row">
-      <div class="browser-row-main">
-        <div class="browser-row-title">
-          <StatusDot connected={browser.connected} />
-          {renaming ? (
-            <span class="browser-rename">
-              <input
-                type="text"
-                value={name}
-                disabled={busy}
-                aria-label="Browser name"
-                onInput={(event) => setName((event.target as HTMLInputElement).value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") saveRename();
-                  if (event.key === "Escape") {
-                    setRenaming(false);
-                    setName(browser.name);
-                  }
-                }}
-              />
-              <Button size="sm" variant="primary" disabled={busy} onClick={saveRename}>
-                Save
-              </Button>
-              <Button
-                size="sm"
-                disabled={busy}
-                onClick={() => {
-                  setRenaming(false);
-                  setName(browser.name);
-                }}
-              >
-                Cancel
-              </Button>
-            </span>
-          ) : (
-            <>
-              <strong>{browser.name}</strong>
-              {browser.isDefault ? <Badge tone="info">Default</Badge> : null}
-              {browser.isLocal ? <Badge tone="neutral">This browser</Badge> : null}
-            </>
-          )}
-        </div>
-        <p class="browser-row-meta">
-          <span>{status}</span>
-          <span aria-hidden="true"> · </span>
-          <span>{tabCountText(browser)}</span>
-          {detail ? (
-            <>
-              <span aria-hidden="true"> · </span>
-              <span>{detail}</span>
-            </>
-          ) : null}
-        </p>
-        <p class="browser-row-meta">
-          Added {formatTimestamp(browser.createdAt)} · Last seen {formatTimestamp(browser.lastSeenAt)}
-        </p>
-        <p class="browser-row-meta">
-          {clients.length > 0
-            ? `MCP clients: ${clients.map((client) => `${client.clientName}${client.live ? "" : " (not connected)"}`).join(", ")}`
-            : "No MCP clients attached"}
-        </p>
-      </div>
-      <div class="browser-row-actions">
-        {!browser.isDefault ? (
-          <Button
-            size="sm"
-            variant="primary"
-            disabled={busy}
-            onClick={() => onAction({ type: "muze/browsers/set-default", sessionId: browser.sessionId })}
-          >
-            Set as default
-          </Button>
-        ) : null}
-        <Button size="sm" disabled={busy} onClick={() => setRenaming(true)}>
-          Rename
+  const actions = (
+    <>
+      {!browser.isDefault ? (
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy}
+          onClick={() => onAction({ type: "muze/browsers/set-default", sessionId: browser.sessionId })}
+        >
+          Set as default
         </Button>
-        {browser.connected ? (
-          <Button
-            size="sm"
-            disabled={busy}
-            onClick={() => onAction({ type: "muze/browsers/disconnect", sessionId: browser.sessionId })}
-          >
-            Disconnect
-          </Button>
-        ) : null}
-        {canRemoveBrowser(data, browser.sessionId) ? (
-          confirmingRemove ? (
-            <span class="browser-confirm">
-              <span>Remove this browser? Its token is revoked and its sessions close.</span>
-              <Button
-                size="sm"
-                class="row-action-danger"
-                disabled={busy}
-                onClick={() => onAction({ type: "muze/browsers/remove", sessionId: browser.sessionId })}
-              >
-                Remove
-              </Button>
-              <Button size="sm" disabled={busy} onClick={() => setConfirmingRemove(false)}>
-                Keep
-              </Button>
-            </span>
-          ) : (
-            <Button size="sm" class="row-action-danger" disabled={busy} onClick={() => setConfirmingRemove(true)}>
+      ) : null}
+      <Button size="sm" disabled={busy} onClick={() => setRenaming(true)}>
+        Rename
+      </Button>
+      {browser.connected ? (
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={() => onAction({ type: "muze/browsers/disconnect", sessionId: browser.sessionId })}
+        >
+          Disconnect
+        </Button>
+      ) : null}
+      {canRemoveBrowser(data, browser.sessionId) ? (
+        confirmingRemove ? (
+          <span class="ui-confirm">
+            <span>Remove this browser? It will be signed out and its sessions close.</span>
+            <Button
+              size="sm"
+              class="row-action-danger"
+              disabled={busy}
+              onClick={() => onAction({ type: "muze/browsers/remove", sessionId: browser.sessionId })}
+            >
               Remove
             </Button>
-          )
-        ) : null}
-      </div>
-    </li>
+            <Button size="sm" disabled={busy} onClick={() => setConfirmingRemove(false)}>
+              Keep
+            </Button>
+          </span>
+        ) : (
+          <Button size="sm" class="row-action-danger" disabled={busy} onClick={() => setConfirmingRemove(true)}>
+            Remove
+          </Button>
+        )
+      ) : null}
+    </>
+  );
+
+  if (renaming) {
+    return (
+      <li class="ui-row">
+        <div class="ui-row-main">
+          <span class="ui-rename">
+            <input
+              type="text"
+              value={name}
+              disabled={busy}
+              aria-label="Browser name"
+              onInput={(event) => setName((event.target as HTMLInputElement).value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") saveRename();
+                if (event.key === "Escape") {
+                  setRenaming(false);
+                  setName(browser.name);
+                }
+              }}
+            />
+            <Button size="sm" variant="primary" disabled={busy} onClick={saveRename}>
+              Save
+            </Button>
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                setRenaming(false);
+                setName(browser.name);
+              }}
+            >
+              Cancel
+            </Button>
+          </span>
+        </div>
+      </li>
+    );
+  }
+
+  return (
+    <ListRow
+      title={
+        <>
+          <strong>{browser.name}</strong>
+          {browser.isDefault ? <Badge tone="info">Default</Badge> : null}
+          {browser.isLocal ? <Badge tone="neutral">This browser</Badge> : null}
+        </>
+      }
+      meta={meta}
+      status={status}
+      statusTone={browser.connected ? "ok" : "neutral"}
+      actions={actions}
+    />
   );
 }
 
@@ -165,30 +164,22 @@ function McpClientRow({
 }): preact.JSX.Element {
   const [confirming, setConfirming] = useState(false);
   const status = mcpClientStatus(client);
+  const meta = [
+    `Browser: ${browserName}`,
+    client.live
+      ? `Connected since ${formatTimestamp(client.connectedSince)} · Last activity ${formatTimestamp(client.lastActivityAt)}`
+      : `Authorised ${formatTimestamp(client.authorizedSince)} · Last refresh ${formatTimestamp(client.lastRefreshedAt)}`,
+  ].join(" · ");
   return (
-    <li class="browser-row">
-      <div class="browser-row-main">
-        <div class="browser-row-title">
-          <StatusDot connected={client.live} />
-          <strong>{client.clientName}</strong>
-        </div>
-        <p class="browser-row-meta">
-          <span>{status}</span>
-          <span aria-hidden="true"> · </span>
-          <span>Browser: {browserName}</span>
-          <span aria-hidden="true"> · </span>
-          <span>Scope: {client.scope || "—"}</span>
-        </p>
-        <p class="browser-row-meta">
-          {client.live
-            ? `Connected since ${formatTimestamp(client.connectedSince)} · Last activity ${formatTimestamp(client.lastActivityAt)}`
-            : `Authorized ${formatTimestamp(client.authorizedSince)} · Last refresh ${formatTimestamp(client.lastRefreshedAt)}`}
-        </p>
-      </div>
-      <div class="browser-row-actions">
-        {confirming ? (
-          <span class="browser-confirm">
-            <span>Revoke this client? Its tokens stop working and live sessions close.</span>
+    <ListRow
+      title={<strong>{client.clientName}</strong>}
+      meta={meta}
+      status={status}
+      statusTone={client.live ? "ok" : "neutral"}
+      actions={
+        confirming ? (
+          <span class="ui-confirm">
+            <span>Revoke this app? It will be signed out and its sessions close.</span>
             <Button size="sm" class="row-action-danger" disabled={busy} onClick={onRevoke}>
               Revoke
             </Button>
@@ -200,12 +191,18 @@ function McpClientRow({
           <Button size="sm" class="row-action-danger" disabled={busy} onClick={() => setConfirming(true)}>
             Revoke
           </Button>
-        )}
-      </div>
-    </li>
+        )
+      }
+    />
   );
 }
 
+/**
+ * Browsers, re-skinned onto Page / Section / ListRow. Every feature
+ * from the multi-browser build is kept: rename, set as default,
+ * disconnect, remove, and the apps attached to each browser. No
+ * session ids, no scope strings, no tokens are ever rendered.
+ */
 export function BrowsersPage(): preact.JSX.Element {
   const [data, setData] = useState<BrowsersDashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -248,28 +245,24 @@ export function BrowsersPage(): preact.JSX.Element {
   if (error && !data) {
     const unreachable = error === "gateway-unreachable";
     return (
-      <Card title="Browsers" description="Browsers attached to this account and the MCP clients using them.">
-        <Callout tone="danger">
-          {unreachable
-            ? "The gateway is unreachable. Check the connection, then try again. No browser data is shown because none could be verified."
-            : error}
-        </Callout>
-        <Button variant="primary" icon="refresh" onClick={() => void refresh()}>
-          Try again
-        </Button>
-      </Card>
+      <Page title="Browsers" subtitle="Browsers attached to this account and the apps using them.">
+        <ErrorState
+          message={
+            unreachable
+              ? "The gateway is unreachable. Check the connection, then try again. No browser data is shown because none could be verified."
+              : error
+          }
+          onRetry={() => void refresh()}
+        />
+      </Page>
     );
   }
 
   if (!data) {
     return (
-      <Card title="Browsers">
-        <div class="skeleton-list">
-          <Skeleton width="70%" />
-          <Skeleton width="100%" />
-          <Skeleton width="88%" />
-        </div>
-      </Card>
+      <Page title="Browsers" subtitle="Browsers attached to this account and the apps using them.">
+        <SectionSkeleton />
+      </Page>
     );
   }
 
@@ -277,16 +270,19 @@ export function BrowsersPage(): preact.JSX.Element {
     data.browsers.find((browser) => browser.sessionId === sessionId)?.name ?? "Unknown browser";
 
   return (
-    <div class="browsers-page">
-      {error ? <Callout tone="danger">{error}</Callout> : null}
-      <Card
+    <Page
+      title="Browsers"
+      subtitle="Browsers attached to this account and the apps using them."
+      action={
+        <Button size="sm" icon="refresh" disabled={busy} onClick={() => void refresh()}>
+          Refresh
+        </Button>
+      }
+    >
+      {error ? <ErrorState message={error} /> : null}
+      <Section
         title="Browsers"
-        description="One row per browser. Disconnect closes its bridge only; Remove revokes its token. Tokens are never shown here."
-        actions={
-          <Button size="sm" icon="refresh" disabled={busy} onClick={() => void refresh()}>
-            Refresh
-          </Button>
-        }
+        description="Disconnect closes its connection only; Remove signs it out completely."
       >
         {data.browsers.length === 0 ? (
           <EmptyState
@@ -294,25 +290,25 @@ export function BrowsersPage(): preact.JSX.Element {
             description="Sign in from the Muze AI extension on a browser to attach it here."
           />
         ) : (
-          <ul class="browser-list">
+          <ul class="ui-list">
             {data.browsers.map((browser) => (
               <BrowserRow key={browser.sessionId} data={data} browser={browser} busy={busy} onAction={act} />
             ))}
           </ul>
         )}
-      </Card>
+      </Section>
 
-      <Card
-        title="MCP sessions"
-        description="AI clients authorized against these browsers. A live session shows when it connected and last acted; a client that is not live shows when it was authorized and last refreshed its token."
+      <Section
+        title="Connected apps"
+        description="AI apps authorised against these browsers. A connected app shows when it connected and last acted; an app that is not connected shows when it was authorised and last refreshed."
       >
         {data.mcpClients.length === 0 ? (
           <EmptyState
-            title="No MCP sessions"
-            description="No AI client has been authorized against this account yet."
+            title="No apps connected"
+            description="No AI app has been authorised against this account yet."
           />
         ) : (
-          <ul class="browser-list">
+          <ul class="ui-list">
             {data.mcpClients.map((client) => (
               <McpClientRow
                 key={`${client.clientId}:${client.sessionId}`}
@@ -324,7 +320,7 @@ export function BrowsersPage(): preact.JSX.Element {
             ))}
           </ul>
         )}
-      </Card>
-    </div>
+      </Section>
+    </Page>
   );
 }

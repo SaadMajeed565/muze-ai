@@ -2,10 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { AuditEvent, PermissionMode, PolicyConfig } from "../libs/security/index.js";
 import type { DashboardState } from "../src/messages.js";
 import type { Appearance, TabId } from "./logic.js";
-import { APPEARANCE_KEY, LEGACY_APPEARANCE_KEY, TABS, readAppearance, sendRequest } from "./logic.js";
+import { APPEARANCE_KEY, LEGACY_APPEARANCE_KEY, readAppearance, sendRequest } from "./logic.js";
 import { Icon } from "./components/Icon.js";
 import { Button, Callout, Card, Skeleton } from "./components/primitives.js";
-import { ApprovalsBanner } from "./ApprovalsBanner.js";
 import { Nav } from "./Nav.js";
 import { Onboarding } from "./Onboarding.js";
 import { ActivityPage } from "./pages/Activity.js";
@@ -13,7 +12,6 @@ import { BrowsersPage } from "./pages/Browsers.js";
 import { FilesPage } from "./pages/Files.js";
 import { OverviewPage } from "./pages/Overview.js";
 import { PermissionsPage } from "./pages/Permissions.js";
-import { ToolsPage } from "./pages/Tools.js";
 import { TasksPage } from "./pages/Tasks.js";
 
 const POLL_MS = 5000;
@@ -82,7 +80,6 @@ export function App(): preact.JSX.Element {
     void refresh();
 
     const listener = (message: { type?: string }): void => {
-      // Canonical "muze/event"; the legacy spelling is accepted too, in case an older service worker is still running.
       if (message?.type === "muze/event" || message?.type === "uabb/event") void refresh();
     };
     chrome.runtime.onMessage.addListener(listener);
@@ -114,8 +111,6 @@ export function App(): preact.JSX.Element {
   }, [refresh]);
 
   useEffect(() => {
-    // New key first, legacy key as fallback; migrate a legacy-only value to
-    // the new key on first load (best effort, never blocks the dashboard).
     void chrome.storage.local
       .get([APPEARANCE_KEY, LEGACY_APPEARANCE_KEY])
       .then((stored) => {
@@ -123,7 +118,7 @@ export function App(): preact.JSX.Element {
         setAppearance(readAppearance(value));
         if (stored[APPEARANCE_KEY] === undefined && stored[LEGACY_APPEARANCE_KEY] !== undefined) {
           void chrome.storage.local
-            .set({ [APPEARANCE_KEY]: stored[LEGACY_APPEARANCE_KEY] })
+            .set({ [APPEARANCE_KEY]: stored[APPEARANCE_KEY] })
             .then(() => chrome.storage.local.remove([LEGACY_APPEARANCE_KEY]).catch(() => undefined))
             .catch(() => undefined);
         }
@@ -151,7 +146,7 @@ export function App(): preact.JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (tab === "activity" || tab === "tools") void loadAudit();
+    if (tab === "activity") void loadAudit();
   }, [tab, loadAudit, state?.snapshot.auditEvents]);
 
   const request = async (message: unknown): Promise<boolean> => {
@@ -224,7 +219,6 @@ export function App(): preact.JSX.Element {
         signedIn={state.gateway.signedIn}
         email={state.gateway.email}
         mcpUrl={state.gateway.mcpUrl}
-        toolCount={state.snapshot.toolCount}
         connectedClients={state.snapshot.connectedClients}
         onStep={setStep}
         onModeChange={(mode: PermissionMode) => void request({ type: "muze/policy/mode", mode })}
@@ -235,11 +229,7 @@ export function App(): preact.JSX.Element {
     );
   }
 
-  const { gateway, policy, snapshot, tools, approvals } = state;
-  // Tasks tab id is not in logic.ts TabId yet (coordinator-owned); the
-  // cast keeps this route working until it is, without touching logic.ts.
-  const isTasksTab = (tab as string) === "tasks";
-  const current = isTasksTab ? { label: "Tasks" } : (TABS.find((entry) => entry.id === tab) ?? TABS[0]);
+  const { gateway, snapshot, approvals } = state;
 
   return (
     <div class="app" data-tab={tab}>
@@ -257,7 +247,6 @@ export function App(): preact.JSX.Element {
             <Icon name="logo" size={20} class="brand-mark" />
             <span class="brand-name">Muze AI</span>
           </span>
-          <h1 class="topbar-title">{current.label}</h1>
           <div class="topbar-right">
             <span class={"pill" + (gateway.signedIn ? " pill--ok" : "")}>
               <span class={"status-dot " + (gateway.signedIn ? "is-on" : "")} aria-hidden="true" />
@@ -267,13 +256,6 @@ export function App(): preact.JSX.Element {
         </header>
 
         <div class="page">
-          <ApprovalsBanner
-            approvals={approvals}
-            busy={busy}
-            onRespond={respond}
-            onReview={() => goToTab("activity")}
-          />
-
           {error ? (
             <div class="notice">
               <Callout tone="danger">{error}</Callout>
@@ -283,17 +265,14 @@ export function App(): preact.JSX.Element {
             </div>
           ) : null}
 
-          <main class="content" ref={content} tabIndex={-1} aria-label={current.label}>
+          <main class="content" ref={content} tabIndex={-1} aria-label={tab}>
             {tab === "overview" ? (
               <OverviewPage
                 state={state}
                 busy={busy}
-                appearance={appearance}
-                onAppearance={changeAppearance}
                 onGatewayToggle={(enabled) => void request({ type: "muze/bridge/settings", patch: { gatewayEnabled: enabled } })}
                 onSignIn={() => void request({ type: "muze/gateway/sign-in" })}
                 onReconnect={() => void request({ type: "muze/bridge/reconnect" })}
-                onRotateToken={() => void request({ type: "muze/gateway/rotate" })}
                 onSignOut={() => void request({ type: "muze/gateway/sign-out" })}
                 onOpenWizard={openWizard}
                 onNavigate={goToTab}
@@ -304,29 +283,19 @@ export function App(): preact.JSX.Element {
               <PermissionsPage
                 state={state}
                 busy={busy}
+                appearance={appearance}
+                onAppearance={changeAppearance}
                 onModeChange={(mode) => void request({ type: "muze/policy/mode", mode })}
                 onPolicyPatch={(patch: Partial<PolicyConfig>) => void request({ type: "muze/policy/update", patch })}
                 onReadOnly={(enabled) => void request({ type: "muze/policy/readonly", enabled })}
                 onKillSwitch={(engaged) => void request({ type: "muze/killswitch", engaged })}
                 onGroupToggle={(group, enabled) => void request({ type: "muze/policy/group", group, enabled })}
-                onReset={() => void request({ type: "muze/policy/reset" })}
-              />
-            ) : null}
-
-            {tab === "tools" ? (
-              <ToolsPage
-                tools={tools}
-                snapshot={snapshot}
-                overrides={policy.toolOverrides ?? {}}
-                busy={busy}
-                audit={audit}
-                onToggle={(tool, allowed) => void request({ type: "muze/policy/tool", tool, allowed })}
               />
             ) : null}
 
             {tab === "files" ? <FilesPage /> : null}
 
-            {isTasksTab ? <TasksPage /> : null}
+            {tab === "tasks" ? <TasksPage /> : null}
 
             {tab === "browsers" ? <BrowsersPage /> : null}
 
@@ -342,21 +311,6 @@ export function App(): preact.JSX.Element {
               />
             ) : null}
           </main>
-
-          <footer class="app-foot">
-            <span>Muze AI</span>
-            <span class="app-foot-sep" aria-hidden="true">
-              ·
-            </span>
-            <span>{snapshot.toolCount} tools</span>
-            <span class="app-foot-sep" aria-hidden="true">
-              ·
-            </span>
-            <span>{snapshot.pendingApprovals} waiting</span>
-            <button type="button" class="link-button" onClick={openWizard}>
-              Setup guide
-            </button>
-          </footer>
         </div>
       </div>
     </div>

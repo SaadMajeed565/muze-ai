@@ -13,8 +13,6 @@ export interface OnboardingProps {
   signedIn: boolean;
   email: string;
   mcpUrl: string;
-  /** Derived from dashboard state (snapshot.toolCount), never hardcoded. */
-  toolCount: number;
   connectedClients: number;
   onStep: (step: number) => void;
   onModeChange: (mode: PermissionMode) => void;
@@ -23,12 +21,12 @@ export interface OnboardingProps {
   onSkip: () => void;
 }
 
-function valueRows(toolCount: number): { icon: "key" | "shield" | "lock"; title: string; body: string }[] {
+function valueRows(): { icon: "key" | "shield" | "lock"; title: string; body: string }[] {
   return [
   {
     icon: "key",
-    title: `${toolCount} browser tools`,
-    body: "Read pages, fill forms, download files, search history and capture screenshots.",
+    title: "Your AI, working in your browser",
+    body: "Read pages, fill forms, download files, search history and capture screenshots — only what you allow.",
   },
   {
     icon: "shield",
@@ -51,7 +49,6 @@ export function Onboarding({
   signedIn,
   email,
   mcpUrl,
-  toolCount,
   connectedClients,
   onStep,
   onModeChange,
@@ -118,10 +115,6 @@ export function Onboarding({
         </span>
       </header>
 
-      <div class="onboarding-progress" aria-hidden="true">
-        <span style={{ width: `${progress.percent}%` }} />
-      </div>
-
       <main class="onboarding-body">
         <div class="onboarding-pane" key={ONBOARDING_STEPS[safeStep - 1].id}>
           <div class="onboarding-intro">
@@ -139,9 +132,9 @@ export function Onboarding({
               {safeStep === 1
                 ? "Muze AI links this browser to your AI client over MCP. The agent only reaches what you allow, and every risky action can ask you first."
                 : safeStep === 2
-                  ? "Pick a starting point. You can change it, or override any single tool, at any time from the Permissions tab."
+                  ? "Pick a starting point. You can change it at any time from Safety."
                   : safeStep === 3
-                    ? "Sign in to link this browser to your Muze account. The token stays inside this extension and is only used to talk to the gateway."
+                    ? "Sign in to link this browser to your Muze account."
                     : "Add the endpoint to your MCP client, then sign in and authorise the client — no token paste needed."}
             </p>
           </div>
@@ -150,7 +143,7 @@ export function Onboarding({
 
           {safeStep === 1 ? (
             <ul class="value-list">
-              {valueRows(toolCount).map((row) => (
+              {valueRows().map((row) => (
                 <li key={row.title}>
                   <span class="value-icon" aria-hidden="true">
                     <Icon name={row.icon} size={17} />

@@ -2,13 +2,14 @@
 import { act } from "preact/test-utils";
 import { render } from "preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApprovalRequestInfo, ToolDescriptor } from "../libs/tool-contracts/index.js";
-import type { DashboardSnapshot } from "../src/messages.js";
-import { ApprovalsBanner } from "../dashboard/ApprovalsBanner.js";
 import { Onboarding } from "../dashboard/Onboarding.js";
 import { PermissionLevelPicker } from "../dashboard/PermissionLevelPicker.js";
+import { Nav } from "../dashboard/Nav.js";
+import { PermissionsPage } from "../dashboard/pages/Permissions.js";
+import { ActivityPage } from "../dashboard/pages/Activity.js";
+import type { DashboardState } from "../src/messages.js";
+import type { AuditEvent } from "../libs/security/index.js";
 import { Switch } from "../dashboard/components/primitives.js";
-import { ToolsPage } from "../dashboard/pages/Tools.js";
 
 let root: HTMLElement | null = null;
 
@@ -74,13 +75,6 @@ async function click(element: Element | null): Promise<void> {
   });
 }
 
-async function type(input: HTMLInputElement, value: string): Promise<void> {
-  await act(() => {
-    input.value = value;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-
 afterEach(() => {
   if (root) {
     render(null, root);
@@ -141,57 +135,6 @@ describe("PermissionLevelPicker", () => {
   });
 });
 
-describe("ApprovalsBanner", () => {
-  const approval = (id: string, tool: string): ApprovalRequestInfo => ({
-    id,
-    tool,
-    title: "Start a download",
-    summary: "Writes muze-report.pdf to your downloads folder",
-    risk: "consequential",
-    client: { id: "c1", name: "Claude", transport: "remote" },
-    createdAt: Date.now(),
-    expiresAt: Date.now() + 60_000,
-  });
-
-  it("renders nothing while nothing is pending", () => {
-    const { container } = (getQueries(mount(<ApprovalsBanner approvals={[]} busy={false} onRespond={vi.fn()} onReview={vi.fn()} />)));
-    expect(container.querySelector(".approval-banner")).toBeNull();
-  });
-
-  it("shows the pending request and answers it", async () => {
-    const onRespond = vi.fn();
-    const { container } = (getQueries(mount(
-      <ApprovalsBanner approvals={[approval("a1", "downloads.start")]} busy={false} onRespond={onRespond} onReview={vi.fn()} />,
-    )));
-
-    expect(container.textContent).toContain("Start a download needs approval");
-    expect(container.textContent).toContain("Claude");
-
-    const buttons = [...container.querySelectorAll("button")];
-    await click(buttons.find((b) => b.textContent === "Deny") ?? null);
-    expect(onRespond).toHaveBeenCalledWith("a1", false);
-
-    await click(buttons.find((b) => b.textContent === "Approve") ?? null);
-    expect(onRespond).toHaveBeenCalledWith("a1", true);
-  });
-
-  it("routes a pile-up to the activity tab", async () => {
-    const onReview = vi.fn();
-    const { container } = (getQueries(mount(
-      <ApprovalsBanner
-        approvals={[approval("a1", "downloads.start"), approval("a2", "tabs.close")]}
-        busy={false}
-        onRespond={vi.fn()}
-        onReview={onReview}
-      />,
-    )));
-
-    expect(container.textContent).toContain("2 requests are waiting");
-    await click([...container.querySelectorAll("button")].find((b) => b.textContent?.includes("All 2")) ?? null);
-    expect(onReview).toHaveBeenCalled();
-  });
-});
-
 describe("Onboarding", () => {
   const base = {
     busy: false,
@@ -200,7 +143,6 @@ describe("Onboarding", () => {
     signedIn: false,
     email: "",
     mcpUrl: "https://gateway.test/mcp",
-    toolCount: 129,
     connectedClients: 0,
     onStep: vi.fn(),
     onModeChange: vi.fn(),
@@ -214,7 +156,7 @@ describe("Onboarding", () => {
     const { getByRole, getByText } = (getQueries(mount(<Onboarding {...base} step={1} onStep={onStep} />)));
 
     expect(getByRole("heading").textContent).toContain("Your browser, under your control.");
-    expect(getByText("129 browser tools")).toBeTruthy();
+    expect(getByText("Your AI, working in your browser")).toBeTruthy();
 
     await click(getByText("Continue"));
     expect(onStep).toHaveBeenCalledWith(2);
@@ -253,72 +195,73 @@ describe("Onboarding", () => {
   });
 });
 
-describe("ToolsPage", () => {
-  const tools: ToolDescriptor[] = [
-    {
-      name: "tabs.list",
-      title: "List open tabs",
-      description: "Return every open tab with its title and URL",
-      category: "navigation",
-      risk: "read-only",
-      requiresApproval: false,
-      inputSchema: {},
-      outputSchema: {},
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-    },
-    {
-      name: "downloads.start",
-      title: "Start a download",
-      description: "Download a URL to the downloads folder",
-      category: "downloads",
-      risk: "consequential",
-      requiresApproval: true,
-      inputSchema: {},
-      outputSchema: {},
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
-    },
-  ];
-
-  const snapshot: DashboardSnapshot = {
-    toolCount: 2,
-    categories: ["downloads", "navigation"],
-    mode: "default",
-    enabledGroups: {},
-    readOnlyMode: false,
-    killSwitch: false,
-    bridgeConnected: true,
-    bridgeStatus: "connected",
-    connectedClients: 1,
-    pendingApprovals: 0,
-    auditEvents: 0,
-    allowedTools: ["tabs.list", "downloads.start"],
-    deniedTools: [],
-  };
-
-  it("lists every tool, then narrows to a search match", async () => {
-    const { container, getByLabelText } = (getQueries(mount(
-      <ToolsPage tools={tools} snapshot={snapshot} overrides={{}} busy={false} onToggle={vi.fn()} />,
+describe("Nav", () => {
+  it("groups navigation and has no Tools entry", () => {
+    const { container } = (getQueries(mount(
+      <Nav active="overview" onChange={vi.fn()} status="connected" clients={1} pending={2} />,
     )));
-
-    expect(container.querySelectorAll(".tool-row")).toHaveLength(2);
-    expect(container.textContent).toContain("2 tools");
-
-    await type(getByLabelText("Search tools") as HTMLInputElement, "download");
-
-    expect(container.querySelectorAll(".tool-row")).toHaveLength(1);
-    expect(container.textContent).toContain("1 of 2 tools");
+    expect(container.textContent).toContain("Home");
+    expect(container.textContent).toContain("Devices");
+    expect(container.textContent).toContain("Safety");
+    expect(container.textContent).toContain("Activity");
+    expect(container.textContent).not.toContain("Tools");
   });
+});
 
-  it("marks blocked tools and flips them on", async () => {
-    const onToggle = vi.fn();
-    const blocked: DashboardSnapshot = { ...snapshot, allowedTools: ["tabs.list"], deniedTools: ["downloads.start"] };
-    const { container, queryAllByRole } = (getQueries(mount(
-      <ToolsPage tools={tools} snapshot={blocked} overrides={{}} busy={false} onToggle={onToggle} />,
+describe("PermissionsPage end-user only", () => {
+  function state(): DashboardState {
+    return {
+      snapshot: {
+        toolCount: 136, categories: [], mode: "default", enabledGroups: {},
+        readOnlyMode: false, killSwitch: false, bridgeConnected: true,
+        bridgeStatus: "connected", connectedClients: 0, pendingApprovals: 0,
+        auditEvents: 0, allowedTools: [], deniedTools: [],
+      },
+      policy: {
+        version: 3, mode: "default", readOnlyMode: false, killSwitch: false,
+        approvalMode: "risk", allowByRisk: {}, approvalByRisk: {}, toolOverrides: {},
+        clients: {}, blockedDomains: [], enabledGroups: { bookmarks: true, history: true },
+        maxOutputChars: 200_000, defaultTimeoutMs: 30_000,
+      },
+      approvals: [], clients: [], settings: { gatewayEnabled: true, gatewayAccountEmail: "" },
+      tools: [], gateway: { enabled: true, url: "", mcpUrl: "", signedIn: false, email: "", sessionIdMasked: "", connected: false, authRequired: false },
+      onboarding: { completed: true, step: 4 },
+    } as unknown as DashboardState;
+  }
+  it("shows plain capabilities and no tool names, counts, or overrides", () => {
+    const { container } = (getQueries(mount(
+      <PermissionsPage state={state()} busy={false} appearance="system" onAppearance={vi.fn()} onModeChange={vi.fn()} onPolicyPatch={vi.fn()} onReadOnly={vi.fn()} onKillSwitch={vi.fn()} onGroupToggle={vi.fn()} />,
     )));
+    expect(container.textContent).toContain("What Muze can do");
+    expect(container.textContent).toContain("Read pages");
+    expect(container.textContent).toContain("Use bookmarks");
+    expect(container.textContent).not.toContain("136");
+    expect(container.textContent).not.toContain("Per-tool");
+    expect(container.textContent).not.toContain("overrides");
+  });
+});
 
-    expect(container.textContent).toContain("blocked");
-    const switches = queryAllByRole("switch");
-    await click(switches[1]);
-    expect(onToggle).toHaveBeenCalledWith("downloads.start", true);
+describe("ActivityPage end-user only", () => {
+  it("shows approvals without tool names or risk labels, and activity without tool names", () => {
+    const approvals = [{
+      id: "a1", tool: "downloads.start", title: "Start a download",
+      summary: "Writes muze-report.pdf to your downloads folder", risk: "consequential",
+      client: { id: "c1", name: "Claude", transport: "remote" },
+      createdAt: Date.now(), expiresAt: Date.now() + 60_000,
+    }];
+    const audit: AuditEvent[] = [{
+      id: "e1", kind: "tool.call", tool: "tabs.list", decision: "allowed",
+      client: { id: "c1", name: "Claude", transport: "remote" }, at: new Date().toISOString(),
+    } as unknown as AuditEvent];
+    const { container } = (getQueries(mount(
+      <ActivityPage approvals={approvals as never} audit={audit} auditLoading={false} busy={false} onRespond={vi.fn()} onCancelForClient={vi.fn()} onRefreshAudit={vi.fn()} />,
+    )));
+    expect(container.textContent).toContain("Start a download");
+    expect(container.textContent).toContain("Claude");
+    expect(container.textContent).toContain("Agent acted");
+    expect(container.textContent).toContain("Allowed");
+    expect(container.textContent).not.toContain("downloads.start");
+    expect(container.textContent).not.toContain("tabs.list");
+    expect(container.textContent).not.toContain("consequential");
   });
 });

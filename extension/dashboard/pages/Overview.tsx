@@ -1,43 +1,44 @@
 import { useEffect, useState } from "preact/hooks";
 import type { BrowsersDashboard, DashboardState } from "../../src/messages.js";
-import type { Appearance, TabId } from "../logic.js";
+import type { TabId } from "../logic.js";
 import { sendRequest, setupChecklist, setupRemaining } from "../logic.js";
 import { browserCounts } from "../browsers-logic.js";
+import { homeNextAction } from "../ui-logic.js";
 import { Icon } from "../components/Icon.js";
-import { Badge, Button, Card, Chip, EmptyState, Segmented, Switch } from "../components/primitives.js";
+import { Button, EmptyState, Switch } from "../components/primitives.js";
+import { Field, ListRow, Page, Section } from "../components/layout.js";
 
 export interface OverviewPageProps {
   state: DashboardState;
   busy: boolean;
-  appearance: Appearance;
-  onAppearance: (value: Appearance) => void;
   onGatewayToggle: (enabled: boolean) => void;
   onSignIn: () => void;
   onReconnect: () => void;
-  onRotateToken: () => void;
   onSignOut: () => void;
   onOpenWizard: () => void;
   onNavigate: (tab: TabId) => void;
 }
 
-function Metric({ value, label, tone }: { value: string; label: string; tone?: string }): preact.JSX.Element {
+function Metric({ value, label, tone }: { value: string; label: string; tone?: "ok" | "warn" | "bad" }): preact.JSX.Element {
   return (
-    <div class={"metric" + (tone ? ` metric--${tone}` : "")}>
-      <span class="metric-value">{value}</span>
-      <span class="metric-label">{label}</span>
+    <div class={"ui-metric" + (tone ? ` ui-metric--${tone}` : "")}>
+      <span class="ui-metric-value">{value}</span>
+      <span class="ui-metric-label">{label}</span>
     </div>
   );
 }
 
+/**
+ * Home: status strip plus exactly one next action. Setup, appearance,
+ * privacy and connect instructions live on their own pages/sections,
+ * not here. No tool counts, no developer fields, no token controls.
+ */
 export function OverviewPage({
   state,
   busy,
-  appearance,
-  onAppearance,
   onGatewayToggle,
   onSignIn,
   onReconnect,
-  onRotateToken,
   onSignOut,
   onOpenWizard,
   onNavigate,
@@ -65,201 +66,143 @@ export function OverviewPage({
     connectedClients: snapshot.connectedClients,
     onboardingStep: onboarding.step,
   });
-  const rotateToken = (): void => {
-    const ok = confirm("Rotate the device token? The current token stops working and this browser reconnects with a new one.");
-    if (ok) {
-      onRotateToken();
-    }
-  };
+  const next = homeNextAction({
+    signedIn: gateway.signedIn,
+    setupRemaining: remaining,
+    pendingApprovals: snapshot.pendingApprovals,
+  });
 
   const signOut = (): void => {
     const ok = confirm("Sign out? This browser will be unlinked from your Muze account and the gateway connection will stop.");
     if (ok) onSignOut();
   };
 
-  return (
-    <div class="stack">
-      {remaining > 0 ? (
-        <Card title="Finish setup" icon="clock" description={`${remaining} step${remaining === 1 ? "" : "s"} left`}>
-          <ul class="checklist">
-            {checklist.map((item) => (
-              <li key={item.id} class={item.done ? "is-done" : ""}>
-                <span class="checklist-mark" aria-hidden="true">
-                  <Icon name={item.done ? "check" : "close"} size={12} strokeWidth={2.6} />
-                </span>
-                <span>{item.label}</span>
-                <span class="sr-only">{item.done ? "done" : "not done"}</span>
-              </li>
-            ))}
-          </ul>
-          <Button variant="primary" icon="arrow-right" disabled={busy} onClick={onOpenWizard}>
-            Resume setup
-          </Button>
-        </Card>
-      ) : null}
+  const nextAction =
+    next === "sign-in" ? (
+      <Button variant="primary" icon="link" disabled={busy} onClick={onSignIn}>
+        Sign in / Create account
+      </Button>
+    ) : next === "setup" ? (
+      <Button variant="primary" icon="arrow-right" disabled={busy} onClick={onOpenWizard}>
+        Resume setup
+      </Button>
+    ) : next === "approvals" ? (
+      <Button variant="primary" icon="alert" disabled={busy} onClick={() => onNavigate("activity")}>
+        Review requests
+      </Button>
+    ) : (
+      <Button variant="primary" icon="arrow-right" disabled={busy} onClick={() => onNavigate("browsers")}>
+        Manage browsers
+      </Button>
+    );
 
-      <Card title="Status">
-        <div class="metrics">
+  return (
+    <Page
+      title="Home"
+      subtitle={gateway.signedIn ? gateway.email || "Signed in" : "Not signed in"}
+      action={nextAction}
+    >
+      <Section title="Status">
+        <div class="ui-metrics">
           <Metric
-            value={snapshot.bridgeStatus === "connected" ? "Live" : "Off"}
+            value={snapshot.bridgeStatus === "connected" ? "Connected" : "Not connected"}
             label="Gateway"
             tone={snapshot.bridgeStatus === "connected" ? "ok" : "bad"}
           />
-          <Metric value={String(snapshot.connectedClients)} label="Clients" />
-          <Metric value={`${snapshot.allowedTools.length}/${snapshot.toolCount}`} label="Tools allowed" />
+          <Metric
+            value={counts ? `${counts.connected} of ${counts.attached}` : "—"}
+            label="Browsers connected"
+          />
+          <Metric value={String(snapshot.connectedClients)} label="Apps connected" />
           <Metric
             value={String(snapshot.pendingApprovals)}
-            label="Approvals"
+            label="Requests waiting"
             tone={snapshot.pendingApprovals > 0 ? "warn" : undefined}
           />
         </div>
-
-        {gateway.signedIn && counts ? (
-          <div class="metrics">
-            <Metric value={`${counts.connected}/${counts.attached}`} label="Browsers connected" />
-            <Metric value={String(counts.liveClients)} label="MCP clients live" />
-            <Metric value={counts.defaultName ?? "—"} label="Default browser" />
-            <Metric
-              value={String(snapshot.pendingApprovals)}
-              label="Pending approvals"
-              tone={snapshot.pendingApprovals > 0 ? "warn" : undefined}
-            />
-          </div>
-        ) : null}
-        {gateway.signedIn && counts ? (
-          <div class="row-between">
-            <div class="connection">
-              <span class="status-dot" aria-hidden="true" />
-              <span>
-                {counts.attached === 0
-                  ? "No browsers attached yet"
-                  : `${counts.attached} browser${counts.attached === 1 ? "" : "s"} attached, default: ${counts.defaultName ?? "—"}`}
-              </span>
-            </div>
-            <Button variant="ghost" size="sm" icon="arrow-right" onClick={() => onNavigate("browsers")}>
-              Manage browsers
+        <div class="ui-row-inline">
+          <span class={"status-dot " + (snapshot.bridgeStatus === "connected" ? "is-on" : "")} aria-hidden="true" />
+          <span>
+            {snapshot.bridgeStatus === "connected"
+              ? "Connected to the gateway"
+              : gateway.authRequired
+                ? "Sign in again to reconnect"
+                : "Gateway link is down"}
+          </span>
+          {gateway.authRequired ? (
+            <Button variant="primary" size="sm" icon="link" disabled={busy} onClick={onSignIn}>
+              Sign in again
             </Button>
-          </div>
-        ) : null}
-
-        <div class="row-between">
-          <div class="connection">
-            <span class={"status-dot " + (snapshot.bridgeStatus === "connected" ? "is-on" : "")} aria-hidden="true" />
-            <span>
-              {snapshot.bridgeStatus === "connected"
-                ? "Connected to the gateway"
-                : gateway.authRequired
-                  ? "Sign in again to reconnect"
-                  : "Gateway link is down"}
-            </span>
-          </div>
-          <div class="row-inline">
-            {gateway.authRequired ? (
-              <Button variant="primary" size="sm" icon="link" disabled={busy} onClick={onSignIn}>
-                Sign in again
-              </Button>
-            ) : snapshot.bridgeStatus === "disconnected" && gateway.enabled ? (
-              <Button variant="secondary" size="sm" icon="refresh" disabled={busy} onClick={onReconnect}>
-                Reconnect
-              </Button>
-            ) : null}
-            <Switch checked={gateway.enabled} disabled={busy} onToggle={onGatewayToggle} label="Bridge" />
-          </div>
+          ) : snapshot.bridgeStatus === "disconnected" && gateway.enabled ? (
+            <Button variant="secondary" size="sm" icon="refresh" disabled={busy} onClick={onReconnect}>
+              Reconnect
+            </Button>
+          ) : null}
+          <Switch checked={gateway.enabled} disabled={busy} onToggle={onGatewayToggle} label="Browser connection" />
         </div>
-      </Card>
+      </Section>
 
-      {!gateway.signedIn ? (
-        <Card title="Connect your browser" description="Sign in to create the endpoint your AI client uses.">
-          <Button variant="primary" block icon="link" disabled={busy} onClick={onSignIn}>
-            Sign in / Create account
-          </Button>
-        </Card>
-      ) : (
+      {remaining > 0 ? (
+        <Section title="Finish setup" description={`${remaining} step${remaining === 1 ? "" : "s"} left`}>
+          <ul class="ui-checklist">
+            {checklist.map((item) => (
+              <li key={item.id} class={item.done ? "is-done" : ""}>
+                <span class="ui-checklist-mark" aria-hidden="true">
+                  <Icon name={item.done ? "check" : "close"} size={12} strokeWidth={2.6} />
+                </span>
+                <span>{item.label}</span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
+
+      {gateway.signedIn ? (
         <>
-          <Card
-            title="Endpoint"
-            actions={
-              <Switch checked={gateway.enabled} disabled={busy} onToggle={onGatewayToggle} label="Enabled" />
+          <Section
+            title="Connected apps"
+            description={clients.length ? `${clients.length} paired` : undefined}
+            action={
+              <Button variant="ghost" size="sm" icon="arrow-right" onClick={() => onNavigate("activity")}>
+                View activity
+              </Button>
             }
           >
-            <div class="credential">
-              <span class="credential-label">MCP URL</span>
-              <div class="credential-value">
-                <code>{gateway.mcpUrl}</code>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon="copy"
-                  ariaLabel="Copy MCP URL"
-                  disabled={busy}
-                  onClick={() => void navigator.clipboard.writeText(gateway.mcpUrl)}
-                />
-              </div>
-            </div>
-            <div class="row-inline">
-              <Button variant="secondary" size="sm" disabled={busy} onClick={rotateToken}>
-                Rotate device token
-              </Button>
+            {clients.length === 0 ? (
+              <EmptyState
+                icon="link"
+                title="No apps yet"
+                description="Add the connection below to your AI app and it will show up here."
+              />
+            ) : (
+              <ul class="ui-list">
+                {clients.map((client) => (
+                  <ListRow key={client.id} title={client.name} meta="Paired" />
+                ))}
+              </ul>
+            )}
+          </Section>
+
+          <Section title="Connect your AI app" description="Add this to your AI app, then approve it when it asks.">
+            <Field label="Connection" value={gateway.mcpUrl} copyable />
+          </Section>
+
+          <Section title="Your account">
+            <div class="ui-row-inline">
+              <span>Signed in as {gateway.email || "your account"}</span>
               <Button variant="ghost" size="sm" disabled={busy} onClick={signOut}>
                 Sign out
               </Button>
             </div>
-            <p class="hint">Add the MCP URL to your client, then sign in and authorise it — no token paste needed. {gateway.email}</p>
-          </Card>
-
-          <Card title="Connected clients" description={clients.length ? `${clients.length} paired` : undefined}>
-            {clients.length === 0 ? (
-              <EmptyState
-                icon="link"
-                title="No clients yet"
-                description="Add the endpoint to Claude or another MCP client and it will show up here."
-                action={
-                  <Button variant="secondary" size="sm" onClick={() => onNavigate("activity")}>
-                    View activity
-                  </Button>
-                }
-              />
-            ) : (
-              <ul class="client-list">
-                {clients.map((client) => (
-                  <li key={client.id}>
-                    <span class="client-name">{client.name}</span>
-                    <Badge tone="success">{client.transport}</Badge>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </Card>
+          </Section>
         </>
+      ) : (
+        <Section title="Connect your browser" description="Sign in to link this browser to your account.">
+          <Button variant="primary" block icon="link" disabled={busy} onClick={onSignIn}>
+            Sign in / Create account
+          </Button>
+        </Section>
       )}
-
-      <Card title="Appearance" description="Follows your system setting by default.">
-        <Segmented
-          ariaLabel="Appearance"
-          value={appearance}
-          options={[
-            { id: "system", label: "System" },
-            { id: "light", label: "Light" },
-            { id: "dark", label: "Dark" },
-          ]}
-          onChange={onAppearance}
-        />
-      </Card>
-
-      <Card title="Privacy" icon="lock" description="What Muze AI never touches.">
-        <ul class="privacy-list">
-          <li>Never reads cookies, saved passwords or browsing history unless an allowed tool asks for them.</li>
-          <li>Never reads localStorage, IndexedDB or other site storage.</li>
-          <li>Never sees request or response bodies — the observer keeps method, URL, status and timing only.</li>
-          <li>Never clears browsing data, cookies or cache on its own.</li>
-          <li>Runs locally: pages are read only when a tool call asks for them.</li>
-        </ul>
-        <div class="row-between">
-          <span class="hint">Full details in SECURITY.md.</span>
-          <Chip onClick={() => onNavigate("permissions")}>Review permissions</Chip>
-        </div>
-      </Card>
-
-    </div>
+    </Page>
   );
 }

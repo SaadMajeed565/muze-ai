@@ -266,22 +266,22 @@ describe("TasksPage", () => {
     expect(container.textContent!.indexOf("Fill the test form")).toBeLessThan(
       container.textContent!.indexOf("Research 10 pages and organise tabs"),
     );
-    expect(container.textContent).toContain("step 1 of 2");
+    expect(container.textContent).toContain("Step 1 of 2");
     expect(container.textContent).toContain("waiting on plan approval");
     // No step input ever renders, even though the fake record carries one.
     expect(container.textContent).not.toContain("hunter2");
     expect(container.textContent).not.toContain("secret.example");
 
-    const title = [...container.querySelectorAll("button")].find((b) => b.textContent === "Research 10 pages and organise tabs") ?? null;
+    const title = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Research 10 pages and organise tabs")) ?? null;
     expect(title).not.toBeNull();
     await act(() => {
       title!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(container.textContent).toContain("tabs.list");
     expect(container.textContent).toContain("3 tabs listed");
-    expect(container.textContent).toContain("Done: 0");
-    expect(container.textContent).toContain("Undone: 1");
+    expect(container.textContent).not.toContain("tabs.list");
+    expect(container.textContent).toContain("Step 1 of 2");
+    expect(container.textContent).toContain("read first page");
   });
 
   it("shows an empty state when no tasks exist", async () => {
@@ -290,12 +290,18 @@ describe("TasksPage", () => {
     await flush();
     await flush();
     expect(container.textContent).toContain("No tasks yet");
-    expect(container.textContent).toContain("tasks.create");
+    expect(container.textContent).toContain("Tasks created by your AI app will appear here as they run");
   });
 
   it("sends pause on Pause and confirms before Cancel", async () => {
     const container = mount();
     await flush();
+    await flush();
+    const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Research 10 pages and organise tabs")) ?? null;
+    expect(row).not.toBeNull();
+    await act(() => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
     const buttons = [...container.querySelectorAll("button")];
     // The newest task is paused, so its Pause button is disabled; take
@@ -422,7 +428,7 @@ describe("Phase D TasksPage push reload", () => {
     await flush();
     await flush();
     expect(listeners.length).toBe(1);
-    expect(root.textContent).toContain("Loop: running");
+    expect(root.textContent).toContain("Fill the test form");
 
     const baseline = sendMessage.mock.calls.length;
     listeners[0]!({ type: "muze/event" });
