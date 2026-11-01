@@ -2,9 +2,7 @@ import { useRef, useState } from "preact/hooks";
 import type { IconName } from "../logic.js";
 import { Icon } from "./Icon.js";
 
-/* "danger" was removed from ButtonVariant: no dashboard button used it
-   (danger styling lives on Badge/Callout tones, which are still used). */
-export type ButtonVariant = "primary" | "secondary" | "ghost";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 export type ButtonSize = "sm" | "md";
 
 export interface ButtonProps {
@@ -208,7 +206,7 @@ export function SearchInput({ value, placeholder, ariaLabel, onChange }: SearchI
     <div class="search-input">
       <Icon name="search" size={15} class="search-input-icon" />
       <input
-        type="search"
+        type="text"
         aria-label={ariaLabel}
         placeholder={placeholder}
         value={value}

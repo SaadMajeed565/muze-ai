@@ -11,6 +11,7 @@ import {
   type TaskView,
 } from "../src/task-dashboard.js";
 import { TasksPage } from "../dashboard/pages/Tasks.js";
+import { ConfirmProvider } from "../dashboard/components/feedback.js";
 
 /** A full TaskView, plus (deliberately) a raw step `input` the view must never carry. */
 function rawTask(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
@@ -219,7 +220,7 @@ describe("TasksPage", () => {
     root = document.createElement("div");
     document.body.appendChild(root);
     // No JSX here: this file is .ts (per the section spec), so mount via h().
-    render(h(TasksPage, { approvals: [] }), root);
+    render(h(ConfirmProvider, null, h(TasksPage, { approvals: [] })), root);
     return root;
   }
 
@@ -291,7 +292,6 @@ describe("TasksPage", () => {
     await flush();
     // v3: empty tasks = one muted line, not a tall illustrated state.
     expect(container.textContent).toContain("No tasks yet");
-    expect(container.textContent).toContain("Nothing waiting");
   });
 
   it("sends pause on Pause and confirms before Cancel", async () => {
@@ -314,21 +314,28 @@ describe("TasksPage", () => {
     await flush();
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "muze/tasks.pause" }));
 
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     const cancel = [...container.querySelectorAll("button")].find((b) => b.textContent === "Cancel" && !(b as HTMLButtonElement).disabled) ?? null;
     await act(() => {
       cancel!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
+    const keep = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Keep")) ?? null;
+    await act(() => {
+      keep!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "muze/tasks.cancel" }));
 
-    confirmSpy.mockReturnValue(true);
     await act(() => {
       cancel!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
+    const confirmCancel = [...container.querySelectorAll("button")].find((b) => b.textContent === "Cancel task") ?? null;
+    await act(() => {
+      confirmCancel!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "muze/tasks.cancel" }));
-    confirmSpy.mockRestore();
   });
 });
 
@@ -425,7 +432,7 @@ describe("Phase D TasksPage push reload", () => {
     });
     root = document.createElement("div");
     document.body.appendChild(root);
-    render(h(TasksPage, { approvals: [] }), root);
+    render(h(ConfirmProvider, null, h(TasksPage, { approvals: [] })), root);
     await flush();
     await flush();
     expect(listeners.length).toBe(1);

@@ -121,6 +121,7 @@ export type BridgeEvent =
   | { kind: "client.disconnected"; client: ClientIdentity }
   | { kind: "approval.pending"; approval: ApprovalRequestInfo }
   | { kind: "policy.changed" }
+  | { kind: "audit" }
   | { kind: "kill-switch"; engaged: boolean }
   | {
       kind: "task.progress";

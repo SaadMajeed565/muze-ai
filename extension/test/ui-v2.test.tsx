@@ -9,6 +9,7 @@ import { AuthPage } from "../dashboard/pages/Auth.js";
 import { ConnectionsPage } from "../dashboard/pages/Connections.js";
 import { AddAppSheet, MenuButton, PauseControl } from "../dashboard/components/shared.js";
 import { HomePage } from "../dashboard/pages/Home.js";
+import { ConfirmProvider } from "../dashboard/components/feedback.js";
 import { AccountPage } from "../dashboard/pages/Account.js";
 import { NAV_TABS } from "../dashboard/ui-logic.js";
 import type { DashboardState } from "../src/messages.js";
@@ -71,6 +72,7 @@ function stubBrowsers(): void {
       sendMessage: vi.fn(async (request: { type?: string }) => {
         if (request.type === "muze/browsers/list") return { ok: true, browsers };
         if (request.type === "muze/tasks.list") return { ok: true, tasks: [] };
+        if (request.type === "muze/audit") return { ok: true, audit: [] };
         return { ok: false, error: "unknown" };
       }),
     },
@@ -103,14 +105,14 @@ describe("AuthPage (v2 in-extension sign-in, unchanged in v3)", () => {
 
     await setInput(email, "a@example.com");
     await setInput(password, "correct horse battery staple");
-    const submit = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Sign in");
+    const submit = container.querySelector('button[type="submit"]') as HTMLButtonElement;
     expect(submit).toBeTruthy();
     await act(async () => {
       submit!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onSubmit).toHaveBeenCalledWith("sign-in", "a@example.com", "correct horse battery staple");
 
-    const toggle = Array.from(container.querySelectorAll("button")).find((b) => /Create one/.test(b.textContent ?? ""));
+    const toggle = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Create account");
     expect(toggle).toBeTruthy();
     await act(() => {
       toggle!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -123,7 +125,7 @@ describe("AuthPage (v2 in-extension sign-in, unchanged in v3)", () => {
     const container = mount(<AuthPage busy={false} error="Wrong email or password." onSubmit={onSubmit} />);
     expect(container.textContent).toContain("Wrong email or password.");
     expect(container.textContent).not.toContain("401");
-    const submit = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Sign in");
+    const submit = container.querySelector('button[type="submit"]') as HTMLButtonElement;
     await act(async () => {
       submit!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -141,7 +143,7 @@ describe("ConnectionsPage browsers/apps separation (v3)", () => {
 
   it("never lists apps in browser rows; apps dedupe by name; no ids, tokens, or Unknown render", async () => {
     stubBrowsers();
-    const container = mount(<Wrapper />);
+    const container = mount(<ConfirmProvider><Wrapper /></ConfirmProvider>);
     await flush();
     expect(container.textContent).toContain("Laptop Chrome");
     expect(container.textContent).toContain("Work Chrome");
@@ -168,25 +170,24 @@ describe("ConnectionsPage browsers/apps separation (v3)", () => {
     // menu is closed; opening the menu then Revoke shows the red
     // confirmation button with the all-authorisations wording.
     expect(container.textContent).not.toContain("Revoke");
-    const menuButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "…");
+    const menuButton = Array.from(container.querySelectorAll("button")).find((b) => (b.getAttribute("aria-label") ?? "").startsWith("Actions for"));
     expect(menuButton).toBeTruthy();
     await act(async () => {
       menuButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    const revoke = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Revoke");
+    const revoke = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Revoke access");
     expect(revoke).toBeTruthy();
-    expect(revoke!.className).not.toContain("row-action-danger");
     await act(async () => {
       revoke!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(container.textContent).toContain("All authorisations for this app are revoked");
-    const confirm = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Revoke" && b.className.includes("row-action-danger"));
+    const confirm = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Revoke access" && b.className.includes("btn--danger"));
     expect(confirm).toBeTruthy();
   });
 
   it("renders the connection URL only inside AddAppSheet", async () => {
     stubBrowsers();
-    const container = mount(<Wrapper />);
+    const container = mount(<ConfirmProvider><Wrapper /></ConfirmProvider>);
     await flush();
     expect(container.textContent).not.toContain("https://gw.example.com/mcp");
     const appsTab = Array.from(container.querySelectorAll("button")).find((b) => (b.textContent ?? "").startsWith("Apps ("));
@@ -260,10 +261,12 @@ describe("HomePage (v3)", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const onKillSwitch = vi.fn();
     const container = mount(
-      <HomePage
-        state={state()} busy={false} approvals={[]} onReconnect={vi.fn()} onOpenWizard={vi.fn()}
-        onNavigate={vi.fn()} onRespond={vi.fn()} onCancelForClient={vi.fn()} onKillSwitch={onKillSwitch}
-      />,
+      <ConfirmProvider>
+        <HomePage
+          state={state()} busy={false} approvals={[]} onReconnect={vi.fn()} onOpenWizard={vi.fn()}
+          onNavigate={vi.fn()} onRespond={vi.fn()} onCancelForClient={vi.fn()} onKillSwitch={onKillSwitch}
+        />
+      </ConfirmProvider>,
     );
     await flush();
     const text = container.textContent ?? "";
@@ -278,14 +281,18 @@ describe("HomePage (v3)", () => {
     expect(text).toContain("Online");
     expect(text).toContain("3 tabs");
     expect(text).toContain("Nothing running.");
-    expect(text).toContain("Free plan");
-    expect(text).toContain("2 of 10 browsers");
     expect(text).not.toContain("Upgrade");
     const pause = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Pause");
     expect(pause).toBeTruthy();
     await act(async () => {
       pause!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
+    await flush();
+    const confirmStop = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Stop activity");
+    await act(async () => {
+      confirmStop!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
     expect(onKillSwitch).toHaveBeenCalledWith(true);
   });
 });
@@ -308,8 +315,9 @@ describe("AccountPage (v3)", () => {
     expect(text).not.toContain("Upgrade");
     expect(text).not.toContain("Security");
     expect(text).not.toContain("Notifications");
-    expect(text).toContain("Delete account");
-    expect(text).toContain("Sign out");
+    expect(text).toContain("Profile");
+    expect(text).not.toContain("Sign out");
+    expect(text).not.toContain("Delete account");
   });
 });
 

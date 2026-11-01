@@ -2,48 +2,75 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type { AuditEvent, PermissionMode, PolicyConfig } from "../libs/security/index.js";
 import type { DashboardState } from "../src/messages.js";
 import type { Appearance, TabId } from "./logic.js";
-import { APPEARANCE_KEY, LEGACY_APPEARANCE_KEY, readAppearance, sendRequest } from "./logic.js";
+import { APPEARANCE_KEY, LEGACY_APPEARANCE_KEY, readAppearance, sendRequest, TABS } from "./logic.js";
+import { plainGroupName as groupLabel } from "./ui-logic.js";
+import { AppBar, BottomNav } from "./components/AppShell.js";
 import { Icon } from "./components/Icon.js";
-import { Button, Callout, Card, Skeleton } from "./components/primitives.js";
-import { Nav } from "./Nav.js";
+import { Button, Callout, Skeleton } from "./components/primitives.js";
+import { EmptyLine } from "./components/layout.js";
+import { ApprovalCard, Sheet } from "./components/shared.js";
+import { showToast } from "./components/feedback.js";
 import { Onboarding } from "./Onboarding.js";
 import { AuthPage, type AuthMode } from "./pages/Auth.js";
 import { FilesPage } from "./pages/Files.js";
 import { HomePage } from "./pages/Home.js";
 import { ConnectionsPage } from "./pages/Connections.js";
-import { AccountPage } from "./pages/Account.js";
+import { AccountPage, accountDetailTitle, type AccountDetail } from "./pages/Account.js";
 import { TasksPage } from "./pages/Tasks.js";
 
 const POLL_MS = 5000;
 
+const TAB_TITLES: Record<TabId, string> = {
+  home: "Home",
+  tasks: "Tasks",
+  connections: "Connect",
+  files: "Files",
+  account: "Me",
+};
+
+const TAB_SUBTITLES: Record<TabId, string> = {
+  home: "Your browser, your rules.",
+  tasks: "What your AI app is doing, newest first.",
+  connections: "Browsers and AI apps on your account.",
+  files: "Files stay on this device.",
+  account: "Your account and this browser.",
+};
+
+interface Route {
+  tab: TabId;
+  detail: string | null;
+}
+
 function LoadingScreen({ error }: { error: string | null }): preact.JSX.Element {
   if (error) {
     return (
-      <div class="app app--centered">
+      <div class="boot-screen">
         <div class="brand">
-          <Icon name="logo" size={26} class="brand-mark" />
+          <Icon name="logo" size={30} class="brand-mark" />
           <span class="brand-name">Muze AI</span>
         </div>
-        <Card title="Could not open the dashboard" icon="alert">
+        <div class="boot-card">
+          <h1>Could not open the dashboard</h1>
           <p class="lede">{error}</p>
           <Button variant="primary" icon="refresh" onClick={() => location.reload()}>
             Try again
           </Button>
-        </Card>
+        </div>
       </div>
     );
   }
 
   return (
-    <div class="app app--centered" aria-busy="true">
+    <div class="boot-screen" aria-busy="true">
       <div class="brand">
-        <Icon name="logo" size={26} class="brand-mark" />
+        <Icon name="logo" size={30} class="brand-mark" />
         <span class="brand-name">Muze AI</span>
       </div>
       <div class="skeleton-list">
-        <Skeleton width="70%" />
+        <Skeleton width="52%" />
         <Skeleton width="100%" />
         <Skeleton width="88%" />
+        <Skeleton width="72%" />
       </div>
       <span class="sr-only">Loading</span>
     </div>
@@ -56,16 +83,20 @@ export function App(): preact.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busyCount = useRef(0);
-  const [tab, setTab] = useState<TabId>("home");
+  const [route, setRoute] = useState<Route>({ tab: "home", detail: null });
   const [connectionsSegment, setConnectionsSegment] = useState<"browsers" | "apps">("browsers");
   const [audit, setAudit] = useState<AuditEvent[] | null>(null);
   const [auditLoading, setAuditLoading] = useState(false);
   const [appearance, setAppearance] = useState<Appearance>("system");
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
+  const [approvalsOpen, setApprovalsOpen] = useState(false);
 
   const initialised = useRef(false);
   const content = useRef<HTMLElement>(null);
+  const scrollPositions = useRef<Record<string, number>>({});
+  const currentKey = `${route.tab}:${route.detail ?? "root"}`;
+  const keyRef = useRef(currentKey);
 
   const refresh = useCallback(async (): Promise<void> => {
     const response = await sendRequest({ type: "muze/state" });
@@ -115,11 +146,11 @@ export function App(): preact.JSX.Element {
     void chrome.storage.local
       .get([APPEARANCE_KEY, LEGACY_APPEARANCE_KEY])
       .then((stored) => {
-        const value = stored[APPEARANCE_KEY] ?? stored[LEGACY_APPEARANCE_KEY];
-        setAppearance(readAppearance(value));
+        const value = readAppearance(stored[APPEARANCE_KEY] ?? stored[LEGACY_APPEARANCE_KEY]);
+        setAppearance(value);
         if (stored[APPEARANCE_KEY] === undefined && stored[LEGACY_APPEARANCE_KEY] !== undefined) {
           void chrome.storage.local
-            .set({ [APPEARANCE_KEY]: stored[APPEARANCE_KEY] })
+            .set({ [APPEARANCE_KEY]: value })
             .then(() => chrome.storage.local.remove([LEGACY_APPEARANCE_KEY]).catch(() => undefined))
             .catch(() => undefined);
         }
@@ -134,13 +165,20 @@ export function App(): preact.JSX.Element {
   useEffect(() => {
     if (!state || initialised.current) return;
     initialised.current = true;
-    // The v2 wizard is compact (permission level + connect an AI app)
-    // and only ever shows when signed in; the auth screen covers the
-    // signed-out case. Start it at step 1 regardless of the persisted
-    // step from the old four-step wizard.
     setWizardStep(1);
     if (!state.onboarding.completed) setWizardOpen(true);
   }, [state]);
+
+  useEffect(() => {
+    const previous = keyRef.current;
+    if (previous === currentKey) return;
+    scrollPositions.current[previous] = window.scrollY;
+    keyRef.current = currentKey;
+    requestAnimationFrame(() => {
+      content.current?.focus({ preventScroll: true });
+      window.scrollTo(0, scrollPositions.current[currentKey] ?? 0);
+    });
+  }, [currentKey]);
 
   const loadAudit = useCallback(async (): Promise<void> => {
     setAuditLoading(true);
@@ -151,10 +189,10 @@ export function App(): preact.JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (tab === "tasks") void loadAudit();
-  }, [tab, loadAudit, state?.snapshot.auditEvents]);
+    if (route.tab === "tasks") void loadAudit();
+  }, [route.tab, loadAudit, state?.snapshot.auditEvents]);
 
-  const request = async (message: unknown): Promise<boolean> => {
+  const request = async (message: unknown, success?: string): Promise<boolean> => {
     busyCount.current += 1;
     setBusy(true);
     setError(null);
@@ -165,11 +203,16 @@ export function App(): preact.JSX.Element {
         return false;
       }
       if (response.state) setState(response.state);
+      if (success) showToast(success);
       return true;
     } finally {
       busyCount.current = Math.max(0, busyCount.current - 1);
       setBusy(busyCount.current > 0);
     }
+  };
+
+  const run = (message: unknown, success?: string): void => {
+    void request(message, success);
   };
 
   const changeAppearance = (next: Appearance): void => {
@@ -178,12 +221,24 @@ export function App(): preact.JSX.Element {
   };
 
   const goToTab = (next: TabId): void => {
-    setTab(next);
-    requestAnimationFrame(() => content.current?.focus());
+    setApprovalsOpen(false);
+    setRoute({ tab: next, detail: null });
+  };
+
+  const openTask = (taskId: string): void => {
+    setRoute({ tab: "tasks", detail: taskId });
+  };
+
+  const openAccountDetail = (detail: AccountDetail | null): void => {
+    setRoute({ tab: "account", detail });
+  };
+
+  const goBack = (): void => {
+    setRoute((current) => ({ tab: current.tab, detail: null }));
   };
 
   const openWizard = (): void => {
-    setWizardStep(state?.onboarding.step ?? 1);
+    setWizardStep(1);
     setError(null);
     setWizardOpen(true);
   };
@@ -194,13 +249,12 @@ export function App(): preact.JSX.Element {
   };
 
   const setStep = (step: number): void => {
-    // Compact wizard steps are local only; only completion is persisted.
-    setWizardStep(step);
+    setWizardStep(Math.min(2, Math.max(1, step)));
   };
 
   const finishWizard = async (): Promise<void> => {
-    const ok = await request({ type: "muze/onboarding/set", patch: { completed: true, step: 4 } });
-    if (ok) closeWizard(4);
+    const ok = await request({ type: "muze/onboarding/set", patch: { completed: true, step: 2 } }, "Setup complete");
+    if (ok) closeWizard(2);
   };
 
   const submitAuth = async (mode: AuthMode, email: string, password: string): Promise<boolean> => {
@@ -217,15 +271,11 @@ export function App(): preact.JSX.Element {
   };
 
   const respond = (approvalId: string, approved: boolean): void => {
-    void request({ type: "muze/approval/respond", approvalId, approved });
+    run({ type: "muze/approval/respond", approvalId, approved }, approved ? "Request approved" : "Request denied");
   };
 
   if (!state) return <LoadingScreen error={loadError} />;
 
-  // Signed out (or the stored token was rejected): the auth screen
-  // replaces the dashboard entirely. There is no separate "not
-  // connected" dashboard state; Home handles the disconnected case
-  // inline once signed in.
   if (!state.gateway.signedIn || state.gateway.authRequired) {
     return <AuthPage busy={busy} error={error} onSubmit={submitAuth} />;
   }
@@ -233,18 +283,14 @@ export function App(): preact.JSX.Element {
   if (wizardOpen) {
     return (
       <Onboarding
-        compact
         step={wizardStep}
         busy={busy}
         error={error}
         mode={state.snapshot.mode}
-        signedIn={state.gateway.signedIn}
-        email={state.gateway.email}
         mcpUrl={state.gateway.mcpUrl}
         connectedClients={state.snapshot.connectedClients}
         onStep={setStep}
-        onModeChange={(mode: PermissionMode) => void request({ type: "muze/policy/mode", mode })}
-        onSignIn={() => undefined}
+        onModeChange={(mode: PermissionMode) => run({ type: "muze/policy/mode", mode }, "Permission level updated")}
         onFinish={() => void finishWizard()}
         onSkip={() => void skipWizard()}
       />
@@ -252,89 +298,104 @@ export function App(): preact.JSX.Element {
   }
 
   const { snapshot, approvals } = state;
+  const tab = route.tab;
+  const detailTitle = tab === "account" ? accountDetailTitle(route.detail as AccountDetail | null) : null;
+  const title = route.detail ? (detailTitle ?? (tab === "tasks" ? "Task" : TAB_TITLES[tab])) : TAB_TITLES[tab];
 
   return (
-    <div class="app" data-tab={tab}>
-      <Nav
-        active={tab}
-        onChange={goToTab}
-        status={snapshot.bridgeStatus}
+    <div class="app-shell" data-tab={tab}>
+      <AppBar
+        title={title}
+        subtitle={route.detail ? undefined : TAB_SUBTITLES[tab]}
+        icon={TABS.find((entry) => entry.id === tab)?.icon}
+        connected={snapshot.bridgeStatus === "connected"}
         clients={snapshot.connectedClients}
-        pending={snapshot.pendingApprovals}
+        pending={approvals.length}
+        onApprovals={() => setApprovalsOpen(true)}
+        onBack={route.detail ? goBack : undefined}
       />
 
-      <div class="shell">
-        {/* Slim 48px topbar with brand only, on the options page
-            (wide) only; the side panel (narrow) has no in-app brand
-            row and no email pill — see styles.css .topbar. */}
-        <header class="topbar">
-          <span class="brand">
-            <Icon name="logo" size={20} class="brand-mark" />
-            <span class="brand-name">Muze AI</span>
-          </span>
-        </header>
-
-        <div class="page">
+      <main class="app-main" ref={content} tabIndex={-1} aria-label={title}>
+        <div class="app-content">
           {error ? (
             <div class="notice">
               <Callout tone="danger">{error}</Callout>
               <button type="button" class="notice-close" aria-label="Dismiss" onClick={() => setError(null)}>
-                <Icon name="close" size={14} />
+                <Icon name="close" size={15} />
               </button>
             </div>
           ) : null}
 
-          <main class="content" ref={content} tabIndex={-1} aria-label={tab}>
-            {tab === "home" ? (
-              <HomePage
-                state={state}
-                busy={busy}
-                approvals={approvals}
-                onReconnect={() => void request({ type: "muze/bridge/reconnect" })}
-                onOpenWizard={openWizard}
-                onNavigate={goToTab}
-                onRespond={respond}
-                onCancelForClient={(clientId) => void request({ type: "muze/approvals/cancel-for-client", clientId })}
-                onKillSwitch={(engaged) => void request({ type: "muze/killswitch", engaged })}
-              />
-            ) : null}
+          {tab === "home" ? (
+            <HomePage
+              state={state}
+              busy={busy}
+              approvals={approvals}
+              onReconnect={() => run({ type: "muze/bridge/reconnect" }, "Reconnecting")}
+              onOpenWizard={openWizard}
+              onNavigate={goToTab}
+              onOpenTask={openTask}
+              onRespond={respond}
+              onCancelForClient={(clientId) => run({ type: "muze/approvals/cancel-for-client", clientId }, "Waiting requests cancelled")}
+              onKillSwitch={(engaged) => run({ type: "muze/killswitch", engaged }, engaged ? "All activity stopped" : "Activity resumed")}
+            />
+          ) : null}
 
-            {tab === "connections" ? (
-              <ConnectionsPage state={state} busy={busy} segment={connectionsSegment} onSegment={setConnectionsSegment} onNavigate={goToTab} />
-            ) : null}
+          {tab === "connections" ? (
+            <ConnectionsPage state={state} busy={busy} segment={connectionsSegment} onSegment={setConnectionsSegment} onNavigate={goToTab} />
+          ) : null}
 
-            {tab === "files" ? <FilesPage /> : null}
+          {tab === "files" ? <FilesPage /> : null}
 
-            {tab === "tasks" ? (
-              <TasksPage
-                approvals={approvals}
-                audit={audit}
-                auditLoading={auditLoading}
-                busy={busy}
-                onRespond={respond}
-                onCancelForClient={(clientId) => void request({ type: "muze/approvals/cancel-for-client", clientId })}
-                onRefreshAudit={() => void loadAudit()}
-              />
-            ) : null}
+          {tab === "tasks" ? (
+            <TasksPage
+              approvals={approvals}
+              audit={audit}
+              auditLoading={auditLoading}
+              busy={busy}
+              onRespond={respond}
+              onCancelForClient={(clientId) => run({ type: "muze/approvals/cancel-for-client", clientId })}
+              onRefreshAudit={() => void loadAudit()}
+              selectedId={route.detail}
+              onSelectTask={(taskId) => setRoute({ tab: "tasks", detail: taskId })}
+            />
+          ) : null}
 
-            {tab === "account" ? (
-              <AccountPage
-                state={state}
-                busy={busy}
-                appearance={appearance}
-                onAppearance={changeAppearance}
-                onModeChange={(mode) => void request({ type: "muze/policy/mode", mode })}
-                onPolicyPatch={(patch: Partial<PolicyConfig>) => void request({ type: "muze/policy/update", patch })}
-                onReadOnly={(enabled) => void request({ type: "muze/policy/readonly", enabled })}
-                onKillSwitch={(engaged) => void request({ type: "muze/killswitch", engaged })}
-                onGroupToggle={(group, enabled) => void request({ type: "muze/policy/group", group, enabled })}
-                onSignOut={() => void request({ type: "muze/gateway/sign-out" })}
-                onDeleteAccount={() => void request({ type: "muze/gateway/delete-account" })}
-              />
-            ) : null}
-          </main>
+          {tab === "account" ? (
+            <AccountPage
+              state={state}
+              busy={busy}
+              appearance={appearance}
+              onAppearance={changeAppearance}
+              onModeChange={(mode) => run({ type: "muze/policy/mode", mode }, "Permission level updated")}
+              onPolicyPatch={(patch: Partial<PolicyConfig>) => run({ type: "muze/policy/update", patch }, "Settings saved")}
+              onReadOnly={(enabled) => run({ type: "muze/policy/readonly", enabled }, enabled ? "Read-only mode on" : "Read-only mode off")}
+              onKillSwitch={(engaged) => run({ type: "muze/killswitch", engaged }, engaged ? "All activity stopped" : "Activity resumed")}
+              onGroupToggle={(group, enabled) =>
+                run({ type: "muze/policy/group", group, enabled }, `${groupLabel(group)} ${enabled ? "on" : "off"}`)
+              }
+              onSignOut={() => run({ type: "muze/gateway/sign-out" }, "Signed out")}
+              onDeleteAccount={() => run({ type: "muze/gateway/delete-account" }, "Account deleted")}
+              detail={route.detail as AccountDetail | null}
+              onOpen={openAccountDetail}
+            />
+          ) : null}
         </div>
-      </div>
+      </main>
+
+      <BottomNav active={tab} onChange={goToTab} pending={approvals.length} />
+
+      <Sheet open={approvalsOpen} label="Waiting for you" onClose={() => setApprovalsOpen(false)}>
+        {approvals.length === 0 ? (
+          <EmptyLine text="Nothing waiting right now." />
+        ) : (
+          <div class="approval-list">
+            {approvals.map((approval) => (
+              <ApprovalCard key={approval.id} approval={approval} appName="AI app" busy={busy} onRespond={respond} />
+            ))}
+          </div>
+        )}
+      </Sheet>
     </div>
   );
 }

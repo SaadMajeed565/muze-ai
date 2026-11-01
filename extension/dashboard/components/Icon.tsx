@@ -1,7 +1,5 @@
 import type { IconName } from "../logic.js";
 
-/* Partial: "logo" has no SVG path — Icon renders it as an <img> below, so
-   the old logo path in this map was dead code and has been removed. */
 const PATHS: Partial<Record<IconName, preact.ComponentChildren>> = {
   home: <path d="M3.5 10.7 12 3.5l8.5 7.2V20a1 1 0 0 1-1 1h-4.8v-6.2H9.3V21H4.5a1 1 0 0 1-1-1z" />,
   shield: (
@@ -58,6 +56,13 @@ const PATHS: Partial<Record<IconName, preact.ComponentChildren>> = {
       <path d="M12 4.2 21 20H3z" />
       <path d="M12 10v4.2" />
       <path d="M12 17.2h.01" />
+    </>
+  ),
+  info: (
+    <>
+      <circle cx="12" cy="12" r="8.7" />
+      <path d="M12 11v5" />
+      <path d="M12 7.8h.01" />
     </>
   ),
   "arrow-left": (
@@ -131,6 +136,156 @@ const PATHS: Partial<Record<IconName, preact.ComponentChildren>> = {
       <path d="M13.4 3.6v5.1h5.2" />
     </>
   ),
+  image: (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.2" />
+      <circle cx="9" cy="9.5" r="1.5" />
+      <path d="M4.5 17l4.8-4.8 3.1 3.1 2.4-2.4 4.7 4.6" />
+    </>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  trash: (
+    <>
+      <path d="M4.5 7h15" />
+      <path d="M9.5 3.8h5" />
+      <path d="M6.8 7l.8 13h8.8l.8-13" />
+      <path d="M10 10.5v6M14 10.5v6" />
+    </>
+  ),
+  pencil: (
+    <>
+      <path d="M4 20l4.3-1 10.4-10.4a2.2 2.2 0 0 0-3.1-3.1L5.2 15.9z" />
+      <path d="M14.3 7.2l3.1 3.1" />
+    </>
+  ),
+  more: (
+    <>
+      <circle cx="5.5" cy="12" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="18.5" cy="12" r="1.2" fill="currentColor" stroke="none" />
+    </>
+  ),
+  browser: (
+    <>
+      <rect x="3" y="4.5" width="18" height="15" rx="2.4" />
+      <path d="M3.5 9h17" />
+      <path d="M6.2 6.7h.01M8.7 6.7h.01M11.2 6.7h.01" />
+    </>
+  ),
+  app: (
+    <>
+      <rect x="4" y="4" width="7" height="7" rx="2" />
+      <rect x="13" y="4" width="7" height="7" rx="2" />
+      <rect x="4" y="13" width="7" height="7" rx="2" />
+      <path d="M16.5 13.4v6.2M13.4 16.5h6.2" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M12 16V4.5" />
+      <path d="M7.5 9 12 4.5 16.5 9" />
+      <path d="M4.5 16v3.5h15V16" />
+    </>
+  ),
+  plug: (
+    <>
+      <path d="M9 3.5v5M15 3.5v5" />
+      <path d="M6 8.5h12v3.2a6 6 0 0 1-12 0z" />
+      <path d="M12 17.7v3" />
+    </>
+  ),
+  logout: (
+    <>
+      <path d="M14 4.5H6.2A1.7 1.7 0 0 0 4.5 6.2v11.6a1.7 1.7 0 0 0 1.7 1.7H14" />
+      <path d="M17 8.5l3.5 3.5L17 15.5" />
+      <path d="M20.5 12H10" />
+    </>
+  ),
+  help: (
+    <>
+      <circle cx="12" cy="12" r="8.7" />
+      <path d="M9.6 9.2a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.2 1-1.2 1.9" />
+      <path d="M12 16.7h.01" />
+    </>
+  ),
+  pause: (
+    <>
+      <rect x="7" y="5" width="3.4" height="14" rx="1.2" />
+      <rect x="13.6" y="5" width="3.4" height="14" rx="1.2" />
+    </>
+  ),
+  play: <path d="M8 5.5v13l10-6.5z" />,
+  read: (
+    <>
+      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z" />
+      <circle cx="12" cy="12" r="2.6" />
+    </>
+  ),
+  navigate: (
+    <>
+      <path d="M12 3.5l7.5 17-7.5-3.5-7.5 3.5z" />
+    </>
+  ),
+  click: (
+    <>
+      <path d="M5 4l7.5 18 2.2-7.3L22 12.5z" />
+      <path d="M5 4l5.2 5.2" />
+    </>
+  ),
+  type: (
+    <>
+      <rect x="3.5" y="5" width="17" height="14" rx="2" />
+      <path d="M7 9h3M7 12h5M7 15h2M14 9h3M14 12h3M14 15h3" />
+    </>
+  ),
+  tab: (
+    <>
+      <rect x="3" y="6" width="18" height="12" rx="2" />
+      <path d="M3 10h18" />
+      <path d="M7 6V4.5h6V6" />
+    </>
+  ),
+  download: (
+    <>
+      <path d="M12 4v12" />
+      <path d="M7.5 11.5L12 16l4.5-4.5" />
+      <path d="M4.5 20h15" />
+    </>
+  ),
+  clipboard: (
+    <>
+      <rect x="6" y="4" width="12" height="16" rx="2" />
+      <path d="M9 4.5h6v2H9z" />
+      <path d="M9 10h6M9 13h6M9 16h4" />
+    </>
+  ),
+  history: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 1.8" />
+    </>
+  ),
+  bookmark: (
+    <>
+      <path d="M6 4h12v16l-6-4-6 4z" />
+    </>
+  ),
+  form: (
+    <>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <path d="M7 8h10M7 11h10M7 14h6" />
+      <path d="M15 14l2 2 3-3" />
+    </>
+  ),
+  organize: (
+    <>
+      <rect x="4" y="4" width="6" height="6" rx="1.4" />
+      <rect x="14" y="4" width="6" height="6" rx="1.4" />
+      <rect x="4" y="14" width="6" height="6" rx="1.4" />
+      <rect x="14" y="14" width="6" height="6" rx="1.4" />
+    </>
+  ),
+  activity: <path d="M3 12h4l2.5-7 4 14 2.5-7h5" />,
 };
 
 export interface IconProps {
@@ -144,15 +299,24 @@ export interface IconProps {
 export function Icon({ name, size = 16, class: className, strokeWidth = 1.7 }: IconProps): preact.JSX.Element {
   if (name === "logo") {
     return (
-      <img
-        src="icons/icon128.png"
-        alt=""
-        aria-hidden="true"
+      <svg
         class={"icon icon-logo" + (className ? ` ${className}` : "")}
         width={size}
         height={size}
-        style={{ display: "block", borderRadius: "20%" }}
-      />
+        viewBox="0 0 24 24"
+        fill="none"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <defs>
+          <linearGradient id="muze-logo-gradient" x1="4" y1="3" x2="20" y2="21" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#9b8cff" />
+            <stop offset="1" stop-color="#5b4bdb" />
+          </linearGradient>
+        </defs>
+        <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="url(#muze-logo-gradient)" />
+        <path d="M7.2 16.8V8.4l4.8 4.6 4.8-4.6v8.4" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
     );
   }
   return (

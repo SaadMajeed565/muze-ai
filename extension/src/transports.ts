@@ -61,6 +61,12 @@ export class GatewaySocketTransport implements BridgeTransport {
 
   connect(): void {
     if (this.disposed) return;
+    // Do nothing while the network is down; scheduleReconnect arranges
+    // for a retry the moment the browser comes back online.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      this.scheduleReconnect();
+      return;
+    }
     // Never stack sockets: skip if one is already live or still connecting.
     if (this.socket && (this.socket.readyState === WebSocket.CONNECTING || this.socket.readyState === WebSocket.OPEN)) {
       return;

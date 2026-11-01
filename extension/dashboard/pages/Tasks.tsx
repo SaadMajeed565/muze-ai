@@ -1,22 +1,24 @@
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { sanitizeTaskView, type TaskStatus, type TaskView } from "../../src/task-dashboard.js";
 import type { BrowsersDashboard } from "../../src/messages.js";
-import type { ApprovalRequestInfo, ClientIdentity } from "../../libs/tool-contracts/index.js";
+import type { ApprovalRequestInfo } from "../../libs/tool-contracts/index.js";
 import type { AuditEvent } from "../../libs/security/index.js";
-import { formatCountdown, sendRequest } from "../logic.js";
+import { sendRequest } from "../logic.js";
 import {
-  activityRows,
+  activityIcon,
   plainFinalSummary,
   plainPauseReason,
   plainStep,
   plainTaskStatus,
-  resolveAppName,
   shortDate,
   stripToolTokens,
   truncateText,
 } from "../ui-logic.js";
-import { Button } from "../components/primitives.js";
-import { DetailBack, EmptyLine, ErrorState, ListRow, Page, Section, SectionSkeleton, useNarrow } from "../components/layout.js";
+import { Icon } from "../components/Icon.js";
+import { Button, SearchInput } from "../components/primitives.js";
+import { EmptyLine, ErrorState, ListRow, Page, Section, SectionSkeleton } from "../components/layout.js";
+import { showToast } from "../components/feedback.js";
+import { useConfirm } from "../components/confirm.js";
 
 const TASKS_POLL_MS = 5000;
 
@@ -57,16 +59,6 @@ function currentStep(task: TaskView): TaskView["steps"][number] | null {
   return task.steps.find((step) => step.state !== "done") ?? null;
 }
 
-function pendingByClient(approvals: ApprovalRequestInfo[]): Map<string, { client: ClientIdentity; approvals: ApprovalRequestInfo[] }> {
-  const groups = new Map<string, { client: ClientIdentity; approvals: ApprovalRequestInfo[] }>();
-  for (const approval of approvals) {
-    const existing = groups.get(approval.client.id);
-    if (existing) existing.approvals.push(approval);
-    else groups.set(approval.client.id, { client: approval.client, approvals: [approval] });
-  }
-  return groups;
-}
-
 function dayLabel(createdAt: number, now: number): string {
   const startOf = (ms: number): number => {
     const d = new Date(ms);
@@ -84,37 +76,41 @@ export interface TasksPageProps {
   audit?: AuditEvent[] | null;
   auditLoading?: boolean;
   busy?: boolean;
+  busyId?: string | null;
   onRespond?: (approvalId: string, approved: boolean) => void;
   onCancelForClient?: (clientId: string) => void;
   onRefreshAudit?: () => void;
+  selectedId?: string | null;
+  onSelectTask?: (taskId: string | null) => void;
 }
 
-
 /**
- * Tasks, re-skinned onto Page / Section / ListRow with a detail rail
- * on wide windows and a full-panel detail view with a back action on
- * narrow windows. Steps show number, status word and short summary
- * only — never a tool name, never a session id, never loop/mode
- * internals, never step-index lists. The browser line shows the
- * browser's name (resolved from the browsers list) or nothing at all.
+ * Tasks and Activity in one destination. Tasks is the default segment;
+ * Activity is the merged, plain-language audit feed. A task opens as a
+ * full-screen detail with the app bar back action. Approvals live on
+ * Home and in the app-bar pill, never here.
  */
 export function TasksPage({
-  approvals = [],
-  audit = null,
-  auditLoading = false,
+  audit: _audit = null,
+  auditLoading: _auditLoading = false,
   busy = false,
-  onRespond,
-  onCancelForClient,
-  onRefreshAudit,
+  onRefreshAudit: _onRefreshAudit,
+  selectedId: selectedIdProp,
+  onSelectTask,
 }: TasksPageProps): preact.JSX.Element {
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [localSelected, setLocalSelected] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [browsers, setBrowsers] = useState<BrowsersDashboard | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const narrow = useNarrow();
+  const [statusFilter, setStatusFilter] = useState<"all" | "running" | "completed">("all");
+  const confirm = useConfirm();
+
+  const selectedId = selectedIdProp !== undefined ? selectedIdProp : localSelected;
+  const select = onSelectTask ?? setLocalSelected;
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -143,7 +139,7 @@ export function TasksPage({
     const onEvent = (message: { type?: string }): void => {
       if (message?.type === "muze/event" || message?.type === "uabb/event") void load();
     };
-    const onMessage = chrome.runtime.onMessage;
+    const onMessage = typeof chrome === "undefined" ? undefined : chrome?.runtime?.onMessage;
     if (onMessage?.addListener) onMessage.addListener(onEvent);
     const timer = window.setInterval(() => void load(), TASKS_POLL_MS);
     return () => {
@@ -155,19 +151,33 @@ export function TasksPage({
 
   const act = async (task: TaskView, action: "pause" | "resume" | "cancel" | "approvePlan"): Promise<void> => {
     if (action === "cancel") {
-      const ok = confirm(`Cancel task "${task.goal}"? Its remaining steps will not run.`);
+      const ok = await confirm({
+        title: "Cancel this task?",
+        body: `“${task.goal || "Task"}” will stop and its remaining steps will not run.`,
+        confirmLabel: "Cancel task",
+        cancelLabel: "Keep running",
+        tone: "danger",
+      });
       if (!ok) return;
     }
     if (action === "approvePlan") {
-      const ok = confirm(
-        `Approve the plan for "${task.goal}"? Steps in the plan will run without asking again; steps outside it will pause and ask again. No purchases, payments, or external submits are approved.`,
-      );
+      const ok = await confirm({
+        title: "Approve this plan?",
+        body: "Steps in the plan will run without asking again. Steps outside it will still pause and ask. Purchases, payments, and external submits are never auto-approved.",
+        confirmLabel: "Approve plan",
+      });
       if (!ok) return;
     }
     setBusyId(task.id);
     setError(null);
     const response = await sendRequest({ type: `muze/tasks.${action}`, taskId: task.id });
-    if (!response.ok) setError(response.error ?? `Could not ${action} the task`);
+    if (!response.ok) {
+      setError(response.error ?? `Could not ${action} the task`);
+    } else {
+      showToast(
+        action === "pause" ? "Task paused" : action === "resume" ? "Task resumed" : action === "cancel" ? "Task cancelled" : "Plan approved",
+      );
+    }
     setBusyId(null);
     await load();
   };
@@ -175,271 +185,270 @@ export function TasksPage({
   const browserName = (sessionId: string): string | null =>
     browsers?.browsers.find((browser) => browser.sessionId === sessionId)?.name ?? null;
 
-  const detail = (task: TaskView): preact.JSX.Element => {
-    const busy = busyId === task.id;
-    const current = currentStep(task);
-    const pause = plainPauseReason(task.pauseReason);
-    const name = browserName(task.browserSessionId);
-    const steps = [...task.steps].sort((a, b) => a.index - b.index).map(plainStep);
+  const filtered = useMemo(() => {
+    const list = tasks ?? [];
+    const needle = query.trim().toLowerCase();
+    let result = needle ? list.filter((task) => (task.goal || "").toLowerCase().includes(needle)) : list;
+    if (statusFilter === "running") {
+      result = result.filter((task) => task.status === "running" || task.status === "created");
+    } else if (statusFilter === "completed") {
+      result = result.filter((task) => task.status === "done" || task.status === "failed" || task.status === "cancelled");
+    }
+    return result;
+  }, [tasks, query, statusFilter]);
+
+  const selected = tasks?.find((task) => task.id === selectedId) ?? null;
+
+  if (selected) {
+    const taskBusy = busy || busyId === selected.id;
+    const current = currentStep(selected);
+    const pause = plainPauseReason(selected.pauseReason);
+    const name = browserName(selected.browserSessionId);
+    const steps = [...selected.steps].sort((a, b) => a.index - b.index).map(plainStep);
     return (
-      <div class="ui-detail">
-        <h2 class="ui-section-title">{task.goal || "Task"}</h2>
-        <p class="ui-row-meta">
-          {plainTaskStatus(task.status)} · Step {task.doneSteps.length} of {task.totalSteps}
-        </p>
-        {current ? <p class="ui-row-meta">Now: {plainStep(current).summary}</p> : null}
-        {pause && (task.status === "paused" || task.status === "waiting_approval") ? (
-          <p class="ui-row-meta">{pause}</p>
-        ) : null}
-        {name ? <p class="ui-row-meta">Browser: {name}</p> : null}
-        <div class="ui-row-inline">
-          <Button variant="secondary" size="sm" disabled={busy || !canApprovePlan(task.status)} onClick={() => void act(task, "approvePlan")}>
-            Approve plan
-          </Button>
-          <Button variant="secondary" size="sm" disabled={busy || !canPause(task.status)} onClick={() => void act(task, "pause")}>
-            Pause
-          </Button>
-          <Button variant="secondary" size="sm" disabled={busy || !canResume(task.status)} onClick={() => void act(task, "resume")}>
-            Resume
-          </Button>
-          <Button variant="secondary" size="sm" disabled={busy || isTerminal(task.status)} onClick={() => void act(task, "cancel")}>
-            Cancel
-          </Button>
-        </div>
-        {task.status === "waiting_approval" ? (
-          <p class="ui-row-meta">This task is waiting for your approval — answer it in the Waiting for you section.</p>
-        ) : null}
-        <h3 class="ui-detail-heading">Activity log</h3>
-        {steps.length === 0 ? (
-          <p class="ui-row-meta">No steps recorded yet.</p>
-        ) : (
-          <ul class="ui-list">
-            {steps.map((step) => (
-              <ListRow key={step.number} title={`Step ${step.number}`} meta={step.summary} status={step.state} statusTone={step.state === "Done" ? "ok" : step.state === "Didn't finish" ? "bad" : step.state === "Waiting for you" ? "warn" : "neutral"} />
-            ))}
-          </ul>
-        )}
-        {task.resultSummary ? (
-          <p class="ui-row-meta">{truncateText(stripToolTokens(task.resultSummary), 240)}</p>
-        ) : null}
-        {isFinal(task.status) ? (
-          <div>
-            <h3 class="ui-detail-heading">Final report</h3>
-            <p class="ui-row-meta">
-              {task.finalReport
-                ? plainFinalSummary(task.finalReport.done.length, task.finalReport.undone.length, task.finalReport.failed.length)
-                : plainFinalSummary(task.doneSteps.length, task.undoneSteps.length, task.steps.filter((s) => s.state === "failed").length)}
-            </p>
-            {task.finalReport && task.finalReport.compensations.length > 0 ? (
-              <ul class="ui-list">
-                {task.finalReport.compensations.map((line, i) => (
-                  <li class="ui-row" key={`comp-${i}`}>
-                    <p class="ui-row-meta">{truncateText(stripToolTokens(line), 200)}</p>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            {task.finalReport && task.finalReport.manualCleanup.length > 0 ? (
-              <ul class="ui-list">
-                {task.finalReport.manualCleanup.map((line, i) => (
-                  <li class="ui-row" key={`manual-${i}`}>
-                    <p class="ui-row-meta">Needs doing by hand: {truncateText(stripToolTokens(line), 200)}</p>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            {task.finalReport && task.finalReport.compensations.length === 0 && task.finalReport.manualCleanup.length === 0 ? (
-              <p class="ui-row-meta">No cleanup was needed.</p>
-            ) : null}
+      <div class="ui-page detail-page">
+        <header class="detail-head">
+          <span class="detail-eyebrow">Task</span>
+          <h1 class="detail-title">{selected.goal || "Task"}</h1>
+          <div class="detail-badges">
+            <span class={`status-chip status-chip--${statusTone(selected.status)}`}>{plainTaskStatus(selected.status)}</span>
+            <span class="detail-step-count">
+              Step {selected.doneSteps.length} of {selected.totalSteps}
+            </span>
           </div>
+        </header>
+
+        {current ? (
+          <div class="detail-now">
+            <span class="detail-now-dot" aria-hidden="true" />
+            <div>
+              <span class="detail-now-label">Now</span>
+              <p>{plainStep(current).summary}</p>
+            </div>
+          </div>
+        ) : null}
+        {pause && (selected.status === "paused" || selected.status === "waiting_approval") ? <p class="detail-note">{pause}</p> : null}
+        {name ? <p class="detail-note">Browser: {name}</p> : null}
+
+        <div class="detail-actions">
+          {canApprovePlan(selected.status) ? (
+            <Button variant="primary" size="sm" icon="check" disabled={taskBusy} onClick={() => void act(selected, "approvePlan")}>
+              Approve plan
+            </Button>
+          ) : null}
+          {canPause(selected.status) ? (
+            <Button variant="secondary" size="sm" icon="pause" disabled={taskBusy} onClick={() => void act(selected, "pause")}>
+              Pause
+            </Button>
+          ) : null}
+          {canResume(selected.status) ? (
+            <Button variant="secondary" size="sm" icon="play" disabled={taskBusy} onClick={() => void act(selected, "resume")}>
+              Resume
+            </Button>
+          ) : null}
+          {!isTerminal(selected.status) ? (
+            <Button variant="ghost" size="sm" icon="close" class="row-action-danger" disabled={taskBusy} onClick={() => void act(selected, "cancel")}>
+              Cancel
+            </Button>
+          ) : null}
+        </div>
+
+        <Section title="Activity log">
+          {steps.length === 0 ? (
+            <EmptyLine text="No steps recorded yet." />
+          ) : (
+            <ol class="timeline">
+              {steps.map((step) => (
+                <li class="timeline-item" key={step.number}>
+                  <span
+                    class={
+                      "timeline-dot" +
+                      (step.state === "Done" ? " is-done" : step.state === "Didn't finish" ? " is-bad" : step.state === "Waiting for you" ? " is-warn" : "")
+                    }
+                    aria-hidden="true"
+                  >
+                    {step.state === "Done" ? <Icon name="check" size={11} strokeWidth={2.8} /> : null}
+                  </span>
+                  <div class="timeline-copy">
+                    <span class="timeline-title">
+                      <span class="timeline-icon" aria-hidden="true">
+                        <Icon name={activityIcon(selected.steps.find((raw) => raw.index === step.number - 1)?.tool)} size={13} />
+                      </span>
+                      Step {step.number}
+                      <span class="timeline-state">{step.state}</span>
+                    </span>
+                    <p>{step.summary}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </Section>
+
+        {selected.resultSummary ? <p class="detail-note">{truncateText(stripToolTokens(selected.resultSummary), 240)}</p> : null}
+
+        {isFinal(selected.status) ? (
+          <Section title="Final report">
+            <p class="detail-note">
+              {selected.finalReport
+                ? plainFinalSummary(selected.finalReport.done.length, selected.finalReport.undone.length, selected.finalReport.failed.length)
+                : plainFinalSummary(
+                    selected.doneSteps.length,
+                    selected.undoneSteps.length,
+                    selected.steps.filter((step) => step.state === "failed").length,
+                  )}
+            </p>
+            {selected.finalReport?.compensations.length ? (
+              <ul class="detail-report-list">
+                {selected.finalReport.compensations.map((line, index) => (
+                  <li key={`comp-${index}`}>{truncateText(stripToolTokens(line), 200)}</li>
+                ))}
+              </ul>
+            ) : null}
+            {selected.finalReport?.manualCleanup.length ? (
+              <ul class="detail-report-list">
+                {selected.finalReport.manualCleanup.map((line, index) => (
+                  <li key={`manual-${index}`}>Needs doing by hand: {truncateText(stripToolTokens(line), 200)}</li>
+                ))}
+              </ul>
+            ) : null}
+            {selected.finalReport && selected.finalReport.compensations.length === 0 && selected.finalReport.manualCleanup.length === 0 ? (
+              <p class="detail-note">No cleanup was needed.</p>
+            ) : null}
+          </Section>
         ) : null}
       </div>
     );
-  };
+  }
 
-  // Running first, then history newest first, grouped by day, capped
-  // at ~10 rows with a "Show more" to reveal the rest. No scheduled
-  // or queued states are invented: only the runner's real statuses.
-  const list = (taskList: TaskView[]): preact.JSX.Element => {
-    const active = taskList.filter((task) => !isTerminal(task.status));
-    const history = taskList.filter((task) => isTerminal(task.status));
-    const ordered = [...active, ...history];
-    const shown = showAll ? ordered : ordered.slice(0, 10);
-    const groups = new Map<string, TaskView[]>();
-    for (const task of shown) {
-      const label = dayLabel(task.createdAt, now);
-      const bucket = groups.get(label);
-      if (bucket) bucket.push(task);
-      else groups.set(label, [task]);
-    }
-    const row = (task: TaskView): preact.JSX.Element => {
-      const current = currentStep(task);
-      const pause = plainPauseReason(task.pauseReason);
-      const meta = [
-        `Step ${task.doneSteps.length} of ${task.totalSteps}`,
-        current ? plainStep(current).summary : null,
-        current?.outsideBoundsReason ? truncateText(stripToolTokens(current.outsideBoundsReason), 160) : null,
-        pause && (task.status === "paused" || task.status === "waiting_approval") ? pause : null,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-      return (
-        <ListRow
-          key={task.id}
-          title={task.goal || "Task"}
-          meta={meta}
-          status={plainTaskStatus(task.status)}
-          statusTone={statusTone(task.status)}
-          onSelect={() => setSelectedId(task.id)}
-          selected={selectedId === task.id}
-        />
-      );
-    };
+  const list = (): preact.JSX.Element => {
+    if (tasks === null) return <SectionSkeleton />;
+    if (tasks.length === 0) return <EmptyLine text="No tasks yet." />;
+    const active = filtered.filter((task) => !isTerminal(task.status));
+    const history = filtered.filter((task) => isTerminal(task.status));
+    if (filtered.length === 0) return <EmptyLine text="No tasks match your search." />;
     return (
       <>
-        {[...groups.entries()].map(([label, group]) => (
-          <div key={label}>
-            <h3 class="ui-detail-heading">{label}</h3>
-            <ul class="ui-list">{group.map(row)}</ul>
+        {active.length > 0 ? (
+          <div class="task-group">
+            <h3 class="group-label">Active</h3>
+            <div class="task-list-active">
+              {active.map((task) => {
+                const taskBusy = busy || busyId === task.id;
+                return (
+                  <div key={task.id} class="task-card-active">
+                    <div class="task-card-header">
+                      <div class="task-card-source">
+                        <div class="task-card-source-icon"><Icon name="browser" size={14} /></div>
+                        <span>Chrome · {browserName(task.browserSessionId) ?? "Browser"}</span>
+                      </div>
+                      <span class={"task-status-pill is-" + task.status}>
+                        ● {plainTaskStatus(task.status)}
+                      </span>
+                    </div>
+                    <div class="task-card-title">{task.goal || "Task"}</div>
+                    {task.totalSteps > 0 ? (
+                      <div class="task-progress-row">
+                        <div class="task-progress-bar-wrap">
+                          <div class="task-progress-fill" style={{ width: `${Math.round((task.doneSteps.length / task.totalSteps) * 100)}%` }} />
+                        </div>
+                        <span class="task-progress-pct">{Math.round((task.doneSteps.length / task.totalSteps) * 100)}%</span>
+                      </div>
+                    ) : null}
+                    <div class="task-card-timer">
+                      <Icon name="clock" size={13} />
+                      Started: {new Date(task.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                    <div class="task-card-actions">
+                      {canPause(task.status) ? (
+                        <button type="button" class="task-action-btn" disabled={taskBusy} onClick={() => void act(task, "pause")}>⏸ Pause</button>
+                      ) : null}
+                      {canResume(task.status) ? (
+                        <button type="button" class="task-action-btn" disabled={taskBusy} onClick={() => void act(task, "resume")}>▶ Resume</button>
+                      ) : null}
+                      {!isTerminal(task.status) ? (
+                        <button type="button" class="task-action-btn is-danger" disabled={taskBusy} onClick={() => void act(task, "cancel")}>✕ Cancel</button>
+                      ) : null}
+                      <button type="button" class="task-action-btn is-icon" onClick={() => select(task.id)}>↓</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        ))}
-        {!showAll && ordered.length > 10 ? (
-          <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
-            Show more
-          </Button>
+        ) : null}
+
+        {history.length > 0 ? (
+          <div class="task-group">
+            <div class="group-label-row">
+              <h3 class="group-label">Recent Tasks</h3>
+              {!showAll && history.length > 5 ? (
+                <button type="button" class="view-all-link" onClick={() => setShowAll(true)}>View all →</button>
+              ) : null}
+            </div>
+            <ul class="ui-list">
+              {(showAll ? history : history.slice(0, 5)).map((task) => (
+                <div key={task.id} class="task-card-done" onClick={() => select(task.id)}>
+                  <div class="task-done-icon-wrap"><Icon name="browser" size={18} /></div>
+                  <div class="task-done-main">
+                    <div class="task-done-title">{task.goal || "Task"}</div>
+                    <div class="task-done-meta">{plainTaskStatus(task.status)} · {shortDate(task.createdAt) ?? "recently"}</div>
+                  </div>
+                  <div class="task-done-check"><Icon name="check" size={14} /></div>
+                </div>
+              ))}
+            </ul>
+          </div>
         ) : null}
       </>
     );
   };
 
-  const selected = tasks?.find((task) => task.id === selectedId) ?? null;
-  const approvalGroups = pendingByClient(approvals);
-  const multiClient = [...approvalGroups.values()].filter((group) => group.approvals.length > 1);
-
-  const waitingSection = (
-    <Section
-      title="Waiting for you"
-      description={
-        approvals.length > 0
-          ? `${approvals.length} request${approvals.length === 1 ? "" : "s"} pending. Each expires after two minutes.`
-          : "Requests appear here when an action needs your approval."
-      }
-    >
-      {approvals.length === 0 ? (
-        <EmptyLine text="Nothing waiting" />
-      ) : (
-        <ul class="ui-list">
-          {approvals.map((approval) => (
-            <ListRow
-              key={approval.id}
-              title={approval.title}
-              meta={`${truncateText(approval.summary, 160)} · ${resolveAppName(approval.client, browsers?.mcpClients ?? [])} · ${formatCountdown(approval.expiresAt, now)}`}
-              status="Waiting for you"
-              statusTone="warn"
-              actions={
-                onRespond ? (
-                  <>
-                    <Button variant="secondary" size="sm" disabled={busy} onClick={() => onRespond(approval.id, false)}>
-                      Deny
-                    </Button>
-                    <Button variant="primary" size="sm" icon="check" disabled={busy} onClick={() => onRespond(approval.id, true)}>
-                      Approve
-                    </Button>
-                  </>
-                ) : undefined
-              }
-            />
-          ))}
-        </ul>
-      )}
-      {multiClient.length > 0 && onCancelForClient ? (
-        <div class="ui-chip-row">
-          {multiClient.map((group) => (
-            <Button
-              key={group.client.id}
-              variant="ghost"
-              size="sm"
-              disabled={busy}
-              onClick={() => {
-                const ok = confirm(
-                  `Cancel all ${group.approvals.length} pending request${group.approvals.length === 1 ? "" : "s"} from ${resolveAppName(group.client, browsers?.mcpClients ?? [])}? The waiting actions will be denied.`,
-                );
-                if (ok) onCancelForClient(group.client.id);
-              }}
-            >
-              Cancel {group.approvals.length} from {resolveAppName(group.client, browsers?.mcpClients ?? [])}
-            </Button>
-          ))}
-        </div>
-      ) : null}
-    </Section>
-  );
-
-  const recentSection = (
-    <Section
-      title="Recent activity"
-      description="What happened recently, in plain words."
-      action={
-        onRefreshAudit ? (
-          <Button variant="ghost" size="sm" icon="refresh" disabled={auditLoading} onClick={onRefreshAudit}>
-            Refresh
-          </Button>
-        ) : undefined
-      }
-    >
-      {auditLoading && !audit ? (
-        <SectionSkeleton />
-      ) : !audit || audit.length === 0 ? (
-        <EmptyLine text="No activity yet" />
-      ) : (
-        <ul class="ui-list">
-          {activityRows(audit, browsers?.mcpClients ?? [], now).map((row) => (
-            <ListRow
-              key={row.id}
-              title={row.sentence}
-              meta={row.time ?? undefined}
-              status={row.state ?? undefined}
-              statusTone={row.state === "Denied" || row.state === "Failed" ? "bad" : "neutral"}
-            />
-          ))}
-        </ul>
-      )}
-    </Section>
-  );
-
-  if (narrow && selected) {
-    return (
-      <Page title="Tasks" subtitle="What your AI app is working on, newest first.">
-        <DetailBack onBack={() => setSelectedId(null)} />
-        {detail(selected)}
-      </Page>
-    );
-  }
-
   return (
-    <Page title="Tasks" subtitle="What your AI app is working on, newest first.">
-      {error ? <ErrorState message={error} /> : null}
-      {waitingSection}
-      {tasks === null ? (
-        <SectionSkeleton />
-      ) : tasks.length === 0 ? (
-        <EmptyLine text="No tasks yet" />
-      ) : (
-        <div class="ui-grid">
-          <Section title="Tasks" description="Tap a task to see its activity log.">
-            {list(tasks)}
-          </Section>
-          {selected ? (
-            <aside class="ui-rail" aria-label="Task detail">
-              <Button variant="ghost" size="sm" icon="close" ariaLabel="Close task detail" onClick={() => setSelectedId(null)}>
-                Close
-              </Button>
-              {detail(selected)}
-            </aside>
-          ) : null}
+    <Page title="Tasks" subtitle="What your AI app is doing, newest first.">
+      {/* Hero header */}
+      <div class="ui-page-hero">
+        <div class="ui-page-hero-icon">
+          <Icon name="clock" size={24} />
         </div>
-      )}
-      {recentSection}
+        <div class="ui-page-hero-content">
+          <h1 class="ui-page-hero-title">Tasks</h1>
+          <p class="ui-page-hero-subtitle">Monitor what your AI is doing.</p>
+        </div>
+        <div class="ui-page-hero-status">
+          <span class="status-pill is-online">
+            <span class="status-dot" />
+            <span class="status-pill-text">Live</span>
+          </span>
+        </div>
+      </div>
+
+      <div class="page-controls">
+        <div class="search-wrap" style={{ flex: 1 }}>
+          <SearchInput value={query} ariaLabel="Search tasks" placeholder="Search tasks..." onChange={setQuery} />
+        </div>
+      </div>
+
+      {/* Filter chips */}
+      <div class="filter-chips">
+        {(["all", "running", "completed"] as const).map((f) => {
+          const count =
+            f === "all"
+              ? (tasks?.length ?? 0)
+              : f === "running"
+                ? (tasks?.filter((t) => t.status === "running" || t.status === "created").length ?? 0)
+                : (tasks?.filter((t) => t.status === "done" || t.status === "failed" || t.status === "cancelled").length ?? 0);
+          return (
+            <button key={f} type="button" class={"filter-chip" + (statusFilter === f ? " is-active" : "")} onClick={() => setStatusFilter(f)}>
+              {f === "all" ? "All" : f === "running" ? "Running" : "Completed"} ({count})
+            </button>
+          );
+        })}
+      </div>
+
+      {error ? <ErrorState message={error} onRetry={() => void load()} /> : null}
+
+      {list()}
     </Page>
   );
 }

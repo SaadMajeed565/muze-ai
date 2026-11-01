@@ -4,7 +4,8 @@ import { render } from "preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Onboarding } from "../dashboard/Onboarding.js";
 import { PermissionLevelPicker } from "../dashboard/PermissionLevelPicker.js";
-import { Nav } from "../dashboard/Nav.js";
+import { BottomNav } from "../dashboard/components/AppShell.js";
+import { ConfirmProvider } from "../dashboard/components/feedback.js";
 import { PermissionsSections } from "../dashboard/components/permissions-sections.js";
 import { TasksPage } from "../dashboard/pages/Tasks.js";
 import type { DashboardState } from "../src/messages.js";
@@ -105,13 +106,17 @@ describe("Switch", () => {
 });
 
 describe("PermissionLevelPicker", () => {
+  function mountPicker(onChange: (mode: string) => void): HTMLElement {
+    return mount(
+      <ConfirmProvider>
+        <PermissionLevelPicker variant="cards" mode="default" onChange={onChange as never} />
+      </ConfirmProvider>,
+    );
+  }
+
   it("renders the three levels as radios and reports a change", async () => {
     const onChange = vi.fn();
-    // Unrestricted switching confirms first; accept it for this test.
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const { queryAllByRole, getByText } = (getQueries(mount(
-      <PermissionLevelPicker variant="cards" mode="default" onChange={onChange} />,
-    )));
+    const { container, queryAllByRole, getByText } = (getQueries(mountPicker(onChange)));
 
     const cards = queryAllByRole("radio");
     expect(cards).toHaveLength(3);
@@ -119,19 +124,18 @@ describe("PermissionLevelPicker", () => {
     expect(getByText("Balanced")).toBeTruthy();
 
     await click(cards[2]);
+    const accept = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Use Unrestricted");
+    await click(accept ?? null);
     expect(onChange).toHaveBeenCalledWith("unrestricted");
-    confirmSpy.mockRestore();
   });
 
   it("blocks the switch to Unrestricted when the confirmation is declined", async () => {
     const onChange = vi.fn();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const { queryAllByRole } = (getQueries(mount(
-      <PermissionLevelPicker variant="cards" mode="default" onChange={onChange} />,
-    )));
+    const { container, queryAllByRole } = (getQueries(mountPicker(onChange)));
     await click(queryAllByRole("radio")[2]);
+    const keep = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Keep it");
+    await click(keep ?? null);
     expect(onChange).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
   });
 });
 
@@ -140,53 +144,45 @@ describe("Onboarding", () => {
     busy: false,
     error: null,
     mode: "default" as const,
-    signedIn: false,
-    email: "",
     mcpUrl: "https://gateway.test/mcp",
     connectedClients: 0,
     onStep: vi.fn(),
     onModeChange: vi.fn(),
-    onSignIn: vi.fn(),
     onFinish: vi.fn(),
     onSkip: vi.fn(),
   };
 
-  it("opens on the welcome step and advances", async () => {
+  it("opens on the permission step and advances", async () => {
     const onStep = vi.fn();
     const { getByRole, getByText } = (getQueries(mount(<Onboarding {...base} step={1} onStep={onStep} />)));
 
-    expect(getByRole("heading").textContent).toContain("Your browser, under your control.");
-    expect(getByText("Your AI, working in your browser")).toBeTruthy();
+    expect(getByRole("heading").textContent).toContain("How far may the agent go?");
+    expect(getByText("Balanced")).toBeTruthy();
 
     await click(getByText("Continue"));
     expect(onStep).toHaveBeenCalledWith(2);
   });
 
-  it("reaches the credential step and shows no token at all", () => {
-    const { container, getByText, queryByText } = (getQueries(mount(<Onboarding {...base} step={4} signedIn email="a@b.c" />)));
+  it("reaches the connect step and shows no token at all", () => {
+    const { container, getByText, queryByText } = (getQueries(mount(<Onboarding {...base} step={2} />)));
 
-    expect(getByText("Point your AI client here.")).toBeTruthy();
+    expect(getByText("Point your AI app here.")).toBeTruthy();
     expect(getByText("Connection")).toBeTruthy();
     // No token credential, masked or otherwise, and no way to reveal one.
     expect(queryByText("Device token (advanced)")).toBeNull();
     expect([...container.querySelectorAll("button")].find((b) => b.textContent === "Reveal")).toBeUndefined();
     // The primary flow is sign-in authorisation, not a token paste.
-    expect(getByText("Sign in and authorise the app when it asks — the app is approved through your account, not by pasting a token.")).toBeTruthy();
+    expect(getByText("Sign in and authorise the app when it asks.")).toBeTruthy();
   });
 
   it("clamps an out-of-range persisted step in render instead of crashing", () => {
     const { getByRole } = (getQueries(mount(<Onboarding {...base} step={99} />)));
-    expect(getByRole("heading").textContent).toContain("Point your AI client here.");
-  });
-
-  it("asks for an account before showing credentials", () => {
-    const { getByText } = (getQueries(mount(<Onboarding {...base} step={4} />)));
-    expect(getByText("Connect an account first")).toBeTruthy();
+    expect(getByRole("heading").textContent).toContain("Point your AI app here.");
   });
 
   it("offers a skip path on every step", async () => {
     const onSkip = vi.fn();
-    const rootEl = mount(<Onboarding {...base} step={3} onSkip={onSkip} />);
+    const rootEl = mount(<Onboarding {...base} step={1} onSkip={onSkip} />);
     const buttons = Array.from(rootEl.querySelectorAll("button"));
     const skip = buttons.find((b) => /skip/i.test(b.textContent || ""));
     expect(skip).toBeTruthy();
@@ -195,23 +191,20 @@ describe("Onboarding", () => {
   });
 });
 
-describe("Nav", () => {
+describe("BottomNav", () => {
   it("has exactly five tabs and no Tools, Browsers, Safety, or Activity entry", () => {
     const { container } = (getQueries(mount(
-      <Nav active="home" onChange={vi.fn()} status="connected" clients={1} pending={2} />,
+      <BottomNav active="home" onChange={vi.fn()} pending={2} />,
     )));
     expect(container.textContent).toContain("Home");
     expect(container.textContent).toContain("Tasks");
-    expect(container.textContent).toContain("Connections");
+    expect(container.textContent).toContain("Connect");
     expect(container.textContent).toContain("Files");
-    expect(container.textContent).toContain("Account");
+    expect(container.textContent).toContain("Me");
     expect(container.textContent).not.toContain("Tools");
     expect(container.textContent).not.toContain("Safety");
-    // Rail (5 buttons) + tab bar (5 buttons) = 10, with the Tasks
-    // badge carrying its accessible label.
-    expect(container.querySelectorAll(".tabbar button, .rail-links button")).toHaveLength(10);
-    expect(container.textContent).toContain("This browser");
-    expect(container.querySelectorAll(".rail-group")).toHaveLength(2);
+    expect(container.querySelectorAll(".tabbar button")).toHaveLength(5);
+    expect(container.querySelector(".tabbar [aria-label=\"2 requests waiting\"]")?.textContent).toBe("2");
   });
 });
 
@@ -248,8 +241,8 @@ describe("PermissionsSections end-user only", () => {
   });
 });
 
-describe("TasksPage approvals and activity end-user only", () => {
-  it("shows approvals without tool names or risk labels, and activity without tool names", () => {
+describe("TasksPage activity only", () => {
+  it("keeps approvals off Tasks and shows plain activity without tool names", async () => {
     const approvals = [{
       id: "a1", tool: "downloads.start", title: "Start a download",
       summary: "Writes muze-report.pdf to your downloads folder", risk: "consequential",
@@ -263,15 +256,10 @@ describe("TasksPage approvals and activity end-user only", () => {
     const { container } = (getQueries(mount(
       <TasksPage approvals={approvals as never} audit={audit} auditLoading={false} busy={false} onRespond={vi.fn()} onCancelForClient={vi.fn()} onRefreshAudit={vi.fn()} />,
     )));
-    expect(container.textContent).toContain("Waiting for you");
-    expect(container.textContent).toContain("Start a download");
-    expect(container.textContent).toContain("Claude");
-    expect(container.textContent).toContain("Recent activity");
-    // Merged feed: one plain sentence, no tool name, no "Allowed" state word.
-    expect(container.textContent).toContain("Claude read a page.");
-    expect(container.textContent).not.toContain("Allowed");
-    expect(container.textContent).not.toContain("downloads.start");
-    expect(container.textContent).not.toContain("tabs.list");
-    expect(container.textContent).not.toContain("consequential");
+    // Approvals live on Home and the app-bar pill, never on Tasks.
+    expect(container.textContent).not.toContain("Waiting for you");
+    expect(container.textContent).not.toContain("Start a download");
+    // Activity is no longer a separate tab; task steps live in task detail.
+    expect(container.textContent).not.toContain("Activity");
   });
 });

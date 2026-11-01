@@ -4,16 +4,14 @@ import { browserOsName, browserStatus, canRemoveBrowser, shortDate, tabCountText
 import type { DedupedApp } from "../ui-logic.js";
 import { Badge, Button } from "./primitives.js";
 import { ListRow } from "./layout.js";
-import { MenuButton } from "./shared.js";
+import { ActionSheet, Sheet } from "./shared.js";
+import { useConfirm } from "./confirm.js";
 
 /**
- * Browser and app rows for Connections (v3). The separation rule is
- * enforced here, not just in the page: a browser row never lists apps,
- * and an app row carries only one "Uses: <browser name>" meta line.
- * No session ids, no scope strings, no tokens are ever rendered, and
- * unknown values are omitted — never "Unknown", never a guess.
+ * Browser and app rows for Connect. A browser row never lists apps, and
+ * an app row carries only one "Uses: <browser name>" meta line. No
+ * session ids, scopes, tokens, or unknown values are rendered.
  */
-
 export function BrowserRow({
   data,
   browser,
@@ -25,9 +23,9 @@ export function BrowserRow({
   busy: boolean;
   onAction: (request: Record<string, unknown>) => void;
 }): preact.JSX.Element {
-  const [renaming, setRenaming] = useState(false);
+  const [sheet, setSheet] = useState<"actions" | "rename" | null>(null);
   const [name, setName] = useState(browser.name);
-  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const confirm = useConfirm();
   const status = browserStatus(browser);
   const added = shortDate(browser.createdAt);
   const meta = [tabCountText(browser), browserOsName(browser) || null, added ? `added ${added}` : null]
@@ -37,107 +35,104 @@ export function BrowserRow({
   const saveRename = (): void => {
     const cleaned = name.trim();
     if (!cleaned || cleaned === browser.name) {
-      setRenaming(false);
+      setSheet(null);
       setName(browser.name);
       return;
     }
-    setRenaming(false);
+    setSheet(null);
     onAction({ type: "muze/browsers/rename", sessionId: browser.sessionId, name: cleaned });
   };
 
-  const menuItems = [
-    { label: "Rename", onSelect: () => setRenaming(true) },
-    ...(!browser.isDefault
-      ? [{ label: "Set as default", onSelect: () => onAction({ type: "muze/browsers/set-default", sessionId: browser.sessionId }) }]
-      : []),
-    ...(browser.connected
-      ? [{ label: "Disconnect", onSelect: () => onAction({ type: "muze/browsers/disconnect", sessionId: browser.sessionId }) }]
-      : []),
-    ...(canRemoveBrowser(data, browser.sessionId)
-      ? [{ label: "Remove", danger: true, onSelect: () => setConfirmingRemove(true) }]
-      : []),
-  ];
-
-  if (renaming) {
-    return (
-      <li class="ui-row">
-        <div class="ui-row-main">
-          <span class="ui-rename">
-            <input
-              type="text"
-              value={name}
-              disabled={busy}
-              aria-label="Browser name"
-              onInput={(event) => setName((event.target as HTMLInputElement).value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") saveRename();
-                if (event.key === "Escape") {
-                  setRenaming(false);
-                  setName(browser.name);
-                }
-              }}
-            />
-            <Button size="sm" variant="primary" disabled={busy} onClick={saveRename}>
-              Save
-            </Button>
-            <Button
-              size="sm"
-              disabled={busy}
-              onClick={() => {
-                setRenaming(false);
-                setName(browser.name);
-              }}
-            >
-              Cancel
-            </Button>
-          </span>
-        </div>
-      </li>
-    );
-  }
+  const remove = async (): Promise<void> => {
+    const ok = await confirm({
+      title: "Remove this browser?",
+      body: "It will be signed out and its sessions will close. Apps connected through it will be disconnected.",
+      confirmLabel: "Remove browser",
+      tone: "danger",
+    });
+    if (ok) onAction({ type: "muze/browsers/remove", sessionId: browser.sessionId });
+  };
 
   return (
-    <ListRow
-      compact
-      title={
-        <>
-          <strong>{browser.name}</strong>
-          {browser.isDefault ? <Badge tone="info">Default</Badge> : null}
-          {browser.isLocal ? <Badge tone="neutral">This browser</Badge> : null}
-        </>
-      }
-      meta={meta || undefined}
-      status={status}
-      statusTone={browser.connected ? "ok" : "neutral"}
-      menu={<MenuButton items={menuItems} ariaLabel={`Actions for ${browser.name}`} />}
-      actions={
-        confirmingRemove ? (
-          <span class="ui-confirm">
-            <span>Remove this browser? It will be signed out and its sessions close.</span>
-            <Button
-              size="sm"
-              class="row-action-danger"
-              disabled={busy}
-              onClick={() => onAction({ type: "muze/browsers/remove", sessionId: browser.sessionId })}
-            >
-              Remove
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => setConfirmingRemove(false)}>
-              Keep
-            </Button>
-          </span>
-        ) : undefined
-      }
-    />
+    <>
+      <ListRow
+        compact
+        icon="browser"
+        title={
+          <>
+            <strong>{browser.name}</strong>
+            {browser.isDefault ? <Badge tone="info">Default</Badge> : null}
+            {browser.isLocal ? <Badge tone="neutral">This browser</Badge> : null}
+          </>
+        }
+        meta={meta || undefined}
+        status={status}
+        statusTone={browser.connected ? "ok" : "neutral"}
+        menu={
+          <Button
+            variant="ghost"
+            size="sm"
+            icon="more"
+            ariaLabel={`Actions for ${browser.name}`}
+            disabled={busy}
+            onClick={() => setSheet("actions")}
+          />
+        }
+      />
+
+      <ActionSheet
+        open={sheet === "actions"}
+        title={browser.name}
+        onClose={() => setSheet(null)}
+        items={[
+          { label: "Rename", icon: "pencil", onSelect: () => setSheet("rename") },
+          ...(!browser.isDefault
+            ? [{ label: "Set as default", icon: "check" as const, onSelect: () => onAction({ type: "muze/browsers/set-default", sessionId: browser.sessionId }) }]
+            : []),
+          ...(browser.connected
+            ? [{ label: "Disconnect", icon: "plug" as const, onSelect: () => onAction({ type: "muze/browsers/disconnect", sessionId: browser.sessionId }) }]
+            : []),
+          ...(canRemoveBrowser(data, browser.sessionId)
+            ? [{ label: "Remove", icon: "trash" as const, danger: true, onSelect: () => void remove() }]
+            : []),
+        ]}
+      />
+
+      <Sheet open={sheet === "rename"} label="Rename browser" onClose={() => setSheet(null)}>
+        <label class="field-label" for={`rename-${browser.sessionId}`}>
+          Browser name
+          <input
+            id={`rename-${browser.sessionId}`}
+            class="text-input"
+            type="text"
+            value={name}
+            disabled={busy}
+            onInput={(event) => setName((event.target as HTMLInputElement).value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") saveRename();
+              if (event.key === "Escape") {
+                setSheet(null);
+                setName(browser.name);
+              }
+            }}
+          />
+        </label>
+        <div class="sheet-actions">
+          <Button variant="ghost" onClick={() => setSheet(null)}>
+            Cancel
+          </Button>
+          <Button variant="primary" disabled={busy} onClick={saveRename}>
+            Save
+          </Button>
+        </div>
+      </Sheet>
+    </>
   );
 }
 
 /**
  * One row per app NAME (deduped). Revoking revokes every underlying
- * authorisation for that name — the caller loops over every
- * clientId + sessionId in group.clients. The Revoke action itself is
- * a neutral ghost inside the "..." menu; red appears only on the
- * confirmation dialog's confirm button.
+ * authorisation for that name.
  */
 export function McpClientRow({
   group,
@@ -150,7 +145,8 @@ export function McpClientRow({
   busy: boolean;
   onRevokeAll: () => void;
 }): preact.JSX.Element {
-  const [confirming, setConfirming] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const confirm = useConfirm();
   const status = group.live ? "Connected" : "Not connected";
   const browserNames = [...new Set(group.clients.map((client) => browserName(client.sessionId)).filter((name): name is string => name !== null))];
   const liveSince = group.clients.filter((client) => client.live).map((client) => client.connectedSince).filter((v): v is number => v !== null);
@@ -164,29 +160,43 @@ export function McpClientRow({
   ]
     .filter(Boolean)
     .join(" · ");
+
+  const revoke = async (): Promise<void> => {
+    const ok = await confirm({
+      title: `Revoke ${group.name}?`,
+      body: "All authorisations for this app are revoked, the app is signed out, and its sessions close.",
+      confirmLabel: "Revoke access",
+      tone: "danger",
+    });
+    if (ok) onRevokeAll();
+  };
+
   return (
-    <ListRow
-      compact
-      title={<strong>{group.name}</strong>}
-      meta={meta || undefined}
-      status={status}
-      statusTone={group.live ? "ok" : "neutral"}
-      menu={<MenuButton items={[{ label: "Revoke", danger: false, onSelect: () => setConfirming(true) }]} ariaLabel={`Actions for ${group.name}`} />}
-      actions={
-        confirming ? (
-          <span class="ui-confirm">
-            <span>
-              Revoke {group.name}? All authorisations for this app are revoked, the app is signed out and its sessions close.
-            </span>
-            <Button size="sm" class="row-action-danger" disabled={busy} onClick={onRevokeAll}>
-              Revoke
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => setConfirming(false)}>
-              Keep
-            </Button>
-          </span>
-        ) : undefined
-      }
-    />
+    <>
+      <ListRow
+        compact
+        icon="app"
+        title={<strong>{group.name}</strong>}
+        meta={meta || undefined}
+        status={status}
+        statusTone={group.live ? "ok" : "neutral"}
+        menu={
+          <Button
+            variant="ghost"
+            size="sm"
+            icon="more"
+            ariaLabel={`Actions for ${group.name}`}
+            disabled={busy}
+            onClick={() => setActionsOpen(true)}
+          />
+        }
+      />
+      <ActionSheet
+        open={actionsOpen}
+        title={group.name}
+        onClose={() => setActionsOpen(false)}
+        items={[{ label: "Revoke access", icon: "logout", danger: true, onSelect: () => void revoke() }]}
+      />
+    </>
   );
 }

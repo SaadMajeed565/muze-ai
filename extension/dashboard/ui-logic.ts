@@ -1,7 +1,7 @@
 import type { PermissionMode } from "../libs/security/index.js";
 import type { AuditEvent } from "../libs/security/index.js";
 import type { DashboardMcpClient } from "../src/messages.js";
-import type { TabId } from "./logic.js";
+import type { IconName, TabId } from "./logic.js";
 
 /**
  * Pure presentation helpers for the end-user dashboard. Nothing here
@@ -18,23 +18,6 @@ import type { TabId } from "./logic.js";
  * inside Account. There is no sixth tab.
  */
 export const NAV_TABS: TabId[] = ["home", "tasks", "connections", "files", "account"];
-
-export function navGroupTabs(): TabId[] {
-  return [...NAV_TABS];
-}
-
-/** Wide-rail group headings (v3): "This browser" then "Account". */
-export interface NavRailGroup {
-  label: string;
-  tabs: TabId[];
-}
-
-export function navRailGroups(): NavRailGroup[] {
-  return [
-    { label: "This browser", tabs: ["home", "tasks", "files"] },
-    { label: "Account", tabs: ["connections", "account"] },
-  ];
-}
 
 /**
  * Short date, or null when the value is unknown. Unknown values are
@@ -220,11 +203,45 @@ export interface ActivityRow {
   sentence: string;
   actor: string;
   time: string | null;
+  icon: IconName;
   /** Only Denied / Failed are surfaced as a state word; "Allowed" and "Recorded" never render. */
   state: "Denied" | "Failed" | null;
 }
 
 /** One merged-feed row: one plain sentence, resolved actor, relative time, no tool name. */
+
+/** Map an audit event / tool to a plain action icon. Never exposes the tool name. */
+export function activityIcon(tool: string | undefined, kind?: string): IconName {
+  if (kind === "policy.change") return "sliders";
+  if (kind === "client.connect" || kind === "client.disconnect") return "plug";
+  if (kind === "approval") return "check";
+  if (kind === "kill-switch") return "power";
+  if (kind === "token.rotate") return "key";
+  if (!tool) return "activity";
+  const name = tool.toLowerCase();
+  if (
+    name === "tabs.list" ||
+    name === "page.snapshot" ||
+    name === "observe" ||
+    name === "dom.read" ||
+    name === "dom.find" ||
+    name.startsWith("page.read") ||
+    name.startsWith("dom.read")
+  ) return "read";
+  if (name === "tabs.navigate" || name === "tabs.create" || name.startsWith("page.navigate") || name === "tabs.go-back" || name === "tabs.go-forward" || name === "workflows.openSequence") return "navigate";
+  if (name === "dom.click" || name === "dom.clickAt" || name === "act") return "click";
+  if (name === "dom.type" || name === "dom.fill" || name === "dom.press" || name === "dom.clear" || name === "dom.select" || name === "dom.setChecked" || name === "dom.setRadio" || name === "forms.fill" || name === "form") return "type";
+  if (name === "downloads.start") return "download";
+  if (name === "clipboard.read" || name === "clipboard.write" || name.startsWith("clipboard.")) return "clipboard";
+  if (name === "history.delete" || name.startsWith("history.")) return "history";
+  if (name.startsWith("bookmarks.")) return "bookmark";
+  if (name === "dom.submit" || name === "forms.submit" || name === "forms.upload" || name === "forms.setFile" || name === "submit") return "upload";
+  if (name === "workflows.organizeTabs" || name.startsWith("tabs.") || name.startsWith("window.") || name.startsWith("tab.")) return "tab";
+  if (name === "workflows.saveSession") return "bookmark";
+  if (name === "workflows.restoreSession") return "navigate";
+  return "activity";
+}
+
 export function activityRows(
   events: readonly AuditEvent[],
   registeredClients: readonly { clientId: string; clientName: string }[],
@@ -252,7 +269,7 @@ export function activityRows(
     } else {
       sentence = `${plainActivityKind(event.kind)}.`;
     }
-    return { id: event.id, sentence, actor, time, state };
+    return { id: event.id, sentence, actor, time, icon: activityIcon(event.tool, event.kind), state };
   });
 }
 

@@ -25,6 +25,7 @@ export interface AuditLogOptions {
   maxEvents?: number;
   now?: () => number;
   idFactory?: () => string;
+  onRecord?: (event: AuditEvent) => void;
 }
 
 /**
@@ -36,12 +37,14 @@ export class AuditLog {
   private readonly maxEvents: number;
   private readonly now: () => number;
   private readonly idFactory: () => string;
+  private readonly onRecord?: (event: AuditEvent) => void;
   private counter = 0;
 
   constructor(options: AuditLogOptions = {}) {
     this.maxEvents = options.maxEvents ?? 500;
     this.now = options.now ?? (() => Date.now());
     this.idFactory = options.idFactory ?? (() => `audit_${(this.counter += 1)}`);
+    this.onRecord = options.onRecord;
   }
 
   /**
@@ -62,6 +65,7 @@ export class AuditLog {
     if (this.events.length > this.maxEvents) {
       this.events.splice(0, this.events.length - this.maxEvents);
     }
+    this.onRecord?.(full);
     return full;
   }
 

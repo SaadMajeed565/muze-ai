@@ -1,13 +1,10 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import type { ApprovalRequestInfo } from "../../libs/tool-contracts/index.js";
+import { formatCountdown } from "../logic.js";
 import { Button } from "./primitives.js";
 import { Field } from "./layout.js";
 import { Icon } from "./Icon.js";
-
-/**
- * Shared v3 components. All styling reuses existing styles.css tokens
- * only — no new colours, spacing, or radii. Status is always dot +
- * word, never colour alone.
- */
+import { useConfirm } from "./confirm.js";
 
 export interface MenuItem {
   label: string;
@@ -15,7 +12,7 @@ export interface MenuItem {
   onSelect: () => void;
 }
 
-/** Accessible "..." overflow menu: aria-haspopup, Escape closes, arrow keys move, focus returns to the button. */
+/** Accessible "..." overflow menu retained for compact desktop surfaces. */
 export function MenuButton({ items, ariaLabel = "More actions" }: { items: MenuItem[]; ariaLabel?: string }): preact.JSX.Element {
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
@@ -96,8 +93,9 @@ export interface SheetProps {
 }
 
 /**
- * Bottom sheet on narrow windows, centred panel on wide ones. Focus
- * trap inside, Escape closes, focus returns to the opener.
+ * Mobile bottom sheet. Focus-trapped, Escape closes, body scroll locks,
+ * focus returns to the opener, and the panel becomes a centred dialog on
+ * wide option pages.
  */
 export function Sheet({ open, label, onClose, children }: SheetProps): preact.JSX.Element | null {
   const panel = useRef<HTMLDivElement>(null);
@@ -106,12 +104,13 @@ export function Sheet({ open, label, onClose, children }: SheetProps): preact.JS
   useEffect(() => {
     if (!open) return;
     opener.current = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const focusables = (): HTMLElement[] =>
       Array.from(panel.current?.querySelectorAll<HTMLElement>("button, input, [tabindex]:not([tabindex='-1'])") ?? []).filter(
         (el) => !el.hasAttribute("disabled"),
       );
-    const first = focusables()[0];
-    first?.focus();
+    (focusables()[0] ?? panel.current)?.focus();
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -133,6 +132,7 @@ export function Sheet({ open, label, onClose, children }: SheetProps): preact.JS
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
       (opener.current as HTMLElement | null)?.focus?.();
     };
   }, [open, onClose]);
@@ -140,7 +140,8 @@ export function Sheet({ open, label, onClose, children }: SheetProps): preact.JS
   if (!open) return null;
   return (
     <div class="sheet-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div class="sheet" role="dialog" aria-modal="true" aria-label={label} ref={panel}>
+      <div class="sheet" role="dialog" aria-modal="true" aria-label={label} ref={panel} tabIndex={-1}>
+        <div class="sheet-grabber" aria-hidden="true" />
         <div class="sheet-head">
           <h2 class="sheet-title">{label}</h2>
           <Button variant="ghost" size="sm" icon="close" ariaLabel="Close" onClick={onClose} />
@@ -151,7 +152,50 @@ export function Sheet({ open, label, onClose, children }: SheetProps): preact.JS
   );
 }
 
-/** Count badge for a tab / rail item, with an accessible label. */
+export interface ActionSheetItem {
+  label: string;
+  icon?: "pencil" | "browser" | "plug" | "trash" | "check" | "logout";
+  danger?: boolean;
+  onSelect: () => void;
+}
+
+export function ActionSheet({
+  open,
+  title,
+  items,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  items: ActionSheetItem[];
+  onClose: () => void;
+}): preact.JSX.Element {
+  return (
+    <Sheet open={open} label={title} onClose={onClose}>
+      <div class="action-list">
+        {items.map((item) => (
+          <button
+            key={item.label}
+            type="button"
+            class={"action-item" + (item.danger ? " action-item--danger" : "")}
+            onClick={() => {
+              onClose();
+              item.onSelect();
+            }}
+          >
+            {item.icon ? <Icon name={item.icon} size={18} /> : null}
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </div>
+      <Button variant="secondary" block onClick={onClose}>
+        Cancel
+      </Button>
+    </Sheet>
+  );
+}
+
+/** Count badge for a tab, with an accessible label. */
 export function NavBadge({ count, label }: { count: number; label: string }): preact.JSX.Element {
   return (
     <span class="nav-badge" role="status" aria-label={`${count} ${label}`}>
@@ -161,11 +205,8 @@ export function NavBadge({ count, label }: { count: number; label: string }): pr
 }
 
 /**
- * Pause control, reused on Home and in Account > Permissions and
- * safety. It uses the existing kill-switch policy message and
- * semantics (confirm wording unchanged); it is never a bare "Off"
- * toggle. Active: a "Pause" button. Paused: an amber "Paused" word
- * plus a "Resume" button.
+ * Pause control, reused on Home and in Me > Permissions and safety. Every
+ * toggle is confirmed through the app's own sheet, never window.confirm.
  */
 export function PauseControl({
   paused,
@@ -176,12 +217,16 @@ export function PauseControl({
   busy?: boolean;
   onToggle: (engaged: boolean) => void;
 }): preact.JSX.Element {
-  const toggle = (engaged: boolean): void => {
-    const ok = confirm(
-      engaged
-        ? "Stop all agent activity? Nothing the agent asks for will run until you turn this off again."
-        : "Turn activity back on? The agent will be able to act again under the current permission level.",
-    );
+  const confirm = useConfirm();
+  const toggle = async (engaged: boolean): Promise<void> => {
+    const ok = await confirm({
+      title: engaged ? "Stop all activity?" : "Turn activity back on?",
+      body: engaged
+        ? "Nothing the agent asks for will run until you turn this back on."
+        : "The agent will be able to act again under your current permission level.",
+      confirmLabel: engaged ? "Stop activity" : "Resume",
+      tone: engaged ? "danger" : "primary",
+    });
     if (ok) onToggle(engaged);
   };
   if (paused) {
@@ -191,30 +236,29 @@ export function PauseControl({
           <span class="status-dot is-warn" aria-hidden="true" />
           <span>Paused</span>
         </span>
-        <Button variant="secondary" size="sm" disabled={busy} onClick={() => toggle(false)}>
+        <Button variant="secondary" size="sm" icon="play" disabled={busy} onClick={() => void toggle(false)}>
           Resume
         </Button>
       </span>
     );
   }
   return (
-    <Button variant="secondary" size="sm" disabled={busy} onClick={() => toggle(true)}>
+    <Button variant="secondary" size="sm" icon="pause" disabled={busy} onClick={() => void toggle(true)}>
       Pause
     </Button>
   );
 }
 
 /**
- * AddAppSheet: the ONLY place the connection URL renders (v3). Opened
- * from Home and from Connections > Apps. One plain instruction, the
- * URL as a field with Copy, and a Close action — nothing else.
+ * AddAppSheet: the ONLY place the connection URL renders. Opened from
+ * Home and from Connect > Apps.
  */
 export function AddAppSheet({ open, onClose, mcpUrl }: { open: boolean; onClose: () => void; mcpUrl: string }): preact.JSX.Element | null {
   return (
     <Sheet open={open} label="Add an app" onClose={onClose}>
       <p class="ui-row-meta">Add this to your AI app, then approve it when it asks.</p>
       <Field label="Connection" value={mcpUrl} copyable />
-      <Button variant="primary" onClick={onClose}>
+      <Button variant="primary" block onClick={onClose}>
         Close
       </Button>
     </Sheet>
@@ -223,20 +267,20 @@ export function AddAppSheet({ open, onClose, mcpUrl }: { open: boolean; onClose:
 
 export const BROWSER_CAP = 10;
 
-/**
- * Static plan card. Only "Free plan" and "N of 10 browsers" — no usage
- * numbers, no meter, no Upgrade button anywhere.
- */
+/** Static plan row. Only "Free plan" and "N of 10 browsers" — no Upgrade. */
 export function PlanCard({ browserCount, onSelect }: { browserCount: number; onSelect?: () => void }): preact.JSX.Element {
   const inner = (
     <>
+      <span class="plan-icon" aria-hidden="true">
+        <Icon name="shield" size={18} />
+      </span>
       <span class="plan-card-main">
         <span class="plan-card-plan">Free plan</span>
         <span class="plan-card-meta">
           {browserCount} of {BROWSER_CAP} browsers
         </span>
       </span>
-      {onSelect ? <Icon name="chevron-right" size={16} class="plan-card-chevron" /> : null}
+      {onSelect ? <Icon name="chevron-right" size={17} class="plan-card-chevron" /> : null}
     </>
   );
   if (onSelect) {
@@ -247,4 +291,47 @@ export function PlanCard({ browserCount, onSelect }: { browserCount: number; onS
     );
   }
   return <div class="plan-card">{inner}</div>;
+}
+
+/**
+ * One approval card, used on Home and in the app-bar approvals sheet.
+ * Expiry updates every second.
+ */
+export function ApprovalCard({
+  approval,
+  appName,
+  busy,
+  onRespond,
+}: {
+  approval: ApprovalRequestInfo;
+  appName: string;
+  busy?: boolean;
+  onRespond: (approvalId: string, approved: boolean) => void;
+}): preact.JSX.Element {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return (
+    <article class="approval-card">
+      <header class="approval-head">
+        <span class="approval-app">
+          <Icon name="plug" size={15} />
+          {appName}
+        </span>
+        <span class="approval-expiry">{formatCountdown(approval.expiresAt, now)}</span>
+      </header>
+      <h3 class="approval-title">{approval.title}</h3>
+      <p class="approval-summary">{approval.summary}</p>
+      <div class="approval-actions">
+        <Button variant="secondary" disabled={busy} onClick={() => onRespond(approval.id, false)}>
+          Deny
+        </Button>
+        <Button variant="primary" icon="check" disabled={busy} onClick={() => onRespond(approval.id, true)}>
+          Allow
+        </Button>
+      </div>
+    </article>
+  );
 }

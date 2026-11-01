@@ -16,6 +16,7 @@ import {
   type TaskView,
 } from "../src/task-dashboard.js";
 import { TasksPage } from "../dashboard/pages/Tasks.js";
+import { ConfirmProvider } from "../dashboard/components/feedback.js";
 
 function cancelledTask(): Record<string, unknown> {
   return {
@@ -124,7 +125,7 @@ describe("TasksPage Phase 2 rendering", () => {
   function mount(): HTMLElement {
     root = document.createElement("div");
     document.body.appendChild(root);
-    render(h(TasksPage, { approvals: [] }), root);
+    render(h(ConfirmProvider, null, h(TasksPage, { approvals: [] })), root);
     return root;
   }
 
@@ -175,7 +176,6 @@ describe("TasksPage Phase 2 rendering", () => {
       title!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(container.textContent).toContain("Approve plan");
     expect(container.textContent).toContain("1 step didn't finish");
     expect(container.textContent).not.toContain("browser_9");
     expect(container.textContent).toContain("Final report");
@@ -199,6 +199,13 @@ describe("TasksPage Phase 2 rendering", () => {
     expect(approve).not.toBeNull();
     await act(() => {
       approve!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    // click the sheet's confirm button (last matching)
+    const allApprove = [...container.querySelectorAll("button")].filter((b) => b.textContent === "Approve plan");
+    await act(() => {
+      allApprove[allApprove.length - 1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "muze/tasks.approvePlan" }));

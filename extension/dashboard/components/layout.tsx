@@ -1,12 +1,12 @@
-import { useEffect, useState } from "preact/hooks";
+import { useState } from "preact/hooks";
+import type { IconName } from "../logic.js";
 import { Button, Callout, Skeleton } from "./primitives.js";
 import { Icon } from "./Icon.js";
 
 /**
- * The dashboard's layout system: Page, Section, ListRow, Field, and
- * per-section states. Every page uses Page (which renders the page
- * title exactly once); no page builds its own header. Colours come
- * from styles.css tokens only; status is always dot + word.
+ * The dashboard's mobile layout system: Page, Section, ListRow, Field,
+ * and per-section states. Every page renders its title once; the app bar
+ * carries the destination name and back action.
  */
 
 export interface PageProps {
@@ -16,13 +16,12 @@ export interface PageProps {
   children?: preact.ComponentChildren;
 }
 
-export function Page({ title, subtitle, action, children }: PageProps): preact.JSX.Element {
+export function Page({ title: _title, subtitle: _subtitle, action, children }: PageProps): preact.JSX.Element {
   return (
     <div class="ui-page">
       <header class="ui-page-head">
-        <div>
-          <h1 class="ui-page-title">{title}</h1>
-          {subtitle ? <p class="ui-page-subtitle">{subtitle}</p> : null}
+        <div class="ui-page-heading">
+          {/* subtitle moved to app bar */}
         </div>
         {action ? <div class="ui-page-action">{action}</div> : null}
       </header>
@@ -42,7 +41,7 @@ export function Section({ title, description, action, children }: SectionProps):
   return (
     <section class="ui-section">
       <header class="ui-section-head">
-        <div>
+        <div class="ui-section-heading">
           <h2 class="ui-section-title">{title}</h2>
           {description ? <p class="ui-section-description">{description}</p> : null}
         </div>
@@ -62,17 +61,15 @@ export interface ListRowProps {
   statusTone?: StatusTone;
   badges?: preact.ComponentChildren;
   actions?: preact.ComponentChildren;
-  /** Overflow menu slot (v3): rendered beside the actions, never inside the title. */
   menu?: preact.ComponentChildren;
-  /** Compact density (v3): tighter row for rows inside lists. */
   compact?: boolean;
-  /** Thin progress bar (v3, 0–100) rendered under the meta line. */
   progress?: number;
+  icon?: IconName;
   onSelect?: () => void;
   selected?: boolean;
 }
 
-/** Compact one-line muted empty variant for sections inside lists (v3). The full EmptyState stays for whole empty pages. */
+/** Compact one-line muted empty variant for sections inside lists. */
 export function EmptyLine({ text }: { text: string }): preact.JSX.Element {
   return <p class="ui-empty-line">{text}</p>;
 }
@@ -81,13 +78,32 @@ function statusDotClass(tone: StatusTone): string {
   if (tone === "ok") return "is-on";
   if (tone === "bad") return "is-bad";
   if (tone === "warn") return "is-warn";
+  if (tone === "info") return "is-info";
   return "";
 }
 
-/** One standard row: title, one meta line, status dot + word, one action area. */
-export function ListRow({ title, meta, status, statusTone = "neutral", badges, actions, menu, compact, progress, onSelect, selected }: ListRowProps): preact.JSX.Element {
+/** One standard row: optional icon, title, one meta line, status, action area. */
+export function ListRow({
+  title,
+  meta,
+  status,
+  statusTone = "neutral",
+  badges,
+  actions,
+  menu,
+  compact,
+  progress,
+  icon,
+  onSelect,
+  selected,
+}: ListRowProps): preact.JSX.Element {
   const inner = (
     <>
+      {icon ? (
+        <span class="ui-row-icon" aria-hidden="true">
+          <Icon name={icon} size={18} />
+        </span>
+      ) : null}
       <div class="ui-row-main">
         <div class="ui-row-title">
           {status ? (
@@ -108,6 +124,11 @@ export function ListRow({ title, meta, status, statusTone = "neutral", badges, a
       </div>
       {actions ? <div class="ui-row-actions">{actions}</div> : null}
       {menu ? <div class="ui-row-menu">{menu}</div> : null}
+      {onSelect && !actions && !menu ? (
+        <span class="ui-row-chevron" aria-hidden="true">
+          <Icon name="chevron-right" size={17} />
+        </span>
+      ) : null}
     </>
   );
   const rowClass = "ui-row" + (compact ? " ui-row--compact" : "") + (selected ? " is-selected" : "");
@@ -160,7 +181,7 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
     <div class="ui-state">
       <Callout tone="danger">{message}</Callout>
       {onRetry ? (
-        <Button variant="primary" icon="refresh" onClick={onRetry}>
+        <Button variant="secondary" icon="refresh" onClick={onRetry}>
           Try again
         </Button>
       ) : null}
@@ -176,24 +197,6 @@ export function SectionSkeleton(): preact.JSX.Element {
       <Skeleton width="88%" />
     </div>
   );
-}
-
-/** Detail rail: on wide windows a 280px rail beside the list; on narrow windows a full-panel view with a back action. */
-export function useNarrow(maxWidth = 899): boolean {
-  const [narrow, setNarrow] = useState(() =>
-    typeof window !== "undefined" && typeof window.matchMedia === "function"
-      ? window.matchMedia(`(max-width: ${maxWidth}px)`).matches
-      : false,
-  );
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia(`(max-width: ${maxWidth}px)`);
-    const update = (): void => setNarrow(query.matches);
-    update();
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, [maxWidth]);
-  return narrow;
 }
 
 export function DetailBack({ onBack }: { onBack: () => void }): preact.JSX.Element {

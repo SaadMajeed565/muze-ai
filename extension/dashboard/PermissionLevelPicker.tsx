@@ -2,6 +2,7 @@ import type { PermissionMode } from "../libs/security/index.js";
 import { MODE_OPTIONS } from "./logic.js";
 import { Icon } from "./components/Icon.js";
 import { Segmented } from "./components/primitives.js";
+import { useConfirm } from "./components/confirm.js";
 
 export interface PermissionLevelPickerProps {
   mode: PermissionMode;
@@ -22,19 +23,21 @@ export function PermissionLevelPicker({
   onChange,
 }: PermissionLevelPickerProps): preact.JSX.Element {
   const active = MODE_OPTIONS.find((option) => option.id === mode) ?? MODE_OPTIONS[1];
+  const confirm = useConfirm();
 
   /**
-   * Switching to Unrestricted removes every approval step, so it gets a
-   * native confirm() first (documented choice: no custom dialog component
-   * exists in this dashboard, and confirm() blocks the level change until
-   * the user answers). This covers both picker placements (onboarding
-   * cards and the Permissions tab) in one place.
+   * Switching to Unrestricted removes every approval step, so it asks
+   * through the app's own confirmation sheet. This covers both picker
+   * placements (onboarding cards and Me > Permissions and safety).
    */
-  const change = (next: PermissionMode): void => {
+  const change = async (next: PermissionMode): Promise<void> => {
     if (next === "unrestricted" && mode !== "unrestricted") {
-      const ok = confirm(
-        "Switch to Unrestricted? Every tool will run without a confirmation step, including reads of personal data. Only use this on a machine you trust.",
-      );
+      const ok = await confirm({
+        title: "Switch to Unrestricted?",
+        body: "Every tool will run without a confirmation step, including reads of personal data. Only use this on a machine you trust.",
+        confirmLabel: "Use Unrestricted",
+        tone: "danger",
+      });
       if (!ok) return;
     }
     onChange(next);
@@ -53,7 +56,7 @@ export function PermissionLevelPicker({
               aria-checked={selected}
               class={"level-card" + (selected ? " is-on" : "")}
               disabled={disabled}
-              onClick={() => change(option.id)}
+              onClick={() => void change(option.id)}
             >
               <span class="level-card-top">
                 <span class="level-card-label">{option.label}</span>
@@ -81,7 +84,7 @@ export function PermissionLevelPicker({
         value={mode}
         disabled={disabled}
         options={MODE_OPTIONS.map((option) => ({ id: option.id, label: option.label, hint: option.summary }))}
-        onChange={change}
+        onChange={(next) => void change(next)}
       />
       <p class="level-description">{active.summary}</p>
       <ul class="level-detail">

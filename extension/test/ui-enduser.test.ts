@@ -6,8 +6,6 @@ import {
   dedupeAppsByName,
   homeNextAction,
   mergeActivity,
-  navGroupTabs,
-  navRailGroups,
   plainActivityKind,
   plainCapabilities,
   plainDecision,
@@ -24,26 +22,13 @@ import {
 describe("end-user navigation", () => {
   it("has exactly five tabs with no Tools, Browsers, Safety, or Activity entry", () => {
     expect(NAV_TABS).toEqual(["home", "tasks", "connections", "files", "account"]);
-    const tabs = navGroupTabs();
-    expect(tabs).toEqual(NAV_TABS);
-    expect(tabs).not.toContain("tools");
-    expect(tabs).not.toContain("browsers");
-    expect(tabs).not.toContain("permissions");
-    expect(tabs).not.toContain("activity");
-    expect(tabs).not.toContain("overview");
-    expect(tabs).not.toContain("profile");
-    expect(new Set(tabs).size).toBe(tabs.length);
-  });
-
-  it("groups the wide rail as This browser, then Account", () => {
-    expect(navRailGroups()).toEqual([
-      { label: "This browser", tabs: ["home", "tasks", "files"] },
-      { label: "Account", tabs: ["connections", "account"] },
-    ]);
-    // Rail order groups by section, so the flattened rail order differs
-    // from tab order (Connections sits in the Account group, after Files).
-    expect(navRailGroups().flatMap((group) => group.tabs)).toEqual(["home", "tasks", "files", "connections", "account"]);
-    expect([...navRailGroups().flatMap((group) => group.tabs)].sort()).toEqual([...NAV_TABS].sort());
+    expect(NAV_TABS).not.toContain("tools");
+    expect(NAV_TABS).not.toContain("browsers");
+    expect(NAV_TABS).not.toContain("permissions");
+    expect(NAV_TABS).not.toContain("activity");
+    expect(NAV_TABS).not.toContain("overview");
+    expect(NAV_TABS).not.toContain("profile");
+    expect(new Set(NAV_TABS).size).toBe(NAV_TABS.length);
   });
 });
 

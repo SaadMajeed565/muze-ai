@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
+
 import { sanitizeTaskView, type TaskView } from "../../src/task-dashboard.js";
 import type { BrowsersDashboard, DashboardState } from "../../src/messages.js";
 import type { ApprovalRequestInfo } from "../../libs/tool-contracts/index.js";
 import type { TabId } from "../logic.js";
-import { formatCountdown, sendRequest, setupChecklist, setupRemaining } from "../logic.js";
-import { dedupeAppsByName, homeNextAction, plainTaskStatus, resolveAppName, truncateText } from "../ui-logic.js";
+import { sendRequest, setupChecklist, setupRemaining } from "../logic.js";
+import { activityIcon, dedupeAppsByName, plainTaskStatus, resolveAppName } from "../ui-logic.js";
 import { tabCountText } from "../browsers-logic.js";
 import { Icon } from "../components/Icon.js";
 import { Button } from "../components/primitives.js";
-import { EmptyLine, ListRow, Page, Section } from "../components/layout.js";
-import { AddAppSheet, PauseControl, PlanCard } from "../components/shared.js";
+import { EmptyLine, ListRow, Page, Section, SectionSkeleton } from "../components/layout.js";
+import { AddAppSheet, ApprovalCard, PauseControl } from "../components/shared.js";
+import { useConfirm } from "../components/confirm.js";
 
 export interface HomePageProps {
   state: DashboardState;
@@ -18,6 +20,7 @@ export interface HomePageProps {
   onReconnect: () => void;
   onOpenWizard: () => void;
   onNavigate: (tab: TabId) => void;
+  onOpenTask?: (taskId: string) => void;
   onRespond: (approvalId: string, approved: boolean) => void;
   onCancelForClient: (clientId: string) => void;
   onKillSwitch: (engaged: boolean) => void;
@@ -26,15 +29,9 @@ export interface HomePageProps {
 const TASKS_POLL_MS = 5000;
 
 /**
- * Home (v3): sections in fixed order — this-browser status, needs
- * your OK (only when approvals exist), working now, apps using this
- * browser, account strip, finish-setup checklist (only while
- * unfinished). Removed from v2: metric cards, the "Connected to the
- * gateway" line, the separate browser-connection toggle (see report:
- * the gateway-enabled toggle is NOT a browser disconnect, so it was
- * dropped rather than moved), the Manage browsers primary button, the
- * inline connection URL block, and the email under the title. The
- * connection URL renders only inside AddAppSheet.
+ * Home: setup banner, approvals, working now, this browser, apps. The
+ * connection URL only appears in the Add app sheet. No plan card, no
+ * metrics, no duplicate browser toggle.
  */
 export function HomePage({
   state,
@@ -43,6 +40,7 @@ export function HomePage({
   onReconnect,
   onOpenWizard,
   onNavigate,
+  onOpenTask,
   onRespond,
   onCancelForClient,
   onKillSwitch,
@@ -51,7 +49,7 @@ export function HomePage({
   const [browsersData, setBrowsersData] = useState<BrowsersDashboard | null>(null);
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
   const [addAppOpen, setAddAppOpen] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
+  const confirm = useConfirm();
 
   useEffect(() => {
     if (!gateway.signedIn) return;
@@ -78,9 +76,21 @@ export function HomePage({
     void loadTasks();
     const timer = window.setInterval(() => {
       void loadTasks();
-      setNow(Date.now());
     }, TASKS_POLL_MS);
     return () => window.clearInterval(timer);
+  }, [loadTasks]);
+
+  useEffect(() => {
+    const listener = (message: { type?: string }): void => {
+      if (message?.type === "muze/event" || message?.type === "uabb/event") {
+        void loadTasks();
+      }
+    };
+    const onMessage = typeof chrome === "undefined" ? undefined : chrome?.runtime?.onMessage;
+    if (onMessage?.addListener) onMessage.addListener(listener);
+    return () => {
+      if (onMessage?.removeListener) onMessage.removeListener(listener);
+    };
   }, [loadTasks]);
 
   const remaining = setupRemaining({
@@ -93,36 +103,15 @@ export function HomePage({
     connectedClients: snapshot.connectedClients,
     onboardingStep: onboarding.step,
   });
-  const next = homeNextAction({
-    signedIn: gateway.signedIn,
-    setupRemaining: remaining,
-    pendingApprovals: snapshot.pendingApprovals,
-  });
 
-  const nextAction =
-    next === "setup" ? (
-      <Button variant="primary" icon="arrow-right" disabled={busy} onClick={onOpenWizard}>
-        Resume setup
-      </Button>
-    ) : next === "approvals" ? (
-      <Button variant="primary" icon="alert" disabled={busy} onClick={() => onNavigate("tasks")}>
-        Review requests
-      </Button>
-    ) : undefined;
-
-  // This browser: the current session's row, else the local row, else
-  // no name at all — never an id, never a guess.
   const thisBrowser = browsersData
     ? (browsersData.browsers.find((browser) => browser.sessionId === browsersData.currentSessionId) ??
       browsersData.browsers.find((browser) => browser.isLocal) ??
       null)
     : null;
   const browserConnected = snapshot.bridgeStatus === "connected";
-  // Disconnected: one muted "Not connected" + Reconnect, no tab count.
-  // Connected: the row's Online/Offline + tab count only when known.
-  const statusWord = !browserConnected ? "Not connected" : thisBrowser ? (thisBrowser.connected ? "Online" : "Offline") : null;
+  const statusWord = !browserConnected ? "Not connected" : thisBrowser ? (thisBrowser.connected ? "Online" : "Offline") : "Connected";
   const tabCount = browserConnected && thisBrowser ? tabCountText(thisBrowser) : null;
-  const statusLine = [statusWord, tabCount].filter(Boolean).join(" · ");
 
   const thisBrowserClients = browsersData
     ? dedupeAppsByName(browsersData.mcpClients.filter((client) => thisBrowser && client.sessionId === thisBrowser.sessionId))
@@ -137,74 +126,93 @@ export function HomePage({
     else approvalGroups.set(approval.client.id, { name: resolved, approvals: [approval] });
   }
 
+  const [tipDismissed, setTipDismissed] = useState(false);
+
   return (
-    <Page title="Home" action={nextAction}>
-      <Section title="This browser">
-        <div class="ui-row-inline">
-          <span class="ui-row-meta">This browser</span>
-          {thisBrowser ? <span>{thisBrowser.name}</span> : null}
-          {statusLine ? (
-            <span>
-              <span class={"status-dot " + (statusWord === "Online" ? "is-on" : "")} aria-hidden="true" />
-              {statusLine}
-            </span>
-          ) : null}
-          {!browserConnected && gateway.enabled && !gateway.authRequired ? (
-            <Button variant="secondary" size="sm" icon="refresh" disabled={busy} onClick={onReconnect}>
-              Reconnect
-            </Button>
-          ) : null}
-          <span class="ui-row-spacer" />
-          <PauseControl paused={snapshot.killSwitch} busy={busy} onToggle={onKillSwitch} />
+    <Page title="Home" subtitle="Your browser, your rules.">
+      {/* Hero header */}
+      <div class="ui-page-hero">
+        <div class="ui-page-hero-icon">
+          <Icon name="home" size={24} />
         </div>
-      </Section>
+        <div class="ui-page-hero-content">
+          <h1 class="ui-page-hero-title">Home</h1>
+          <p class="ui-page-hero-subtitle">Your browser, your rules.</p>
+        </div>
+        <div class="ui-page-hero-status">
+          <span class={"status-pill" + (browserConnected ? " is-online" : "")}>
+            <span class="status-dot" />
+            <span class="status-pill-text">{browserConnected ? "Online" : "Offline"}</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Welcome card (when setup not done) */}
+      {remaining > 0 ? (
+        <div class="welcome-card">
+          <div class="welcome-card-body">
+            <div class="welcome-card-icon">
+              <Icon name="logo" size={28} />
+            </div>
+            <div>
+              <p class="welcome-card-title">Muze AI is ready!</p>
+              <p class="welcome-card-subtitle">Control your browser with AI apps.</p>
+            </div>
+          </div>
+          <div class="welcome-card-footer">
+            <Button variant="primary" size="sm" onClick={onOpenWizard}>View Guide →</Button>
+          </div>
+        </div>
+      ) : null}
 
       {approvals.length > 0 ? (
-        <Section title="Needs your OK" description={`${approvals.length} request${approvals.length === 1 ? "" : "s"} pending. Each expires after two minutes.`}>
-          <ul class="ui-list">
+        <Section
+          title="Needs your OK"
+          description={`${approvals.length} request${approvals.length === 1 ? "" : "s"} waiting. Each expires after two minutes.`}
+        >
+          <div class="approval-list">
             {approvals.map((approval) => (
-              <ListRow
+              <ApprovalCard
                 key={approval.id}
-                title={approval.title}
-                meta={`${truncateText(approval.summary, 160)} · ${resolveAppName(approval.client, browsersData?.mcpClients ?? [])} · ${formatCountdown(approval.expiresAt, now)}`}
-                status="Waiting for you"
-                statusTone="warn"
-                actions={
-                  <>
-                    <Button variant="secondary" size="sm" disabled={busy} onClick={() => onRespond(approval.id, false)}>
-                      Deny
-                    </Button>
-                    <Button variant="primary" size="sm" icon="check" disabled={busy} onClick={() => onRespond(approval.id, true)}>
-                      Allow
-                    </Button>
-                  </>
-                }
+                approval={approval}
+                appName={resolveAppName(approval.client, browsersData?.mcpClients ?? [])}
+                busy={busy}
+                onRespond={onRespond}
               />
             ))}
-          </ul>
-          <div class="ui-chip-row">
-            {[...approvalGroups.values()].map((group) => (
-              <Button
-                key={group.name}
-                variant="ghost"
-                size="sm"
-                disabled={busy}
-                onClick={() => {
-                  const clientId = [...approvalGroups.entries()].find(([, value]) => value === group)?.[0];
-                  if (!clientId) return;
-                  const ok = confirm(`Cancel all pending requests from ${group.name}? The waiting actions will be denied.`);
-                  if (ok) onCancelForClient(clientId);
-                }}
-              >
-                Cancel requests from {group.name}
-              </Button>
-            ))}
           </div>
+          {approvalGroups.size > 0 ? (
+            <div class="approval-bulk">
+              {[...approvalGroups.entries()].map(([clientId, group]) => (
+                <Button
+                  key={clientId}
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  onClick={async () => {
+                    const ok = await confirm({
+                      title: `Cancel requests from ${group.name}?`,
+                      body: "Every waiting action from this app will be denied.",
+                      confirmLabel: "Cancel requests",
+                      cancelLabel: "Keep waiting",
+                      tone: "danger",
+                    });
+                    if (ok) onCancelForClient(clientId);
+                  }}
+                >
+                  Cancel all from {group.name}
+                </Button>
+              ))}
+            </div>
+          ) : null}
         </Section>
       ) : null}
 
-      <Section title="Working in this browser now">
-        {runningTasks.length === 0 ? (
+      {/* Active Tasks */}
+      <Section title="Active Tasks" description="Tasks your AI app is running in this browser.">
+        {tasks === null ? (
+          <SectionSkeleton />
+        ) : runningTasks.length === 0 ? (
           <EmptyLine text="Nothing running." />
         ) : (
           <ul class="ui-list">
@@ -213,10 +221,11 @@ export function HomePage({
               return (
                 <ListRow
                   key={task.id}
+                  icon={activityIcon(task.steps.find((step) => step.state !== "done")?.tool)}
                   title={task.goal || "Task"}
                   meta={`${plainTaskStatus(task.status)} · Step ${task.doneSteps.length} of ${task.totalSteps}`}
                   progress={percent}
-                  onSelect={() => onNavigate("tasks")}
+                  onSelect={() => (onOpenTask ? onOpenTask(task.id) : onNavigate("tasks"))}
                 />
               );
             })}
@@ -224,21 +233,77 @@ export function HomePage({
         )}
       </Section>
 
+      {/* Browser Status */}
+      <Section title="Browser Status">
+        <div class="browser-card">
+          <div class="browser-card-header">
+            <div class="browser-card-icon">
+              <Icon name="browser" size={22} />
+            </div>
+            <div class="browser-card-main">
+              <span class="browser-card-name">{thisBrowser ? thisBrowser.name : "This browser"}</span>
+              <span class="browser-card-meta">
+                <span class={"status-dot " + (statusWord === "Online" ? "is-on" : statusWord === "Not connected" ? "is-warn" : "")} aria-hidden="true" />
+                {statusWord}
+                {tabCount ? ` · ${tabCount}` : ""}
+              </span>
+            </div>
+            <div class="browser-card-actions">
+              {!browserConnected && gateway.enabled && !gateway.authRequired ? (
+                <Button variant="secondary" size="sm" icon="refresh" disabled={busy} onClick={onReconnect}>
+                  Reconnect
+                </Button>
+              ) : null}
+              <PauseControl paused={snapshot.killSwitch} busy={busy} onToggle={onKillSwitch} />
+            </div>
+          </div>
+          <div class="browser-card-stats">
+            <div class="browser-stat">
+              <span class="browser-stat-icon"><Icon name="app" size={16} /></span>
+              <div class="browser-stat-info">
+                <span class="browser-stat-label">Connected Apps</span>
+                <span class="browser-stat-value">{thisBrowserClients.length} apps</span>
+              </div>
+            </div>
+            <div class="browser-stat">
+              <span class="browser-stat-icon"><Icon name="shield" size={16} /></span>
+              <div class="browser-stat-info">
+                <span class="browser-stat-label">Browser Control</span>
+                <span class={"browser-stat-value" + (browserConnected && !snapshot.killSwitch ? " is-active" : "")}>
+                  {snapshot.killSwitch ? "Paused" : browserConnected ? "Active" : "Inactive"}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Section>
+
+      {/* Connected AI Apps */}
       <Section
-        title="Apps using this browser"
+        title="Connected AI Apps"
         action={
-          <Button variant="ghost" size="sm" icon="arrow-right" disabled={busy} onClick={() => setAddAppOpen(true)}>
-            Add app
+          <Button variant="ghost" size="sm" icon="plus" disabled={busy} onClick={() => setAddAppOpen(true)}>
+            Add App
           </Button>
         }
       >
-        {!browsersData ? null : thisBrowserClients.length === 0 ? (
-          <EmptyLine text="No apps using this browser yet." />
+        {!browsersData ? (
+          <SectionSkeleton />
+        ) : thisBrowserClients.length === 0 ? (
+          <button type="button" class="app-empty-card" onClick={() => setAddAppOpen(true)}>
+            <div class="app-empty-card-icon"><Icon name="link" size={20} /></div>
+            <div class="app-empty-card-text">
+              <span class="app-empty-card-title">No AI apps connected yet</span>
+              <span class="app-empty-card-desc">Connect Claude, ChatGPT or any MCP client to control your browser.</span>
+            </div>
+            <span class="app-empty-card-arrow"><Icon name="chevron-right" size={18} /></span>
+          </button>
         ) : (
           <ul class="ui-list">
             {thisBrowserClients.map((group) => (
               <ListRow
                 key={group.name}
+                icon="app"
                 title={group.name}
                 status={group.live ? "Connected" : "Not connected"}
                 statusTone={group.live ? "ok" : "neutral"}
@@ -248,25 +313,15 @@ export function HomePage({
         )}
       </Section>
 
-      {browsersData ? (
-        <Section title="Your account">
-          <PlanCard browserCount={browsersData.browsers.length} onSelect={() => onNavigate("account")} />
-        </Section>
-      ) : null}
-
-      {remaining > 0 ? (
-        <Section title="Finish setup" description={`${remaining} step${remaining === 1 ? "" : "s"} left`}>
-          <ul class="ui-checklist">
-            {checklist.map((item) => (
-              <li key={item.id} class={item.done ? "is-done" : ""}>
-                <span class="ui-checklist-mark" aria-hidden="true">
-                  <Icon name={item.done ? "check" : "close"} size={12} strokeWidth={2.6} />
-                </span>
-                <span>{item.label}</span>
-              </li>
-            ))}
-          </ul>
-        </Section>
+      {/* Tip card */}
+      {!tipDismissed && thisBrowserClients.length === 0 ? (
+        <div class="tip-card">
+          <span class="tip-card-icon"><Icon name="info" size={16} /></span>
+          <span class="tip-card-text">Tip: Use the Connect tab to set up your favorite AI application.</span>
+          <button class="tip-card-dismiss" onClick={() => setTipDismissed(true)} aria-label="Dismiss tip">
+            <Icon name="close" size={14} />
+          </button>
+        </div>
       ) : null}
 
       <AddAppSheet open={addAppOpen} onClose={() => setAddAppOpen(false)} mcpUrl={gateway.mcpUrl} />

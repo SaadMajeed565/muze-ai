@@ -93,7 +93,7 @@ const GATEWAY_KEEPALIVE_PERIOD_MINUTES = 0.5;
 const registry = createToolRegistry();
 const policy = new PolicyEngine();
 const approvals = new ApprovalBroker({ ttlMs: 120_000 });
-const audit = new AuditLog({ maxEvents: 1000 });
+const audit = new AuditLog({ maxEvents: 1000, onRecord: () => notifyDashboard({ kind: "audit" }) });
 const rateLimiter = new RateLimiter({ capacity: 120, refillPerSecond: 20 });
 const context = new ChromeBrowserContext(new ChromeOffscreenMessenger());
 
@@ -555,6 +555,16 @@ function plainAuthError(error: unknown): string {
  */
 let connectGatewayInFlight: Promise<void> | null = null;
 async function connectGateway(settings: BridgeSettings): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    // Offline: do nothing now. Resume automatically when the network
+    // comes back, instead of hammering a dead endpoint.
+    const handler = (): void => {
+      globalThis.removeEventListener("online", handler);
+      void connectGateway(settings);
+    };
+    globalThis.addEventListener("online", handler, { once: true });
+    return;
+  }
   if (connectGatewayInFlight) return connectGatewayInFlight;
   connectGatewayInFlight = (async () => {
     syncKeepAlive(settings);

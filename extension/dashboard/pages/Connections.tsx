@@ -7,6 +7,7 @@ import { Button, Segmented } from "../components/primitives.js";
 import { EmptyLine, ErrorState, ListRow, Page, Section, SectionSkeleton } from "../components/layout.js";
 import { BrowserRow, McpClientRow } from "../components/browser-rows.js";
 import { AddAppSheet, Sheet } from "../components/shared.js";
+import { showToast } from "../components/feedback.js";
 
 const POLL_MS = 5000;
 
@@ -15,19 +16,14 @@ export type ConnectionsSegment = "browsers" | "apps";
 export interface ConnectionsPageProps {
   state: DashboardState;
   busy: boolean;
-  /** Segment remembered by the caller while the panel is open. */
   segment: ConnectionsSegment;
   onSegment: (segment: ConnectionsSegment) => void;
   onNavigate: (tab: TabId) => void;
 }
 
 /**
- * Connections (v3): browsers and apps, separate and never mixed. A
- * browser row never lists apps; an app row carries only one "Uses:
- * <browser name>" meta line and never lists other apps. Apps are
- * deduped by name (one row per name); revoking a row revokes every
- * underlying authorisation for that name. No ids, tokens, or
- * developer fields are ever rendered; unknown values are omitted.
+ * Connect: browsers and apps, separate and never mixed. Apps dedupe by
+ * name; revoking a row revokes every underlying authorisation.
  */
 export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }: ConnectionsPageProps): preact.JSX.Element {
   const { gateway } = state;
@@ -60,6 +56,7 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
       if (response.ok && response.browsers) {
         setData(response.browsers);
         setError(null);
+        showToast("Browser updated");
       } else {
         setError(response.error ?? "That action failed");
       }
@@ -83,6 +80,7 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
         }
       }
       await refresh();
+      showToast(`${group.name} revoked`);
     } finally {
       setBrowsersBusy(false);
     }
@@ -96,22 +94,24 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
   const previousApps = deduped.filter((group) => !group.live);
 
   return (
-    <Page title="Connections" subtitle="Browsers and apps on your account.">
-      <Segmented
-        ariaLabel="Connections"
-        value={segment}
-        options={[
-          { id: "browsers", label: `Browsers (${data ? data.browsers.length : 0})` },
-          { id: "apps", label: `Apps (${deduped.length})` },
-        ]}
-        onChange={onSegment}
-      />
+    <Page title="Connect" subtitle="Browsers and AI apps on your account.">
+      <div class="page-controls">
+        <Segmented
+          ariaLabel="Browsers or apps"
+          value={segment}
+          options={[
+            { id: "browsers", label: `Browsers (${data ? data.browsers.length : 0})` },
+            { id: "apps", label: `Apps (${deduped.length})` },
+          ]}
+          onChange={onSegment}
+        />
+      </div>
 
       {error && !data ? (
         <ErrorState
           message={
             error === "gateway-unreachable"
-              ? "The connection is unreachable. Check the connection, then try again. No browser data is shown because none could be verified."
+              ? "The connection is unreachable. Check your network, then try again. No browser data is shown because none could be verified."
               : error
           }
           onRetry={() => void refresh()}
@@ -119,7 +119,7 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
       ) : !data ? (
         <SectionSkeleton />
       ) : segment === "browsers" ? (
-        <Section title="Browsers" description="Disconnect closes its connection only; Remove signs it out completely.">
+        <Section title="Browsers" description="Disconnect closes the connection. Remove signs the browser out completely.">
           {data.browsers.length === 0 ? (
             <EmptyLine text="No browsers attached yet." />
           ) : (
@@ -129,28 +129,30 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
               ))}
             </ul>
           )}
+          <ul class="ui-list ui-list--spaced">
+            <ListRow
+              icon="plus"
+              title="Add a browser"
+              meta="Sign in with the same account in another browser."
+              onSelect={() => setAddBrowserOpen(true)}
+            />
+          </ul>
           {data.browsers.length === 1 ? (
             <p class="ui-row-meta">
               To remove your last browser, delete your account from{" "}
               <Button variant="ghost" size="sm" onClick={() => onNavigate("account")}>
-                Account
+                Me
               </Button>
               .
             </p>
           ) : null}
-          <ListRow
-            compact
-            title="Add a browser"
-            meta="Sign in with the same account in another browser."
-            onSelect={() => setAddBrowserOpen(true)}
-          />
         </Section>
       ) : (
         <Section
           title="Apps"
           description="AI apps authorised against this account."
           action={
-            <Button variant="ghost" size="sm" icon="arrow-right" disabled={busy} onClick={() => setAddAppOpen(true)}>
+            <Button variant="ghost" size="sm" icon="plus" disabled={busy} onClick={() => setAddAppOpen(true)}>
               Add app
             </Button>
           }
@@ -198,10 +200,10 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
         <ol class="steps-list">
           <li>Install the Muze AI extension in that browser.</li>
           <li>Sign in with the same account you use here.</li>
-          <li>That browser will appear in the browsers list.</li>
+          <li>That browser will appear in this list automatically.</li>
         </ol>
-        <Button variant="primary" onClick={() => setAddBrowserOpen(false)}>
-          Close
+        <Button variant="primary" block onClick={() => setAddBrowserOpen(false)}>
+          Got it
         </Button>
       </Sheet>
       <AddAppSheet open={addAppOpen} onClose={() => setAddAppOpen(false)} mcpUrl={gateway.mcpUrl} />

@@ -42,8 +42,8 @@ describe("onboarding progress", () => {
   });
 
   it("reports the current step, total and percentage", () => {
-    expect(onboardingProgress(2)).toEqual({ current: 2, total: 4, percent: 50 });
-    expect(onboardingProgress(4)).toEqual({ current: 4, total: 4, percent: 100 });
+    expect(onboardingProgress(2)).toEqual({ current: 2, total: 2, percent: 100 });
+    expect(onboardingProgress(1)).toEqual({ current: 1, total: 2, percent: 50 });
   });
 });
 

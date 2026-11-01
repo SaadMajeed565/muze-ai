@@ -25,6 +25,7 @@ export type IconName =
   | "search"
   | "refresh"
   | "alert"
+  | "info"
   | "arrow-left"
   | "arrow-right"
   | "chevron-right"
@@ -38,7 +39,32 @@ export type IconName =
   | "power"
   | "key"
   | "file"
-  | "logo";
+  | "image"
+  | "plus"
+  | "trash"
+  | "pencil"
+  | "more"
+  | "browser"
+  | "app"
+  | "upload"
+  | "plug"
+  | "logout"
+  | "help"
+  | "pause"
+  | "play"
+  | "logo"
+  | "read"
+  | "navigate"
+  | "click"
+  | "type"
+  | "tab"
+  | "download"
+  | "clipboard"
+  | "history"
+  | "bookmark"
+  | "form"
+  | "organize"
+  | "activity";
 
 /**
  * End-user destinations only, exactly five (v3): Home, Tasks,
@@ -58,16 +84,16 @@ export interface TabDefinition {
 export const TABS: TabDefinition[] = [
   { id: "home", label: "Home", icon: "home" },
   { id: "tasks", label: "Tasks", icon: "clock" },
-  { id: "connections", label: "Connections", icon: "link" },
+  { id: "connections", label: "Connect", icon: "link" },
   { id: "files", label: "Files", icon: "file" },
-  { id: "account", label: "Account", icon: "user" },
+  { id: "account", label: "Me", icon: "user" },
 ];
 
 export function isTabId(value: unknown): value is TabId {
   return typeof value === "string" && TABS.some((tab) => tab.id === value);
 }
 
-export const ONBOARDING_STEP_COUNT = 4;
+export const ONBOARDING_STEP_COUNT = 2;
 
 export interface OnboardingStepDefinition {
   id: string;
@@ -76,10 +102,8 @@ export interface OnboardingStepDefinition {
 }
 
 export const ONBOARDING_STEPS: OnboardingStepDefinition[] = [
-  { id: "welcome", title: "Welcome", caption: "What Muze AI can and cannot do" },
-  { id: "level", title: "Permission level", caption: "How much the agent may do" },
-  { id: "connect", title: "Connect browser", caption: "Link this browser to your account" },
-  { id: "client", title: "Connect your client", caption: "Point Claude at this browser" },
+  { id: "level", title: "Permission level", caption: "How far may the agent go?" },
+  { id: "client", title: "Connect your AI app", caption: "Point your AI app here." },
 ];
 
 export function clampStep(step: number): number {

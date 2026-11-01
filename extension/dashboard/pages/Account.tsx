@@ -1,12 +1,13 @@
 import { useEffect, useState } from "preact/hooks";
 import type { PermissionMode, PolicyConfig } from "../../libs/security/index.js";
 import type { BrowsersDashboard, DashboardState } from "../../src/messages.js";
-import type { Appearance } from "../logic.js";
+import type { Appearance, IconName } from "../logic.js";
 import { sendRequest } from "../logic.js";
 import { Button } from "../components/primitives.js";
-import { DetailBack, EmptyLine, Field, ListRow, Page, Section, useNarrow } from "../components/layout.js";
+import { EmptyLine, Field, ListRow, Page, Section } from "../components/layout.js";
 import { PlanCard } from "../components/shared.js";
 import { AppearancePrivacy, PermissionsSafety } from "../components/permissions-sections.js";
+import { useConfirm } from "../components/confirm.js";
 
 export interface AccountPageProps {
   state: DashboardState;
@@ -20,27 +21,27 @@ export interface AccountPageProps {
   onGroupToggle: (group: string, enabled: boolean) => void;
   onSignOut: () => void;
   onDeleteAccount: () => void;
+  detail?: AccountDetail | null;
+  onOpen?: (detail: AccountDetail | null) => void;
 }
 
-type SubScreen = "profile" | "plan" | "permissions" | "appearance" | "help";
+export type AccountDetail = "profile" | "permissions" | "appearance" | "plan" | "help";
 
-const SUB_SCREENS: { id: SubScreen; title: string; hint: string }[] = [
-  { id: "profile", title: "Profile", hint: "Email, sign out, delete account" },
-  { id: "plan", title: "Plan and billing", hint: "Your current plan" },
-  { id: "permissions", title: "Permissions and safety", hint: "What the agent may do in this browser" },
-  { id: "appearance", title: "Appearance and privacy", hint: "Theme and what Muze never touches" },
-  { id: "help", title: "Help and feedback", hint: "Support, privacy, and terms" },
+const SUB_SCREENS: { id: AccountDetail; title: string; hint: string; icon: IconName }[] = [
+  { id: "profile", title: "Profile", hint: "Your account details and danger zone", icon: "user" },
+  { id: "permissions", title: "Permissions and safety", hint: "What the agent may do in this browser", icon: "shield" },
+  { id: "appearance", title: "Appearance and privacy", hint: "Theme, and what Muze never touches", icon: "sliders" },
+  { id: "plan", title: "Plan and billing", hint: "Free plan · up to 10 browsers", icon: "grid" },
+  { id: "help", title: "Help and feedback", hint: "Support, privacy, and terms", icon: "help" },
 ];
 
+export function accountDetailTitle(detail: AccountDetail | null | undefined): string | null {
+  return SUB_SCREENS.find((screen) => screen.id === detail)?.title ?? null;
+}
+
 /**
- * Account (v3, replaces Profile): a hub of short rows. Narrow
- * windows open a sub-screen as a full panel with a back action; wide
- * windows show hub + selected sub-screen side by side (default:
- * Profile). No sub-screen scrolls much beyond 1.5 viewports. Delete
- * account lives ONLY at the bottom of Profile, separated and
- * muted-danger. There are no Security or Notifications screens, no
- * invented name (avatar circle = first letter of the email + email
- * only), no usage numbers, and no Upgrade button anywhere.
+ * Me: profile header, plan, settings rows, sign out, and a separated
+ * danger zone. Sub-screens open full-screen and are backed by the app bar.
  */
 export function AccountPage({
   state,
@@ -54,17 +55,16 @@ export function AccountPage({
   onGroupToggle,
   onSignOut,
   onDeleteAccount,
+  detail: detailProp,
+  onOpen,
 }: AccountPageProps): preact.JSX.Element {
   const { gateway } = state;
-  const narrow = useNarrow();
-  const [selected, setSelected] = useState<SubScreen | null>(null);
+  const [localDetail, setLocalDetail] = useState<AccountDetail | null>(null);
   const [browsersData, setBrowsersData] = useState<BrowsersDashboard | null>(null);
+  const confirm = useConfirm();
 
-  // Wide windows default to the Profile sub-screen; narrow windows
-  // start on the hub and open a sub-screen only after a tap.
-  useEffect(() => {
-    if (!narrow && selected === null) setSelected("profile");
-  }, [narrow, selected]);
+  const detail = detailProp !== undefined ? detailProp : localDetail;
+  const open = onOpen ?? setLocalDetail;
 
   useEffect(() => {
     if (!gateway.signedIn) return;
@@ -77,15 +77,24 @@ export function AccountPage({
     };
   }, [gateway.signedIn]);
 
-  const signOut = (): void => {
-    const ok = confirm("Sign out? This browser will be unlinked from your Muze account and the connection will stop.");
+  const signOut = async (): Promise<void> => {
+    const ok = await confirm({
+      title: "Sign out?",
+      body: "This browser will be unlinked from your Muze account and the connection will stop.",
+      confirmLabel: "Sign out",
+      tone: "danger",
+    });
     if (ok) onSignOut();
   };
 
-  const deleteAccount = (): void => {
-    const ok = confirm(
-      "Permanently delete your Muze account? This removes your account, every attached browser, and every app authorisation. This cannot be undone.",
-    );
+  const deleteAccount = async (): Promise<void> => {
+    const ok = await confirm({
+      title: "Delete your Muze account?",
+      body: "This removes your account, every attached browser, and every app authorisation. This cannot be undone.",
+      confirmLabel: "Delete account",
+      tone: "danger",
+      requireText: "DELETE",
+    });
     if (ok) onDeleteAccount();
   };
 
@@ -99,126 +108,102 @@ export function AccountPage({
       ]
     : [];
 
-  const detail = (sub: SubScreen): preact.JSX.Element => {
-    if (sub === "profile") {
-      return (
-        <>
-          <Section title="Profile">
-            <Field label="Email" value={gateway.email || "Your account"} />
-            <div class="ui-row-inline">
-              <span>Signed in as {gateway.email || "your account"}</span>
-              <Button variant="ghost" size="sm" disabled={busy} onClick={signOut}>
-                Sign out
-              </Button>
-            </div>
-          </Section>
-          <Section title="Delete account">
-            <div class="ui-row-inline">
-              <span>Delete your account and everything attached to it.</span>
-              <Button variant="ghost" size="sm" class="row-action-danger" disabled={busy} onClick={deleteAccount}>
-                Delete account
-              </Button>
-            </div>
-          </Section>
-        </>
-      );
-    }
-    if (sub === "plan") {
-      return (
-        <Section title="Plan and billing">
-          <p class="ui-row-meta">You're on the Free plan. Up to 10 browsers.</p>
-        </Section>
-      );
-    }
-    if (sub === "permissions") {
-      return (
-        <>
-          <p class="ui-row-meta">Permissions and safety. Applies to this browser only.</p>
-          <PermissionsSafety
-            state={state}
-            busy={busy}
-            onModeChange={onModeChange}
-            onPolicyPatch={onPolicyPatch}
-            onReadOnly={onReadOnly}
-            onKillSwitch={onKillSwitch}
-            onGroupToggle={onGroupToggle}
-          />
-        </>
-      );
-    }
-    if (sub === "appearance") {
-      return <AppearancePrivacy appearance={appearance} onAppearance={onAppearance} />;
-    }
+  if (detail) {
     return (
-      <Section title="Help and feedback">
-        {helpLinks.length === 0 ? (
-          <EmptyLine text="Help pages are not available right now." />
-        ) : (
-          <ul class="ui-list">
-            {helpLinks.map((link) => (
-              <ListRow
-                key={link.href}
-                title={
-                  <a class="ui-row-link" href={link.href} target="_blank" rel="noreferrer">
-                    {link.label}
-                  </a>
-                }
-              />
-            ))}
-          </ul>
-        )}
-      </Section>
-    );
-  };
-
-  const hub = (
-    <div class="account-hub">
-      <div class="account-header">
-        <span class="account-avatar" aria-hidden="true">
-          {firstLetter}
-        </span>
-        <span class="account-email">{gateway.email || "Your account"}</span>
-      </div>
-      {browsersData ? <PlanCard browserCount={browsersData.browsers.length} /> : null}
-      <ul class="ui-list">
-        {SUB_SCREENS.map((screen) => (
-          <ListRow
-            key={screen.id}
-            compact
-            title={screen.title}
-            meta={screen.hint}
-            onSelect={() => setSelected(screen.id)}
-            selected={!narrow && selected === screen.id}
-          />
-        ))}
-      </ul>
-    </div>
-  );
-
-  // Narrow: hub, or one full-panel sub-screen with a back action.
-  if (narrow) {
-    return (
-      <Page title="Account" subtitle="Your account and this browser.">
-        {selected ? (
+      <div class="ui-page detail-page">
+        {detail === "profile" ? (
           <>
-            <DetailBack onBack={() => setSelected(null)} />
-            {detail(selected)}
+            <Section title="Profile details">
+              <Field label="Email" value={gateway.email || "Your account"} />
+            </Section>
+            <Section title="Account">
+              <ul class="ui-list">
+                <ListRow icon="logout" title="Sign out" meta="Unlink this browser from your account." onSelect={() => void signOut()} />
+              </ul>
+            </Section>
+
+            <Section title="Danger zone" description="This cannot be undone.">
+              <div class="danger-row">
+                <div class="danger-copy">
+                  <strong>Delete account</strong>
+                  <span>Remove your account, every attached browser, and every app authorisation.</span>
+                </div>
+                <Button variant="danger" size="sm" icon="trash" disabled={busy} onClick={() => void deleteAccount()}>
+                  Delete
+                </Button>
+              </div>
+            </Section>
           </>
-        ) : (
-          hub
-        )}
-      </Page>
+        ) : null}
+
+        {detail === "permissions" ? (
+          <>
+            <p class="detail-note">Applies to this browser only. Changes save immediately.</p>
+            <PermissionsSafety
+              state={state}
+              busy={busy}
+              onModeChange={onModeChange}
+              onPolicyPatch={onPolicyPatch}
+              onReadOnly={onReadOnly}
+              onKillSwitch={onKillSwitch}
+              onGroupToggle={onGroupToggle}
+            />
+          </>
+        ) : null}
+
+        {detail === "appearance" ? <AppearancePrivacy appearance={appearance} onAppearance={onAppearance} /> : null}
+
+        {detail === "plan" ? (
+          <Section title="Free plan" description="Up to 10 browsers on one account.">
+            {browsersData ? <PlanCard browserCount={browsersData.browsers.length} /> : <EmptyLine text="Loading your plan…" />}
+          </Section>
+        ) : null}
+
+        {detail === "help" ? (
+          <Section title="Help and feedback" description="Open a page in your browser.">
+            {helpLinks.length === 0 ? (
+              <EmptyLine text="Help pages are not available right now." />
+            ) : (
+              <ul class="ui-list">
+                {helpLinks.map((link) => (
+                  <ListRow
+                    key={link.href}
+                    icon="external"
+                    title={
+                      <a class="ui-row-link" href={link.href} target="_blank" rel="noreferrer">
+                        {link.label}
+                      </a>
+                    }
+                  />
+                ))}
+              </ul>
+            )}
+          </Section>
+        ) : null}
+      </div>
     );
   }
 
   return (
-    <Page title="Account" subtitle="Your account and this browser.">
-      <div class="ui-grid">
-        <div>{hub}</div>
-        <aside class="ui-rail" aria-label="Account detail">
-          {selected ? detail(selected) : null}
-        </aside>
+    <Page title="Me" subtitle="Your account and this browser.">
+      <div class="account-header">
+        <span class="account-avatar" aria-hidden="true">
+          {firstLetter}
+        </span>
+        <span class="account-identity">
+          <span class="account-name">{gateway.email ? gateway.email.split("@")[0] : "Your account"}</span>
+          <span class="account-email">{gateway.email || "Your account"}</span>
+        </span>
       </div>
+
+      {browsersData ? <PlanCard browserCount={browsersData.browsers.length} /> : null}
+
+      <ul class="ui-list">
+        {SUB_SCREENS.map((screen) => (
+          <ListRow key={screen.id} icon={screen.icon} title={screen.title} meta={screen.hint} onSelect={() => open(screen.id)} />
+        ))}
+      </ul>
+
     </Page>
   );
 }

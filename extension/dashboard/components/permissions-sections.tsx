@@ -75,7 +75,6 @@ export function PermissionsSafety({
           <Switch
             checked={policy.approvalMode === "risk"}
             disabled={busy}
-            label={policy.approvalMode === "risk" ? "On" : "Off"}
             onToggle={(next) => onPolicyPatch({ approvalMode: next ? "risk" : "never" })}
           />
         </div>
@@ -84,7 +83,7 @@ export function PermissionsSafety({
             <span class="ui-control-label">Read-only mode</span>
             <span class="ui-control-hint">Block every action that would change a page.</span>
           </div>
-          <Switch checked={policy.readOnlyMode} disabled={busy} label={policy.readOnlyMode ? "On" : "Off"} onToggle={onReadOnly} />
+          <Switch checked={policy.readOnlyMode} disabled={busy} onToggle={onReadOnly} />
         </div>
       </Section>
 
@@ -104,7 +103,6 @@ export function PermissionsSafety({
                 <Switch
                   checked={enabled}
                   disabled={busy}
-                  label={enabled ? "On" : "Off"}
                   onToggle={(next) => onGroupToggle(group, next)}
                 />
               </div>
