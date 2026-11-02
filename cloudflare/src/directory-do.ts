@@ -715,7 +715,20 @@ export class DirectoryDO implements DurableObject {
     // NOT consume the row (no code was issued, so there is nothing to
     // replay); only a successful authorization burns it.
     await this.storage.delete(`ar:${authReqId}`);
-    return { code, redirectUri, state, sessionId: defaultSessionId };
+    // Client identity for the caller's browsers.delta fan-out (Worker
+    // side: this DO has no SESSION_DO binding, so it cannot push itself).
+    // These fields are internal dirCall results only; the authorize
+    // handler answers with a redirect, never with this object.
+    const client = request.clientId ? await this.storage.get<ClientRow>(`c:${request.clientId}`) : undefined;
+    return {
+      code,
+      redirectUri,
+      state,
+      sessionId: defaultSessionId,
+      clientId: request.clientId,
+      clientName: client?.clientName ?? request.clientId,
+      scope: request.scope,
+    };
   }
 
   /**

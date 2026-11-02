@@ -98,6 +98,7 @@ export type DashboardRequest =
   | { type: "muze/tasks.cancel"; taskId: string }
   | { type: "muze/tasks.approvePlan"; taskId: string; bounds?: unknown }
   | { type: "muze/browsers/list" }
+  | { type: "muze/browsers/refresh" }
   | { type: "muze/browsers/set-default"; sessionId: string }
   | { type: "muze/browsers/rename"; sessionId: string; name: string }
   | { type: "muze/browsers/disconnect"; sessionId: string }
@@ -156,6 +157,15 @@ export interface DashboardResponse {
   task?: TaskView;
   /** Present ONLY in response to "muze/browsers/list". */
   browsers?: BrowsersDashboard;
+  /**
+   * Present on browsers list/refresh responses. `browsersStale` is true
+   * when the cached dashboard is served while the last full refresh
+   * failed; `browsersCachedAt` is when the served cache was written.
+   * No UI marker is attached to these fields (see the parent's
+   * follow-up); they are exposed so the flag is accurate.
+   */
+  browsersStale?: boolean;
+  browsersCachedAt?: number;
 }
 
 export const OFFSCREEN_TARGET = "muze-offscreen";

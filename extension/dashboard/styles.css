@@ -107,19 +107,11 @@ h2.sec:first-child{margin-top:0}
 .tile{position:relative;width:36px;height:36px;border-radius:9px;display:grid;place-items:center;flex:none;background:transparent;border:none;overflow:hidden}
 .tile.sm{width:32px;height:32px;border-radius:8px}
 .tile.brand-chatgpt{background:#111;color:#fff}
-.tile.brand-chrome{background:conic-gradient(#EA4335 0 120deg,#FBBC05 120deg 240deg,#34A853 240deg 360deg)}
-.tile.brand-chrome .brand-disc{width:18px;height:18px;border-radius:50%;background:#4285F4;border:3px solid #fff}
-.tile.brand-edge{background:linear-gradient(135deg,#0EE6B7,#0078D4)}
-.tile.brand-edge .brand-disc{width:100%;height:100%;display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px}
-.tile.brand-edge .brand-disc::after{content:"e"}
-.tile.brand-firefox{background:linear-gradient(135deg,#FF7139,#9059FF)}
-.tile.brand-firefox .brand-disc{width:100%;height:100%;display:grid;place-items:center;color:#fff;font-size:18px}
-.tile.brand-firefox .brand-disc::after{content:"◉"}
-.tile.brand-claude{background:var(--surface2);color:#D97757}
-.tile.brand-claude .brand-letter{font-weight:800;font-size:18px}
-.tile.brand-copilot{background:var(--surface2)}
-.tile.brand-copilot-mark{width:18px;height:18px;border-radius:50%;border:2px solid #0078D4;position:relative}
-.tile.brand-copilot-mark::after{content:"";position:absolute;inset:3px;border-radius:50%;background:#0078D4;opacity:.35}
+.tile.brand-chrome{background:#fff;color:#4285F4;box-shadow:inset 0 0 0 1px var(--border)}
+.tile.brand-edge{background:#fff;color:#0078D7;box-shadow:inset 0 0 0 1px var(--border)}
+.tile.brand-firefox{background:#fff;color:#FF7139;box-shadow:inset 0 0 0 1px var(--border)}
+.tile.brand-claude{background:#fff;color:#D97757;box-shadow:inset 0 0 0 1px var(--border)}
+.tile.brand-copilot{background:#fff;color:#000;box-shadow:inset 0 0 0 1px var(--border)}
 .tile.brand-letter-tile{background:var(--surface2);color:var(--muted);font-weight:800;font-size:16px}
 .filetile{font-size:11px;font-weight:800;color:#fff}
 .filetile.pdf{background:#DC2626} .filetile.img{background:#2563EB} .filetile.doc{background:#1D4ED8}

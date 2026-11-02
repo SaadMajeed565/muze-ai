@@ -9,7 +9,8 @@ import type {
 } from "../libs/tool-contracts/index.js";
 import { BridgeSlot, DoBridge, type BridgeToolResult, type GatewayBridge } from "./bridge.js";
 import { createGatewayMcpServer } from "./mcp.js";
-import { dirCall } from "./directory-client.js";
+import { browsersDeltaBrowser, browsersDeltaClient, dirCall, pushBrowsersDelta } from "./directory-client.js";
+import type { BrowsersDelta } from "../libs/tool-contracts/protocol.js";
 import { json, text } from "./util.js";
 import type { GatewayEnv } from "./config.js";
 
@@ -233,6 +234,18 @@ export class SessionDO implements DurableObject {
   private readonly taskMirror = new Map<string, TaskMirrorEntry>();
   private lastActivity = 0;
   private keepAliveScheduled = false;
+  /**
+   * Socket closed by the internal /disconnect-bridge route. disconnectBridge
+   * clears activeSocket before the runtime delivers webSocketClose, so the
+   * close handler would otherwise ignore that socket as stale and the
+   * connected=false delta would never fire. Recording it here lets the
+   * close handler emit exactly one delta for it (the socket-close path,
+   * not the disconnect handler itself) and then forget it. Sockets
+   * superseded by a new connection are never recorded, so a replacement
+   * never emits a spurious offline delta for the browser that just came
+   * online.
+   */
+  private disconnectPendingSocket: WebSocket | null = null;
   /** Socket waiting for its first-message auth, plus its deadline timer. */
   private pendingAuthSocket: WebSocket | null = null;
   private pendingAuthSessionId: string | null = null;
@@ -292,6 +305,20 @@ export class SessionDO implements DurableObject {
         return this.mcpClients();
       case "/disconnect-bridge":
         return this.disconnectBridge();
+      case "/push-browsers-delta": {
+        // Internal route, called only by pushBrowsersDelta fan-out (Worker
+        // handlers and this DO's own triggers). Delivers the delta to THIS
+        // session's bridge socket only — it never fans out again, so a
+        // fan-out cannot loop. Never throws: a closed/absent socket, a
+        // malformed body, or a send failure all report delivered:false.
+        let body: { delta?: unknown } = {};
+        try {
+          body = (await request.json()) as { delta?: unknown };
+        } catch {
+          body = {};
+        }
+        return this.pushBrowsersDelta(body.delta);
+      }
       case "/drop-mcp-client": {
         let body: { clientId?: unknown } = {};
         try {
@@ -354,10 +381,128 @@ export class SessionDO implements DurableObject {
     });
   }
 
+  /**
+   * Internal /push-browsers-delta route (see fetch switch). Sends the
+   * delta over this session's bridge socket when it is open; otherwise
+   * delivered:false. The send helper already guards on OPEN and the
+   * whole body is wrapped so a throwing socket can never fail the route.
+   */
+  private pushBrowsersDelta(delta: unknown): Response {
+    let delivered = false;
+    try {
+      const rec = delta && typeof delta === "object" ? (delta as { type?: unknown }) : null;
+      if (rec && typeof rec.type === "string" && this.activeSocket) {
+        this.send(this.activeSocket, { type: "browsers.delta", delta: delta as BrowsersDelta });
+        delivered = this.activeSocket.readyState === WebSocket.OPEN;
+      }
+    } catch {
+      delivered = false;
+    }
+    return json({ ok: true, delivered });
+  }
+
+  /**
+   * Shared account read for delta emission: the account's browser list
+   * (via DirectoryDO browsersForSession, the same read path
+   * listAccountBrowsers uses) plus this browser's own record. Returns
+   * null when the DO has no env (unit tests), no known browser session
+   * (e.g. a hibernation-resumed socket that never re-authenticated in
+   * this instance), or the account no longer exists (e.g. the browser
+   * was just removed) — in all cases the caller silently emits nothing.
+   */
+  private async accountBrowsersForDelta(): Promise<{
+    browsers: Array<Record<string, unknown>>;
+    defaultSessionId: string;
+    own: Record<string, unknown> | undefined;
+  } | null> {
+    if (!this.env || !this.browserSessionId) return null;
+    try {
+      const result = await dirCall(this.env, "browsersForSession", { sessionId: this.browserSessionId });
+      if (result.ok === false || !Array.isArray(result.browsers)) return null;
+      const browsers = result.browsers as Array<Record<string, unknown>>;
+      return {
+        browsers,
+        defaultSessionId: String(result.defaultSessionId ?? ""),
+        own: browsers.find((entry) => String(entry.sessionId ?? "") === this.browserSessionId),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Emit browser.upsert for this browser to every browser of the account
+   * (including this one: pushing to a just-closed socket is a harmless
+   * delivered:false no-op). Callers run this fire-and-forget; a failed
+   * directory read or fan-out never throws into the socket/MCP path. */
+  private async emitBrowserUpsert(connected: boolean, lastSeenAt?: number): Promise<void> {
+    try {
+      const account = await this.accountBrowsersForDelta();
+      if (!account || !account.own) return;
+      const delta: BrowsersDelta = {
+        type: "browser.upsert",
+        browser: browsersDeltaBrowser(account.own, account.defaultSessionId, {
+          connected,
+          ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+        }),
+      };
+      await pushBrowsersDelta(this.env as GatewayEnv, account.browsers.map((entry) => String(entry.sessionId ?? "")), delta);
+    } catch {
+      // ignore: delta delivery must never break the triggering path
+    }
+  }
+
+  /**
+   * Emit client.upsert for one OAuth client to every browser of the
+   * account. The row comes from DirectoryDO clientsForUser (same source
+   * as listAccountBrowsers) so names/scopes/authorization dates match a
+   * full fetch; when no token row exists yet the row falls back to the
+   * client id as its name with null dates, never invented values.
+   */
+  private async emitClientUpsert(
+    clientId: string,
+    live: boolean,
+    liveMeta?: { createdAt: number; lastActivityAt: number },
+  ): Promise<void> {
+    try {
+      if (!this.env || !this.browserSessionId || !clientId) return;
+      const account = await this.accountBrowsersForDelta();
+      if (!account) return;
+      let tokenEntry: Record<string, unknown> | undefined;
+      // clientsForUser needs the user id, which browsersForSession
+      // returns; re-read it here (directory-local) rather than threading
+      // it through accountBrowsersForDelta's shape.
+      try {
+        const sessionResult = await dirCall(this.env, "browsersForSession", { sessionId: this.browserSessionId });
+        const userId = String(sessionResult.userId ?? "");
+        if (userId) {
+          const clientsResult = await dirCall(this.env, "clientsForUser", { userId });
+          if (clientsResult.ok !== false && Array.isArray(clientsResult.clients)) {
+            tokenEntry = (clientsResult.clients as Array<Record<string, unknown>>).find(
+              (entry) => String(entry.clientId ?? "") === clientId && String(entry.sessionId ?? "") === this.browserSessionId,
+            );
+          }
+        }
+      } catch {
+        tokenEntry = undefined;
+      }
+      const row = tokenEntry ?? { clientId, clientName: clientId, scope: "", sessionId: this.browserSessionId };
+      const delta: BrowsersDelta = {
+        type: "client.upsert",
+        client: browsersDeltaClient(row, live, liveMeta),
+      };
+      await pushBrowsersDelta(this.env, account.browsers.map((entry) => String(entry.sessionId ?? "")), delta);
+    } catch {
+      // ignore: delta delivery must never break the triggering path
+    }
+  }
+
   /** Internal route: close the bridge socket only; the browser record and
    * its token stay valid, so the extension can reconnect (Disconnect). */
   private disconnectBridge(): Response {
     if (this.activeSocket) {
+      // Do NOT emit here: the single connected=false delta comes from
+      // webSocketClose for this socket (see disconnectPendingSocket).
+      this.disconnectPendingSocket = this.activeSocket;
       try {
         this.activeSocket.close(1000, "disconnected from dashboard");
       } catch {
@@ -371,7 +516,13 @@ export class SessionDO implements DurableObject {
     return json({ ok: true });
   }
 
-  /** Internal route: close live MCP transports for one OAuth client. */
+  /**
+   * Internal route: close live MCP transports for one OAuth client.
+   * Deliberately emits NO live=false delta here: the only caller is the
+   * Worker revoke handler, which fans out client.revoked immediately
+   * after this call — a live=false upsert first would be a redundant,
+   * immediately-superseded event for the same client.
+   */
   private async dropMcpClient(clientId: string): Promise<Response> {
     let dropped = 0;
     for (const [sessionId, meta] of [...this.sessionClients.entries()]) {
@@ -553,6 +704,12 @@ export class SessionDO implements DurableObject {
     } catch {
       // ignore: the socket may already be closed
     }
+    // Bridge attached/verified: this browser is online. Fire-and-forget
+    // (attachBridge is synchronous); authDevice already refreshed
+    // lastSeenAt before verification, so the directory row is current.
+    // A hibernation-resumed socket with no known browserSessionId in
+    // this instance emits nothing (see accountBrowsersForDelta).
+    void this.emitBrowserUpsert(true);
   }
 
   private send(ws: WebSocket, message: BridgeClientMessage): void {
@@ -608,8 +765,20 @@ export class SessionDO implements DurableObject {
       this.clearPendingAuth();
       return;
     }
+    // Close of a socket the disconnect route already closed: the bridge
+    // state is already cleared, but this is the one place the
+    // connected=false delta is emitted for a dashboard disconnect (the
+    // disconnect handler itself emits nothing).
+    if (ws === this.disconnectPendingSocket) {
+      this.disconnectPendingSocket = null;
+      console.log(`[bridge] close session=${this.state.id} code=${code} reason=${reason || "-"}`);
+      await this.emitBrowserUpsert(false, Date.now());
+      return;
+    }
     // Ignore the close of a socket that has already been superseded; otherwise
     // the stale socket's teardown would destroy the freshly attached bridge.
+    // (Superseded sockets also emit no offline delta: the replacement
+    // already announced this browser online.)
     if (ws !== this.activeSocket) {
       console.log(`[bridge] ignore stale close session=${this.state.id} code=${code}`);
       return;
@@ -619,6 +788,10 @@ export class SessionDO implements DurableObject {
     this.bridge = null;
     this.activeSocket = null;
     this.slot.set(null);
+    // Bridge socket closed: this browser is offline, lastSeenAt=now.
+    // Fanned out to ALL account browsers (the closed socket itself is a
+    // harmless delivered:false no-op), so remaining browsers learn at once.
+    await this.emitBrowserUpsert(false, Date.now());
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
@@ -626,11 +799,17 @@ export class SessionDO implements DurableObject {
       this.clearPendingAuth();
       return;
     }
+    if (ws === this.disconnectPendingSocket) {
+      this.disconnectPendingSocket = null;
+      await this.emitBrowserUpsert(false, Date.now());
+      return;
+    }
     if (ws !== this.activeSocket) return;
     this.bridge?.onClose("extension socket error");
     this.bridge = null;
     this.activeSocket = null;
     this.slot.set(null);
+    await this.emitBrowserUpsert(false, Date.now());
   }
 
   private async handleMcp(request: Request): Promise<Response> {
@@ -707,6 +886,11 @@ export class SessionDO implements DurableObject {
         createdAt: existing?.createdAt ?? Date.now(),
         lastActivityAt: Date.now(),
       });
+      // MCP session established (new initialize, or a cold-DO rebuild of
+      // a live session): the client is live on this browser. Anonymous
+      // initializes (no clientId) have no dashboard row and emit nothing.
+      const meta = this.sessionClients.get(sessionId);
+      if (meta) void this.emitClientUpsert(clientId, true, meta);
     }
     // Evict the oldest client when a caller keeps opening sessions without
     // closing them, bounding memory and persisted state. Sessions whose
@@ -723,13 +907,22 @@ export class SessionDO implements DurableObject {
       );
       if (!candidate) break;
       const stale = this.mcpSessions.get(candidate);
+      const evicted = this.sessionClients.get(candidate);
       this.mcpSessions.delete(candidate);
       this.sessionClients.delete(candidate);
       void stale?.close().catch(() => undefined);
+      // Eviction closes the session, so it is no longer live on this
+      // browser — same live=false upsert as a normal close.
+      if (evicted) void this.emitClientUpsert(evicted.clientId, false);
     }
   }
 
   private async dropSession(sessionId: string): Promise<void> {
+    // MCP session closed (transport onsessionclosed): the client is no
+    // longer live on this browser. The row keeps the list shape with
+    // live=false (connectedSince/lastActivityAt null, per
+    // listAccountBrowsers) — it is NOT a revocation, so no client.revoked.
+    const closed = this.sessionClients.get(sessionId);
     this.mcpSessions.delete(sessionId);
     this.sessionClients.delete(sessionId);
     const stored = await this.loadSessions();
@@ -737,6 +930,7 @@ export class SessionDO implements DurableObject {
       delete stored[sessionId];
       await this.state.storage.put(MCP_SESSIONS_KEY, stored);
     }
+    if (closed) await this.emitClientUpsert(closed.clientId, false);
   }
 
   private async loadSessions(): Promise<Record<string, PersistedMcpSession>> {

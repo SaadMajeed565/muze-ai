@@ -41,6 +41,10 @@ class FakeWebSocket {
     this.emit("open");
   }
 
+  deliver(data: unknown): void {
+    for (const listener of this.listeners.get("message") ?? []) listener({ data: JSON.stringify(data) });
+  }
+
   private emit(type: string): void {
     for (const listener of this.listeners.get(type) ?? []) listener({});
   }
@@ -90,6 +94,38 @@ describe("GatewaySocketTransport reconnection", () => {
     expect(manager.isConnected()).toBe(true);
     expect(manager.clientCount()).toBe(1);
 
+    manager.disposeAll();
+  });
+
+  it("routes browsers.delta frames to onBrowsersDelta and never to the protocol handler", () => {
+    const onBrowsersDelta = vi.fn();
+    const onEvent = vi.fn();
+    const manager = new BridgeManager({
+      registry: { descriptors: () => [], require: () => { throw new Error("unused"); }, get: () => undefined } as never,
+      policy: {} as never,
+      approvals: {} as never,
+      executor: {} as never,
+      getContext: () => ({}) as never,
+      server: { name: "test", version: "0.0.0" },
+      onBrowsersDelta,
+      onEvent,
+    });
+    manager.connectGateway("https://gw.example.com", "token");
+    FakeWebSocket.instances[0].open();
+    const delta = {
+      type: "browser.upsert",
+      browser: {
+        sessionId: "s1", name: "Laptop Chrome", browser: "Chrome", os: "Linux", version: "130",
+        createdAt: 1000, lastSeenAt: 2000, isDefault: true, connected: true,
+      },
+    };
+    FakeWebSocket.instances[0].deliver({ type: "browsers.delta", delta });
+    expect(onBrowsersDelta).toHaveBeenCalledTimes(1);
+    expect(onBrowsersDelta).toHaveBeenCalledWith(delta);
+    // No dashboard event and no host reply: the frame never reached
+    // HostProtocolHandler (only the auth frame was ever sent).
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(FakeWebSocket.instances[0].sent).toEqual([{ type: "auth", token: "token" }]);
     manager.disposeAll();
   });
 

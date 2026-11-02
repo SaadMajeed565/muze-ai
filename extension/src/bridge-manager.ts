@@ -1,4 +1,4 @@
-import type { BridgeClientMessage, BridgeEvent, BridgeHostMessage, ClientIdentity, ToolDescriptor } from "../libs/tool-contracts/index.js";
+import type { BrowsersDelta, BridgeClientMessage, BridgeEvent, BridgeHostMessage, ClientIdentity, ToolDescriptor } from "../libs/tool-contracts/index.js";
 import type { ApprovalBroker, PolicyEngine } from "../libs/security/index.js";
 import type { BrowserContext, ToolExecutor, ToolRegistry } from "../libs/browser-engine/index.js";
 import { HostProtocolHandler, type BridgeTransport, type TaskRunnerPort } from "./host-protocol.js";
@@ -14,6 +14,12 @@ export interface BridgeManagerDeps {
   server: { name: string; version: string };
   onEvent?: (event: BridgeEvent) => void;
   onConnectionsChanged?: () => void;
+  /**
+   * Gateway-pushed browsers delta. Delta frames are intercepted in
+   * `dispatch` and never reach HostProtocolHandler; the service worker
+   * applies them to the browsers cache and notifies the dashboard.
+   */
+  onBrowsersDelta?: (delta: BrowsersDelta) => void;
   onAuthFailure?: (reason: string) => void;
   legacyTools?: boolean;
   /** Phase 0 task runner, wired by the service worker; absent = tasks.* fail with "task engine not wired". */
@@ -113,6 +119,13 @@ export class BridgeManager {
   private dispatch(id: string, message: BridgeClientMessage): void {
     const connection = this.connections.get(id);
     if (!connection) return;
+    // Delta frames are push-only cache updates, not tool-protocol
+    // traffic: intercept them here and never pass them to
+    // HostProtocolHandler, which has no handler for them.
+    if (message.type === "browsers.delta") {
+      this.deps.onBrowsersDelta?.(message.delta);
+      return;
+    }
     if (message.type === "hello") this.deps.onEvent?.({ kind: "client.connected", client: message.client });
     void connection.handler.handle(message);
   }

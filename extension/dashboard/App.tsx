@@ -176,9 +176,11 @@ export function App(): preact.JSX.Element {
     });
   }, [currentKey]);
 
-  // Browser count for the header donut: fetched once and on every
-  // dashboard event, never on the 5s state poll (the donut does not
-  // need to tick that fast).
+  // Browser count for the header donut: refreshed once on mount and
+  // re-read (cache-only, cheap) on every dashboard event, never on
+  // the 5s state poll (the donut does not need to tick that fast).
+  // The event listener's scope is unchanged: any dashboard event
+  // re-reads the count from cache.
   useEffect(() => {
     let cancelled = false;
     const fetchCount = (): void => {
@@ -186,7 +188,9 @@ export function App(): preact.JSX.Element {
         if (!cancelled && response.ok && response.browsers) setBrowserCount(response.browsers.browsers.length);
       });
     };
-    fetchCount();
+    void sendRequest({ type: "muze/browsers/refresh" }).then((response) => {
+      if (!cancelled && response.ok && response.browsers) setBrowserCount(response.browsers.browsers.length);
+    });
     const listener = (message: { type?: string }): void => {
       if (message?.type === "muze/event" || message?.type === "uabb/event") fetchCount();
     };

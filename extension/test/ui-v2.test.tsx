@@ -70,7 +70,11 @@ function stubBrowsers(): void {
   vi.stubGlobal("chrome", {
     runtime: {
       sendMessage: vi.fn(async (request: { type?: string }) => {
-        if (request.type === "muze/browsers/list") return { ok: true, browsers };
+        // Pages mount through the refresh route and re-read via the
+        // cache-only list after a `browsers.changed` event; both serve
+        // the same fixture here (the service worker's cache semantics
+        // are covered by browsers-cache.test.ts, not by this stub).
+        if (request.type === "muze/browsers/list" || request.type === "muze/browsers/refresh") return { ok: true, browsers };
         if (request.type === "muze/tasks.list") return { ok: true, tasks: [] };
         if (request.type === "muze/audit") return { ok: true, audit: [] };
         return { ok: false, error: "unknown" };

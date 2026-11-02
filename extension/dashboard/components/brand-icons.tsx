@@ -2,14 +2,11 @@ import { useRef } from "preact/hooks";
 
 /**
  * Brand tiles for browsers and AI apps, bundled inline — never
- * hotlinked. Two marks are the real artwork from the locked reference:
- * the ChatGPT OpenAI knot and the Gemini gradient star. The remaining
- * marks are the reference's own fallback artwork (Chrome's three-colour
- * disc, Edge's gradient tile, Claude's and Copilot's letter/circle
- * tiles): the official Simple Icons paths could not be fetched for
- * this build, so those tiles stay approximations — they are labelled
- * as such here and must be replaced with the official SVGs when the
- * paths are available. Brand colour lives only inside the mark itself.
+ * hotlinked. All seven marks are the real artwork: the ChatGPT OpenAI
+ * knot and the Gemini gradient star from the locked reference, plus
+ * the official Simple Icons paths for Chrome, Edge, Firefox, Claude
+ * and Copilot, inlined verbatim. Brand colour lives only inside the
+ * mark itself; the tiles stay white in both themes.
  */
 
 export type BrandKey = "chatgpt" | "chrome" | "edge" | "claude" | "gemini" | "firefox" | "copilot" | null;
@@ -56,14 +53,59 @@ function GeminiStar({ size }: { size: number }): preact.JSX.Element {
   );
 }
 
+/** Official Simple Icons chrome mark, path copied verbatim from the downloaded SVG. */
+function ChromeMark({ size }: { size: number }): preact.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 0C8.21 0 4.831 1.757 2.632 4.501l3.953 6.848A5.454 5.454 0 0 1 12 6.545h10.691A12 12 0 0 0 12 0M1.931 5.47A11.94 11.94 0 0 0 0 12c0 6.012 4.42 10.991 10.189 11.864l3.953-6.847a5.45 5.45 0 0 1-6.865-2.29zm13.342 2.166a5.446 5.446 0 0 1 1.45 7.09l.002.001h-.002l-5.344 9.257q.309.015.621.016c6.627 0 12-5.373 12-12c0-1.54-.29-3.011-.818-4.364zM12 16.364a4.364 4.364 0 1 1 0-8.728a4.364 4.364 0 0 1 0 8.728" />
+    </svg>
+  );
+}
+
+/** Official Simple Icons edge mark, path copied verbatim from the downloaded SVG. */
+function EdgeMark({ size }: { size: number }): preact.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M21.86 17.86q.14 0 .25.12q.1.13.1.25t-.11.33l-.32.46l-.43.53l-.44.5q-.21.25-.38.42l-.22.23q-.58.53-1.34 1.04t-1.6.91q-.86.4-1.74.64t-1.67.24q-.9 0-1.69-.28q-.8-.28-1.48-.78T9.57 21.3q-.53-.66-.92-1.44q-.38-.77-.58-1.6t-.2-1.67q0-1 .32-1.96q.33-.97.87-1.8q.14.95.55 1.77t1.02 1.5q.6.68 1.38 1.21q.78.54 1.64.9t1.77.56q.92.2 1.8.2q1.12 0 2.18-.24q1.06-.23 2.06-.72l.2-.1zm-15.5-1.27q0 1.1.27 2.15q.27 1.06.78 2.03q.51.96 1.24 1.77q.74.82 1.66 1.4q-1.47-.2-2.8-.74q-1.33-.55-2.48-1.37q-1.15-.83-2.08-1.9q-.92-1.07-1.58-2.33T.36 14.94Q0 13.54 0 12.06q0-.81.32-1.49q.31-.68.83-1.23q.53-.55 1.2-.96q.66-.4 1.35-.66q.74-.27 1.5-.39q.78-.12 1.55-.12q.7 0 1.42.1q.72.12 1.4.35t1.32.57q.63.35 1.16.83q-.35 0-.7.07q-.33.07-.65.23v-.02q-.63.28-1.2.74t-1.05 1.04t-.87 1.26q-.38.67-.65 1.39q-.27.71-.42 1.44q-.15.72-.15 1.38M11.96.06q1.7 0 3.33.39q1.63.38 3.07 1.15q1.43.77 2.62 1.93q1.18 1.16 1.98 2.7q.49.94.76 1.96q.28 1 .28 2.08q0 .89-.23 1.7q-.24.8-.69 1.48t-1.1 1.22q-.64.53-1.45.88q-.54.24-1.11.36q-.58.13-1.16.13q-.42 0-.97-.03q-.54-.03-1.1-.12q-.55-.1-1.05-.28q-.5-.19-.84-.5q-.12-.09-.23-.24q-.1-.16-.1-.33q0-.15.16-.35t.35-.5q.2-.28.36-.68t.16-.95q0-1.06-.4-1.96q-.4-.91-1.06-1.64q-.66-.74-1.52-1.28q-.86-.55-1.79-.89q-.84-.3-1.72-.44q-.87-.14-1.76-.14q-1.55 0-3.06.45T.94 7.55q.71-1.74 1.81-3.13q1.1-1.38 2.52-2.35Q6.68 1.1 8.37.58q1.7-.52 3.58-.52Z" />
+    </svg>
+  );
+}
+
+/** Official Simple Icons firefox mark, path copied verbatim from the downloaded SVG. */
+function FirefoxMark({ size }: { size: number }): preact.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M20.452 3.445a11 11 0 0 0-2.482-1.908C16.944.997 15.098.093 12.477.032q-1.1-.026-2.174.144c-.72.114-1.398.292-2.118.56c-1.017.377-1.996.975-2.574 1.554c.583-.349 1.476-.733 2.55-.992a10.1 10.1 0 0 1 3.729-.167c2.341.34 4.178 1.381 5.48 2.625a8 8 0 0 1 1.298 1.587c1.468 2.382 1.33 5.376.184 7.142c-.85 1.312-2.67 2.544-4.37 2.53c-.583-.023-1.438-.152-2.25-.566c-2.629-1.343-3.021-4.688-1.118-6.306c-.632-.136-1.82.13-2.646 1.363c-.742 1.107-.7 2.816-.242 4.028a6.5 6.5 0 0 1-.59-1.895a7.7 7.7 0 0 1 .416-3.845A8.2 8.2 0 0 1 9.45 5.399c.896-1.069 1.908-1.72 2.75-2.005c-.54-.471-1.411-.738-2.421-.767C8.31 2.583 6.327 3.061 4.7 4.41a8.2 8.2 0 0 0-1.976 2.414c-.455.836-.691 1.659-.697 1.678c.122-1.445.704-2.994 1.248-4.055c-.79.413-1.827 1.668-2.41 3.042C.095 9.37-.2 11.608.14 13.989c.966 5.668 5.9 9.982 11.843 9.982C18.62 23.971 24 18.591 24 11.956a11.93 11.93 0 0 0-3.548-8.511" />
+    </svg>
+  );
+}
+
+/** Official Simple Icons claude mark, path copied verbatim from the downloaded SVG. */
+function ClaudeMark({ size }: { size: number }): preact.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="#D97757" aria-hidden="true">
+      <path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z" />
+    </svg>
+  );
+}
+
+/** Official Simple Icons copilot mark, path copied verbatim from the downloaded SVG. */
+function CopilotMark({ size }: { size: number }): preact.JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M23.922 16.997C23.061 18.492 18.063 22.02 12 22.02S.939 18.492.078 16.997A.6.6 0 0 1 0 16.741v-2.869a1 1 0 0 1 .053-.22c.372-.935 1.347-2.292 2.605-2.656c.167-.429.414-1.055.644-1.517a10 10 0 0 1-.052-1.086c0-1.331.282-2.499 1.132-3.368c.397-.406.89-.717 1.474-.952C7.255 2.937 9.248 1.98 11.978 1.98s4.767.957 6.166 2.093c.584.235 1.077.546 1.474.952c.85.869 1.132 2.037 1.132 3.368c0 .368-.014.733-.052 1.086c.23.462.477 1.088.644 1.517c1.258.364 2.233 1.721 2.605 2.656a.8.8 0 0 1 .053.22v2.869a.6.6 0 0 1-.078.256m-11.75-5.992h-.344a4 4 0 0 1-.355.508c-.77.947-1.918 1.492-3.508 1.492c-1.725 0-2.989-.359-3.782-1.259a2 2 0 0 1-.085-.104L4 11.746v6.585c1.435.779 4.514 2.179 8 2.179s6.565-1.4 8-2.179v-6.585l-.098-.104s-.033.045-.085.104c-.793.9-2.057 1.259-3.782 1.259c-1.59 0-2.738-.545-3.508-1.492a4 4 0 0 1-.355-.508m2.328 3.25c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1s-1-.451-1-1v-2c0-.549.451-1 1-1m-5 0c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1s-1-.451-1-1v-2c0-.549.451-1 1-1m3.313-6.185c.136 1.057.403 1.913.878 2.497c.442.544 1.134.938 2.344.938c1.573 0 2.292-.337 2.657-.751c.384-.435.558-1.15.558-2.361c0-1.14-.243-1.847-.705-2.319c-.477-.488-1.319-.862-2.824-1.025c-1.487-.161-2.192.138-2.533.529c-.269.307-.437.808-.438 1.578v.021q0 .397.063.893m-1.626 0q.063-.496.063-.894v-.02c-.001-.77-.169-1.271-.438-1.578c-.341-.391-1.046-.69-2.533-.529c-1.505.163-2.347.537-2.824 1.025c-.462.472-.705 1.179-.705 2.319c0 1.211.175 1.926.558 2.361c.365.414 1.084.751 2.657.751c1.21 0 1.902-.394 2.344-.938c.475-.584.742-1.44.878-2.497" />
+    </svg>
+  );
+}
+
 export interface BrandIconProps {
   name: string | null | undefined;
   small?: boolean;
 }
 
 /**
- * One brand tile: real marks where the reference supplies them
- * (ChatGPT knot, Gemini star), reference fallback artwork otherwise.
+ * One brand tile, always a real mark (ChatGPT knot, Gemini star,
+ * Simple Icons Chrome/Edge/Firefox/Claude/Copilot).
  * Unknown names get a neutral letter tile — never an invented logo.
  */
 export function BrandIcon({ name, small }: BrandIconProps): preact.JSX.Element {
@@ -87,19 +129,37 @@ export function BrandIcon({ name, small }: BrandIconProps): preact.JSX.Element {
   if (key === "claude") {
     return (
       <span class={tileClass} aria-hidden="true">
-        <span class="brand-letter">C</span>
+        <ClaudeMark size={small ? 20 : 22} />
       </span>
     );
   }
   if (key === "copilot") {
     return (
       <span class={tileClass} aria-hidden="true">
-        <span class="brand-copilot-mark" />
+        <CopilotMark size={small ? 20 : 22} />
       </span>
     );
   }
-  if (key === "chrome" || key === "edge" || key === "firefox") {
-    return <span class={tileClass} aria-hidden="true"><span class="brand-disc" /></span>;
+  if (key === "chrome") {
+    return (
+      <span class={tileClass} aria-hidden="true">
+        <ChromeMark size={small ? 20 : 22} />
+      </span>
+    );
+  }
+  if (key === "edge") {
+    return (
+      <span class={tileClass} aria-hidden="true">
+        <EdgeMark size={small ? 20 : 22} />
+      </span>
+    );
+  }
+  if (key === "firefox") {
+    return (
+      <span class={tileClass} aria-hidden="true">
+        <FirefoxMark size={small ? 20 : 22} />
+      </span>
+    );
   }
   return (
     <span class={tileClass + " brand-letter-tile"} aria-hidden="true">

@@ -92,6 +92,38 @@ export interface ApprovalWaitMessage {
   timeoutMs?: number;
 }
 
+export interface BrowsersDeltaBrowser {
+  sessionId: string;
+  name: string;
+  browser: string;
+  os: string;
+  version: string;
+  createdAt: number | null;
+  lastSeenAt: number | null;
+  isDefault: boolean;
+  connected: boolean;
+}
+
+export interface BrowsersDeltaClient {
+  clientId: string;
+  clientName: string;
+  scope: string;
+  sessionId: string;
+  live: boolean;
+  connectedSince: number | null;
+  lastActivityAt: number | null;
+  authorizedSince: number | null;
+  lastRefreshedAt: number | null;
+  expiresAt: number | null;
+}
+
+export type BrowsersDelta =
+  | { type: "browser.upsert"; browser: BrowsersDeltaBrowser }
+  | { type: "browser.removed"; sessionId: string }
+  | { type: "default.changed"; defaultSessionId: string }
+  | { type: "client.upsert"; client: BrowsersDeltaClient }
+  | { type: "client.revoked"; clientId: string; sessionId?: string };
+
 export type BridgeClientMessage =
   | { type: "hello"; id: string; protocolVersion: string; client: ClientIdentity }
   | { type: "registry.list"; id: string }
@@ -101,7 +133,8 @@ export type BridgeClientMessage =
   | ToolCallBatchMessage
   | ApprovalDecisionMessage
   | CancelMessage
-  | { type: "ping"; id: string };
+  | { type: "ping"; id: string }
+  | { type: "browsers.delta"; delta: BrowsersDelta };
 
 export type BridgeHostMessage =
   | { type: "hello.ok"; id: string; protocolVersion: string; registryVersion: string; server: { name: string; version: string } }
@@ -121,6 +154,7 @@ export type BridgeEvent =
   | { kind: "client.disconnected"; client: ClientIdentity }
   | { kind: "approval.pending"; approval: ApprovalRequestInfo }
   | { kind: "policy.changed" }
+  | { kind: "browsers.changed" }
   | { kind: "audit" }
   | { kind: "kill-switch"; engaged: boolean }
   | {

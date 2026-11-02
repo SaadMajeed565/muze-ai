@@ -2,6 +2,14 @@ import { REGISTRY_VERSION, UNIFIED_TOOL_NAMES, type BridgeEvent, type ToolDescri
 import { AuditLog, ApprovalBroker, PolicyEngine, RateLimiter } from "../libs/security/index.js";
 import { ChromeWorkingTabGroup, ToolExecutor, createToolRegistry } from "../libs/browser-engine/index.js";
 import { BridgeManager } from "./bridge-manager.js";
+import {
+  applyDeltaToCache,
+  isLastRefreshFailed,
+  readBrowsersCache,
+  refreshBrowsersCache,
+  setLastRefreshFailed,
+  writeBrowsersCache,
+} from "./browsers-cache.js";
 import { ChromeBrowserContext } from "./chrome-context.js";
 import { ChromeOffscreenMessenger } from "./offscreen-messenger.js";
 import {
@@ -19,6 +27,7 @@ import {
 } from "./gateway-client.js";
 import type { BrowsersDashboard, DashboardBrowser, DashboardMcpClient, DashboardRequest, DashboardResponse, DashboardSnapshot, DashboardState, GatewayInfo } from "./messages.js";
 import { LEGACY_OFFSCREEN_TARGET, OFFSCREEN_TARGET } from "./messages.js";
+import { prefetchFaviconForTab } from "./favicon-cache.js";
 import {
   DEFAULT_BRIDGE_SETTINGS,
   GATEWAY_URL,
@@ -472,6 +481,17 @@ function buildManager(): BridgeManager {
     server: SERVER_INFO,
     legacyTools: false,
     onEvent: notifyDashboard,
+    onConnectionsChanged: () => {
+      // Socket (re)connected: refresh the browsers cache in the
+      // background. The guard matters because this callback also fires
+      // on register (before the socket is up) and on disconnect.
+      if (!activeSettings.gatewayToken) return;
+      if (!manager?.isConnected()) return;
+      void refreshBrowsersCache(loadBrowsersDashboard, () => notifyDashboard({ kind: "browsers.changed" })).catch(() => undefined);
+    },
+    onBrowsersDelta: (delta) => {
+      void applyDeltaToCache(delta).then(() => notifyDashboard({ kind: "browsers.changed" }));
+    },
     onAuthFailure: (reason) => markGatewayAuthRequired(activeSettings.gatewayToken, reason),
     tasks: getTaskRunner(),
     getBrowserSessionId: () => (activeSettings.gatewaySessionId ? activeSettings.gatewaySessionId : undefined),
@@ -831,6 +851,55 @@ async function loadBrowsersDashboard(): Promise<BrowsersDashboard> {
   };
 }
 
+/**
+ * Browsers data flow (extension side). `muze/browsers/list` is
+ * CACHE-ONLY and never fetches; `muze/browsers/refresh` is the only
+ * dashboard route that fetches, and only as follows:
+ * - cache present: return it instantly and refresh in the background
+ *   (deduped by `refreshBrowsersCache`); success broadcasts
+ *   `browsers.changed`, failure only sets the stale flag.
+ * - no cache (first load): await the fetch, store it, return it; on
+ *   failure return the existing error shape.
+ * `browsersStale` is the last-refresh-failed flag at serve time, so
+ * cached data served after a failed refresh is honestly flagged.
+ */
+async function browsersRefreshResponse(): Promise<DashboardResponse> {
+  const cached = await readBrowsersCache();
+  if (cached) {
+    void refreshBrowsersCache(loadBrowsersDashboard, () => notifyDashboard({ kind: "browsers.changed" })).catch(() => undefined);
+    return {
+      ok: true,
+      browsers: cached.dashboard,
+      browsersStale: isLastRefreshFailed(),
+      browsersCachedAt: cached.fetchedAt,
+    };
+  }
+  try {
+    const dashboard = await refreshBrowsersCache(loadBrowsersDashboard, () => notifyDashboard({ kind: "browsers.changed" }));
+    const stored = await readBrowsersCache();
+    return { ok: true, browsers: dashboard, browsersStale: false, browsersCachedAt: stored?.fetchedAt };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Post-mutation re-fetch: the mutation handlers keep their current
+ * behaviour (gateway POST, then a fresh full fetch), and additionally
+ * write that fresh dashboard to the cache, clear the stale flag (this
+ * was a full successful fetch, same as a refresh), and broadcast
+ * `browsers.changed`. A fresh fetch here is deliberately NOT deduped
+ * through `refreshBrowsersCache`: a refresh started before the mutation
+ * could otherwise return (and cache) the pre-mutation snapshot.
+ */
+async function reloadBrowsersAfterMutation(): Promise<{ dashboard: BrowsersDashboard; cachedAt: number }> {
+  const dashboard = await loadBrowsersDashboard();
+  const entry = await writeBrowsersCache(dashboard);
+  setLastRefreshFailed(false);
+  notifyDashboard({ kind: "browsers.changed" });
+  return { dashboard, cachedAt: entry.fetchedAt };
+}
+
 async function handleRequest(request: DashboardRequest): Promise<DashboardResponse> {
   switch (request.type) {
     case "muze/state":
@@ -1107,12 +1176,20 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
       }
     }
     case "muze/browsers/list": {
-      try {
-        return { ok: true, browsers: await loadBrowsersDashboard() };
-      } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) };
-      }
+      // CACHE-ONLY: this must never fetch. Pages call this after a
+      // `browsers.changed` event (or as a cheap re-read); the refresh
+      // route below is the only dashboard route that fetches.
+      const cached = await readBrowsersCache();
+      if (!cached) return { ok: false, error: "no cached browsers" };
+      return {
+        ok: true,
+        browsers: cached.dashboard,
+        browsersStale: isLastRefreshFailed(),
+        browsersCachedAt: cached.fetchedAt,
+      };
     }
+    case "muze/browsers/refresh":
+      return browsersRefreshResponse();
     case "muze/browsers/set-default":
     case "muze/browsers/rename":
     case "muze/browsers/disconnect":
@@ -1135,7 +1212,8 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
         // gateway; the extension's existing keepalive may reconnect it
         // later, exactly as after any transient drop. Disconnect is a
         // socket close, not a sign-out: the token stays valid.
-        return { ok: true, browsers: await loadBrowsersDashboard() };
+        const reloaded = await reloadBrowsersAfterMutation();
+        return { ok: true, browsers: reloaded.dashboard, browsersStale: false, browsersCachedAt: reloaded.cachedAt };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
@@ -1146,7 +1224,8 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
           method: "POST",
           body: JSON.stringify({ clientId: request.clientId, ...(request.sessionId ? { sessionId: request.sessionId } : {}) }),
         });
-        return { ok: true, browsers: await loadBrowsersDashboard() };
+        const reloaded = await reloadBrowsersAfterMutation();
+        return { ok: true, browsers: reloaded.dashboard, browsersStale: false, browsersCachedAt: reloaded.cachedAt };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
@@ -1218,11 +1297,39 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   void connectGateway(activeSettings);
 });
 
+/**
+ * Warm the per-domain favicon cache for the active tab, so the
+ * dashboard card tile can show instantly instead of waiting for the
+ * site (and its favIconUrl) to finish loading. Best-effort only:
+ * prefetch never fails a task or a connection.
+ */
+async function warmActiveTabFavicon(): Promise<void> {
+  try {
+    if (typeof chrome === "undefined" || !chrome.tabs?.query) return;
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    if (tab) await prefetchFaviconForTab({ url: tab.url, favIconUrl: tab.favIconUrl });
+  } catch {
+    // Prefetch is best-effort.
+  }
+}
+
 async function initialize(): Promise<void> {
   const storedPolicy = await loadPolicy();
   policy.setConfig(storedPolicy);
   activeSettings = await loadBridgeSettings();
   onboarding = await loadOnboarding();
+  try {
+    chrome.tabs.onActivated?.addListener?.(() => {
+      void warmActiveTabFavicon();
+    });
+    chrome.tabs.onUpdated?.addListener?.((_tabId, _changeInfo, tab) => {
+      if (tab?.active) void warmActiveTabFavicon();
+    });
+  } catch {
+    // Tab listeners are best-effort; the dashboard resolves favicons too.
+  }
+  void warmActiveTabFavicon();
   // The observer keeps running in pages that were already open, so its
   // on/off state is restored and re-applied after a service worker restart.
   await context.observer?.restore?.();

@@ -7,6 +7,7 @@ import type { TabId } from "../logic.js";
 import { sendRequest } from "../logic.js";
 import { dedupeAppsByName, plainStep, plainStepState, resolveAppName, timelineIconForStep } from "../ui-logic.js";
 import { currentBrowser, tabCountText } from "../browsers-logic.js";
+import { FAVICON_CACHE_KEY, domainOf, prefetchFaviconForTab } from "../../src/favicon-cache.js";
 import { Icon } from "../components/Icon.js";
 import { BrandIcon } from "../components/brand-icons.js";
 import { Button } from "../components/primitives.js";
@@ -55,14 +56,35 @@ export function HomePage({
     }
   });
 
+  // Browsers data flow: mount goes through the refresh route (instant
+  // from cache, first fetch when there is none); later updates arrive
+  // via `browsers.changed` events and re-read the cache-only list.
+  // List failures are silently ignored — current data, if any, stays.
+  // The tasks poll below is untouched.
   useEffect(() => {
     if (!gateway.signedIn) return;
     let cancelled = false;
-    void sendRequest({ type: "muze/browsers/list" }).then((response) => {
+    const loadFromCache = (): void => {
+      void sendRequest({ type: "muze/browsers/list" }).then((response) => {
+        if (!cancelled && response.ok && response.browsers) setBrowsersData(response.browsers);
+      });
+    };
+    void sendRequest({ type: "muze/browsers/refresh" }).then((response) => {
       if (!cancelled && response.ok && response.browsers) setBrowsersData(response.browsers);
     });
+    const listener = (message: { type?: string; event?: { kind?: string } }): void => {
+      if (
+        (message?.type === "muze/event" || message?.type === "uabb/event") &&
+        message.event?.kind === "browsers.changed"
+      ) {
+        loadFromCache();
+      }
+    };
+    const onMessage = typeof chrome === "undefined" ? undefined : chrome?.runtime?.onMessage;
+    if (onMessage?.addListener) onMessage.addListener(listener);
     return () => {
       cancelled = true;
+      if (onMessage?.removeListener) onMessage.removeListener(listener);
     };
   }, [gateway.signedIn]);
 
@@ -108,22 +130,55 @@ export function HomePage({
     };
   }, [loadTasks]);
 
-  // Card tile favicon: the active tab's favIconUrl (the "tabs"
-  // permission makes chrome.tabs reachable from this dashboard page).
-  // Task steps carry no site, so the reference's per-step-site rule
-  // (collapsed = latest step's site, expanded = second visible step)
-  // cannot be honoured from real data — the tile follows the tab being
-  // worked on instead.
+  // Card tile favicon, fallback chain: prefetched per-domain cache
+  // first (instant, even while the site is still loading), then the
+  // active tab's favIconUrl, then the brand tile. The tab's favIconUrl
+  // stays empty until the site finishes loading, so the cache is what
+  // makes the tile instant; a storage listener picks up the fresh
+  // entry when the background fetch lands. Task steps carry no site,
+  // so the reference's per-step-site rule (collapsed = latest step's
+  // site, expanded = second visible step) cannot be honoured from
+  // real data — the tile follows the tab being worked on instead.
   useEffect(() => {
     if (typeof chrome === "undefined" || !chrome.tabs?.query) return;
     let cancelled = false;
-    chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
-      if (!cancelled) setFavicon(tabs[0]?.favIconUrl ?? null);
-    }).catch(() => undefined);
+    let lastDomain: string | null = null;
+    const resolve = async (): Promise<void> => {
+      try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (cancelled) return;
+        const tab = tabs[0];
+        const domain = domainOf(tab?.url);
+        lastDomain = domain;
+        const src = await prefetchFaviconForTab({ url: tab?.url, favIconUrl: tab?.favIconUrl });
+        if (!cancelled && domain === lastDomain) setFavicon(src);
+      } catch {
+        // Keep the previous tile on any tab-query failure.
+      }
+    };
+    void resolve();
+    const onActivated = (): void => {
+      void resolve();
+    };
+    const onUpdated = (_tabId: number, _changeInfo: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab): void => {
+      if (tab?.active) void resolve();
+    };
+    const onStorageChanged = (changes: Record<string, { newValue?: unknown }>): void => {
+      const next = changes[FAVICON_CACHE_KEY]?.newValue as Record<string, { dataUrl?: string }> | undefined;
+      if (lastDomain && next && typeof next[lastDomain]?.dataUrl === "string") {
+        setFavicon(next[lastDomain].dataUrl as string);
+      }
+    };
+    chrome.tabs.onActivated?.addListener?.(onActivated);
+    chrome.tabs.onUpdated?.addListener?.(onUpdated);
+    chrome.storage?.onChanged?.addListener?.(onStorageChanged);
     return () => {
       cancelled = true;
+      chrome.tabs.onActivated?.removeListener?.(onActivated);
+      chrome.tabs.onUpdated?.removeListener?.(onUpdated);
+      chrome.storage?.onChanged?.removeListener?.(onStorageChanged);
     };
-  }, [tasks]);
+  }, []);
 
   const thisBrowser = browsersData ? currentBrowser(browsersData) : null;
   const browserConnected = snapshot.bridgeStatus === "connected";
@@ -209,6 +264,9 @@ export function HomePage({
         </summary>
         <div style={{ position: "relative" }}>
           {runningTask ? (
+            runningTask.steps.length === 0 ? (
+              <div class="muted mt12" style={{ fontSize: "13px" }}>Steps will appear here as the task runs.</div>
+            ) : (
             <div id="browserTimeline" class="tl mt12" ref={timelineRef} onScroll={onTimelineScroll}>
               {[...runningTask.steps].sort((a, b) => a.index - b.index).map((step) => {
                 const plain = plainStep(step);
@@ -224,6 +282,7 @@ export function HomePage({
                 );
               })}
             </div>
+            )
           ) : (
             <div class="muted mt12" style={{ fontSize: "13px" }}>Nothing running right now</div>
           )}

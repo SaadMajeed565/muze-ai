@@ -1,5 +1,6 @@
 import { GATEWAY_NAME, GATEWAY_VERSION, type GatewayEnv } from "./config.js";
-import { dirCall } from "./directory-client.js";
+import { browsersDeltaBrowser, dirCall, pushBrowsersDelta } from "./directory-client.js";
+import type { BrowsersDelta } from "../libs/tool-contracts/protocol.js";
 import {
   authorizationServerMetadata,
   handleAuthorizeGet,
@@ -467,6 +468,13 @@ async function setAccountDefaultBrowser(request: Request, env: GatewayEnv): Prom
   }
   const result = await dirCall(env, "setDefaultBrowser", { userId: account.userId, targetSessionId: target });
   if (result.ok === false) return json({ error: result.error ?? "could not set default browser" }, 400);
+  // Delta, after the storage write succeeded. Fire-and-forget: a push
+  // failure must never fail or roll back the default change.
+  void pushBrowsersDelta(
+    env,
+    account.browsers.map((entry) => String(entry.sessionId ?? "")),
+    { type: "default.changed", defaultSessionId: String(result.defaultSessionId ?? target) },
+  );
   return json({ defaultSessionId: result.defaultSessionId });
 }
 
@@ -481,6 +489,24 @@ async function renameAccountBrowser(request: Request, env: GatewayEnv): Promise<
   }
   const result = await dirCall(env, "renameBrowser", { userId: account.userId, targetSessionId: target, name });
   if (result.ok === false) return json({ error: result.error ?? "could not rename browser" }, 400);
+  // Delta, after the storage write succeeded. The row is the pre-mutation
+  // directory record with the new name overlaid (the snapshot still
+  // holds the old name); connected comes from the session DO's live
+  // status (same read listAccountBrowsers uses).
+  const entry = account.browsers.find((item) => String(item.sessionId ?? "") === target);
+  if (entry) {
+    const status = await sessionDoJson(env, target, "/status");
+    void pushBrowsersDelta(
+      env,
+      account.browsers.map((item) => String(item.sessionId ?? "")),
+      {
+        type: "browser.upsert",
+        browser: browsersDeltaBrowser({ ...entry, name: String(result.name ?? name) }, account.defaultSessionId, {
+          connected: Boolean(status?.connected),
+        }),
+      },
+    );
+  }
   return json({ sessionId: result.sessionId, name: result.name });
 }
 
@@ -498,6 +524,15 @@ async function removeAccountBrowser(request: Request, env: GatewayEnv): Promise<
   // DirectoryDO record and tokens are already gone.
   await sessionDoJson(env, target, "/disconnect-bridge", { method: "POST" });
   await sessionDoJson(env, target, "/purge-mcp-sessions", { method: "POST" });
+  // Delta, after removal persisted and the browser torn down, to the
+  // REMAINING browsers only (the removed browser has no record left).
+  // Any connected=false upsert from its socket close is a no-op: its
+  // directory account read already fails, so it emits nothing.
+  void pushBrowsersDelta(
+    env,
+    account.browsers.map((entry) => String(entry.sessionId ?? "")).filter((id) => id && id !== target),
+    { type: "browser.removed", sessionId: target },
+  );
   return json({ removed: result.removed, defaultSessionId: result.defaultSessionId });
 }
 
@@ -509,6 +544,10 @@ async function disconnectAccountBrowser(request: Request, env: GatewayEnv): Prom
   if (!account.browsers.some((entry) => String(entry.sessionId ?? "") === target)) {
     return json({ error: "unknown browser" }, 404);
   }
+  // NO extra delta here by design: closing the socket makes the
+  // SessionDO's webSocketClose path emit the single browser.upsert with
+  // connected=false (via disconnectPendingSocket), so the remaining
+  // browsers learn of the disconnect without a duplicate event.
   await sessionDoJson(env, target, "/disconnect-bridge", { method: "POST" });
   return json({ disconnected: target });
 }
@@ -535,6 +574,18 @@ async function revokeAccountMcpClient(request: Request, env: GatewayEnv): Promis
       body: JSON.stringify({ clientId }),
     });
   }
+  // Delta, after revocation persisted and live transports dropped, to
+  // ALL account browsers (each dashboard caches the account-wide client
+  // list). sessionId is included only when the revoke was scoped to one
+  // browser; an account-wide revoke omits it.
+  const revokedDelta: BrowsersDelta = target
+    ? { type: "client.revoked", clientId, sessionId: target }
+    : { type: "client.revoked", clientId };
+  void pushBrowsersDelta(
+    env,
+    account.browsers.map((entry) => String(entry.sessionId ?? "")),
+    revokedDelta,
+  );
   return json({ revoked: result.revoked ?? 0 });
 }
 

@@ -1,5 +1,5 @@
 import type { GatewayEnv } from "./config.js";
-import { dirCall } from "./directory-client.js";
+import { browsersDeltaClient, dirCall, pushBrowsersDelta } from "./directory-client.js";
 import { escapeHtml, html, json, readJson } from "./util.js";
 
 const SUPPORTED_SCOPES = ["read:tools", "call:tools"];
@@ -178,6 +178,46 @@ export async function handleAuthorizePost(request: Request, env: GatewayEnv, use
     return html(authorizePage("Client", authReqId, "", "", error), 400, { "content-security-policy": AUTHORIZE_CSP });
   }
   console.log("[authorize] approved");
+  // Delta: a client was newly authorized (code issued for the signed-in
+  // user's default browser). It holds no tokens yet and no live MCP
+  // session, so live=false with authorizedSince=now; the token exchange
+  // that follows mints tokens but emits nothing (refresh updates are
+  // likewise out of scope — the next full fetch picks those up).
+  // Fire-and-forget, after the authorization record persisted, and only
+  // from the Worker: DirectoryDO has no SESSION_DO binding to push with.
+  // A push failure must never break the redirect back to the client.
+  void (async () => {
+    try {
+      const sessionId = String(result.sessionId ?? "");
+      const clientId = String(result.clientId ?? "");
+      if (!sessionId || !clientId) return;
+      const browsers = await dirCall(env, "browsersForUser", { userId });
+      if (browsers.ok === false || !Array.isArray(browsers.browsers)) return;
+      await pushBrowsersDelta(
+        env,
+        (browsers.browsers as Array<Record<string, unknown>>).map((entry) => String(entry.sessionId ?? "")),
+        {
+          type: "client.upsert",
+          client: browsersDeltaClient(
+            {
+              clientId,
+              clientName: String(result.clientName ?? clientId),
+              scope: String(result.scope ?? ""),
+              sessionId,
+              // authorizedSince is the new authorization moment; no token
+              // row exists yet, so refresh/expiry dates are null.
+              createdAt: Date.now(),
+              lastRefreshedAt: null,
+              expiresAt: null,
+            },
+            false,
+          ),
+        },
+      );
+    } catch {
+      // ignore: delta delivery must never break authorization
+    }
+  })();
   return redirectWithCode(String(result.redirectUri), String(result.code), String(result.state ?? ""));
 }
 

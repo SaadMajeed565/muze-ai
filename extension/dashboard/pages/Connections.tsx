@@ -9,8 +9,6 @@ import { BrowserRowsList, McpClientRow } from "../components/browser-rows.js";
 import { AddAppSheet, Sheet } from "../components/shared.js";
 import { showToast } from "../components/feedback.js";
 
-const POLL_MS = 5000;
-
 /** Friendly copy for post-load failures, same mapping as initial load. */
 function friendlyError(error: string): string {
   return error === "gateway-unreachable"
@@ -42,8 +40,14 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
   const [addBrowserOpen, setAddBrowserOpen] = useState(false);
   const [addAppOpen, setAddAppOpen] = useState(false);
 
+  // Mount (and retry) goes through the refresh route: with a cache it
+  // returns instantly and refreshes in the background; with no cache it
+  // awaits the first fetch, so a failure here with no data is a real
+  // error state. There is no poll: updates arrive via `browsers.changed`
+  // events (gateway push, socket reconnect, or a mutation), which
+  // re-read the cache-only list below.
   const refresh = useCallback(async (): Promise<void> => {
-    const response = await sendRequest({ type: "muze/browsers/list" });
+    const response = await sendRequest({ type: "muze/browsers/refresh" });
     if (response.ok && response.browsers) {
       setData(response.browsers);
       setError(null);
@@ -52,33 +56,29 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
     }
   }, []);
 
+  const loadFromCache = useCallback(async (): Promise<void> => {
+    const response = await sendRequest({ type: "muze/browsers/list" });
+    if (response.ok && response.browsers) setData(response.browsers);
+    // List failures are silently ignored: the list is cache-only, so a
+    // failure means "no cache yet" and the current data (if any) stays.
+  }, []);
+
   useEffect(() => {
     void refresh();
-    // Visibility-gated like App's poll: pause while hidden, refresh
-    // immediately and restart on show. The interval never changes.
-    let timer = 0;
-    const poll = (): void => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    const restart = (): void => {
-      clearInterval(timer);
-      timer = window.setInterval(poll, POLL_MS);
-    };
-    const onVisibility = (): void => {
-      if (document.visibilityState === "visible") {
-        void refresh();
-        restart();
-      } else {
-        clearInterval(timer);
+    const listener = (message: { type?: string; event?: { kind?: string } }): void => {
+      if (
+        (message?.type === "muze/event" || message?.type === "uabb/event") &&
+        message.event?.kind === "browsers.changed"
+      ) {
+        void loadFromCache();
       }
     };
-    restart();
-    document.addEventListener("visibilitychange", onVisibility);
+    const onMessage = typeof chrome === "undefined" ? undefined : chrome?.runtime?.onMessage;
+    if (onMessage?.addListener) onMessage.addListener(listener);
     return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
+      if (onMessage?.removeListener) onMessage.removeListener(listener);
     };
-  }, [refresh]);
+  }, [refresh, loadFromCache]);
 
   const act = useCallback(async (request: Record<string, unknown>): Promise<void> => {
     setBrowsersBusy(true);
