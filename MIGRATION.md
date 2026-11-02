@@ -8,7 +8,7 @@ Read this before upgrading an existing install or an existing MCP client. The fu
 - Policy migration changed: your stored permission gates, mode, and overrides are now preserved verbatim. If you were on a v1/v2 policy, you will **not** be silently moved to Unrestricted anymore. Check the dashboard Permissions page after upgrading and set the level you actually want.
 - Dashboard messages changed to `muze/*`. Old `uabb/*` messages are still accepted inbound by the service worker, but new dashboard code emits only `muze/*`.
 - Page globals changed to `__muzeObserver` / `__muzeDiagnostics` / `data-muze-ref` / `muze-sticky-style`. The controller still reads the legacy observer global as a fallback for already-open pages, and removes a legacy sticky style element. Reloading open tabs after upgrade is still recommended.
-- The device token is now masked in the dashboard by default. Use the explicit reveal control (audited) to copy it, or rotate it from Overview if you suspect exposure.
+- [Superseded in 0.5.0: the device token is no longer shown in the dashboard at all, not even masked, and the reveal control was deleted. Rotate it from the website account page or via `POST /session/rotate` if you suspect exposure.] The device token was masked in the dashboard by default in 0.3.0. Use the explicit reveal control (audited) to copy it, or rotate it from Overview if you suspect exposure.
 
 ## MCP clients
 

@@ -1,9 +1,10 @@
 import type { PermissionMode, PolicyConfig } from "../../libs/security/index.js";
 import type { DashboardState } from "../../src/messages.js";
-import type { Appearance } from "../logic.js";
+import type { Appearance, IconName } from "../logic.js";
 import { plainCapabilities, plainGroupName } from "../ui-logic.js";
-import { Segmented, Switch } from "./primitives.js";
-import { ListRow, Section } from "./layout.js";
+import { Button, Segmented, Switch } from "./primitives.js";
+import { Icon } from "./Icon.js";
+import { Section } from "./layout.js";
 import { PermissionLevelPicker } from "../PermissionLevelPicker.js";
 import { PauseControl } from "./shared.js";
 
@@ -17,6 +18,7 @@ export interface PermissionsSectionsProps {
   onReadOnly: (enabled: boolean) => void;
   onKillSwitch: (engaged: boolean) => void;
   onGroupToggle: (group: string, enabled: boolean) => void;
+  onReset?: () => void;
 }
 
 /** Plain label for a switchable capability group. */
@@ -28,6 +30,13 @@ export function groupCapabilityLabel(group: string): string {
   return `Use ${plainGroupName(group).toLowerCase()}`;
 }
 
+const GROUP_ICONS: Record<string, IconName> = {
+  bookmarks: "bookmark",
+  history: "history",
+  downloads: "download",
+  clipboard: "clipboard",
+};
+
 const PRIVACY_LINES = [
   "Never reads saved passwords unless you ask it to work with them.",
   "Never reads local storage or other site storage on its own.",
@@ -37,68 +46,46 @@ const PRIVACY_LINES = [
 ];
 
 /**
- * Permissions and safety (v3), labelled "Applies to this browser
- * only" by its caller. The level cards, the "on top of your level"
- * switches, and ONE merged "What Muze can do" list: level-derived
- * items are plain rows, each switchable group gets a real switch, and
- * there is no separate chip row. Stop all activity is the shared
- * PauseControl with the existing kill-switch semantics — never a bare
- * "Off" toggle. The underlying policy is unchanged; only layout and
- * wording changed. No per-tool list, no tool names, categories, or
- * risk levels are ever rendered.
+ * Permissions and safety, handled one clean way (reference): level
+ * segmented control, then one switch row per capability group, then
+ * one live "Muze can currently: …" line, one Reset button with its
+ * meaning spelled out, and one Stop-all-activity row. No per-tool
+ * list, no tool names, categories, or risk levels are ever rendered.
+ * (The ask-before-acting and read-only toggles from the old layout
+ * are gone from this screen by design; their policy values are
+ * untouched — Reset and the level control are the ways back.)
  */
 export function PermissionsSafety({
   state,
   busy,
   onModeChange,
-  onPolicyPatch,
-  onReadOnly,
   onKillSwitch,
   onGroupToggle,
-}: Omit<PermissionsSectionsProps, "appearance" | "onAppearance">): preact.JSX.Element {
+  onReset,
+}: Omit<PermissionsSectionsProps, "appearance" | "onAppearance" | "onPolicyPatch" | "onReadOnly">): preact.JSX.Element {
   const { policy, snapshot } = state;
-  const levelCapabilities = plainCapabilities(snapshot.mode, {});
   const groups = Object.entries(policy.enabledGroups);
+  const capabilities = plainCapabilities(snapshot.mode, policy.enabledGroups);
 
   return (
     <>
-      <Section title="Permission level" description="The starting point for everything the agent does.">
+      <Section title="Permission level" description="Applies to this browser only.">
         <PermissionLevelPicker mode={snapshot.mode} disabled={busy} onChange={onModeChange} />
       </Section>
 
-      <Section title="On top of your level" description="These apply on top of your level.">
-        <div class="ui-control-row">
-          <div class="ui-control-text">
-            <span class="ui-control-label">Ask before acting</span>
-            <span class="ui-control-hint">Ask before sensitive reads and actions that change things.</span>
-          </div>
-          <Switch
-            checked={policy.approvalMode === "risk"}
-            disabled={busy}
-            onToggle={(next) => onPolicyPatch({ approvalMode: next ? "risk" : "never" })}
-          />
-        </div>
-        <div class="ui-control-row">
-          <div class="ui-control-text">
-            <span class="ui-control-label">Read-only mode</span>
-            <span class="ui-control-hint">Block every action that would change a page.</span>
-          </div>
-          <Switch checked={policy.readOnlyMode} disabled={busy} onToggle={onReadOnly} />
-        </div>
-      </Section>
-
-      <Section title="What Muze can do" description="In plain words, from your level and capabilities.">
-        <ul class="ui-list">
-          {levelCapabilities.map((capability) => (
-            <ListRow key={capability} title={capability} />
-          ))}
-        </ul>
-        {groups.length > 0 ? (
-          <div class="ui-control-list">
+      <Section title="What Muze can do">
+        {groups.length === 0 ? (
+          <p class="ui-empty-line">No switchable groups on this account.</p>
+        ) : (
+          <div>
             {groups.map(([group, enabled]) => (
               <div class="ui-control-row" key={group}>
+                <span style={{ color: "var(--muted)" }}>
+                  <Icon name={GROUP_ICONS[group] ?? "shield"} size={20} />
+                </span>
                 <div class="ui-control-text">
-                  <span class="ui-control-label">{groupCapabilityLabel(group)}</span>
+                  <span class="ui-control-label">{plainGroupName(group)}</span>
+                  <span class="ui-control-hint">{groupCapabilityLabel(group)}</span>
                 </div>
                 <Switch
                   checked={enabled}
@@ -108,7 +95,18 @@ export function PermissionsSafety({
               </div>
             ))}
           </div>
-        ) : null}
+        )}
+        <p class="muted mt12" style={{ fontSize: "13px" }}>
+          Muze can currently: {capabilities.join(", ")}.
+        </p>
+        <div class="mt16">
+          <Button variant="secondary" size="sm" disabled={busy} onClick={() => onReset?.()}>
+            Reset permissions
+          </Button>
+          <p class="muted" style={{ fontSize: "12px" }}>
+            Reset clears per-tool decisions and turns all four groups back on. Level, kill switch, and blocked domains stay as they are.
+          </p>
+        </div>
       </Section>
 
       <Section title="Stop all activity" description={policy.killSwitch ? "Paused" : "Agent is active"}>
@@ -124,7 +122,7 @@ export function PermissionsSafety({
   );
 }
 
-/** Appearance + privacy (v3): appearance segmented control, privacy as a collapsed disclosure. */
+/** Appearance + privacy: appearance segmented control, privacy as a collapsed disclosure. */
 export function AppearancePrivacy({
   appearance,
   onAppearance,
@@ -160,7 +158,7 @@ export function AppearancePrivacy({
   );
 }
 
-/** Backwards-compatible combined export (v2 callers): safety + appearance + privacy. */
+/** Backwards-compatible combined export (callers that render both). */
 export function PermissionsSections(props: PermissionsSectionsProps): preact.JSX.Element {
   return (
     <>

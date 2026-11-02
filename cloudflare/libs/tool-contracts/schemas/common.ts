@@ -23,6 +23,13 @@ export const urlSchema = z
  */
 export const coordinateSchema = z.number().finite().min(0).max(100_000).describe("Coordinate in CSS pixels, 0..100000");
 
+/**
+ * Shared tab/frame target fields, spread into tool inputs. Single
+ * definition (was redeclared identically in interact, page, system,
+ * unified and workflows); all five now import this one.
+ */
+export const tabRef = { tabId: tabIdSchema.optional().describe("Defaults to the active tab"), frameId: frameIdSchema.optional() };
+
 export const EmptyInput = z.object({}).strict();
 
 export const TabInfo = z.object({

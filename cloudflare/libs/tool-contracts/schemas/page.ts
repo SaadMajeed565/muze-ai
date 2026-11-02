@@ -1,8 +1,7 @@
 import { z } from "zod";
 import type { ToolDefinition } from "../tools.js";
-import { BoundedText, PageMetadata, TabInfo, frameIdSchema, tabIdSchema, urlSchema } from "./common.js";
+import { BoundedText, PageMetadata, TabInfo, tabIdSchema, tabRef, urlSchema } from "./common.js";
 
-const tabRef = { tabId: tabIdSchema.optional().describe("Defaults to the active tab"), frameId: frameIdSchema.optional() };
 
 export const pageRead: ToolDefinition = {
   name: "page.read",

@@ -44,7 +44,6 @@ try {
   }
   const { tools, actions, meta } = JSON.parse(run.stdout);
 
-  const granular = tools.filter((t) => !t.name.includes(".") || !["browser", "tabs", "windows", "navigate", "observe", "act", "wait", "form", "submit", "devtools", "data", "clipboard", "files"].includes(t.name));
   const unifiedNames = new Set(["browser", "tabs", "windows", "navigate", "observe", "act", "wait", "form", "submit", "devtools", "data", "clipboard", "files"]);
   const unified = tools.filter((t) => unifiedNames.has(t.name));
   const tasks = tools.filter((t) => t.name.startsWith("tasks."));
@@ -63,7 +62,7 @@ try {
   const META_ONLY = new Set(["tools.batch", "tools.discover"]);
   const extraMeta = Object.keys(meta).filter((n) => !tools.some((t) => t.name === n) && !META_ONLY.has(n));
   const deprecatedActions = actions.filter((a) => a.deprecated);
-  const core = ["observe", "act", "navigate", "form", "data", "tools.batch", "tools.discover", "tasks.create", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
+  const core = ["observe", "act", "navigate", "form", "data", "tools.batch", "tools.discover", "tasks.create", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel", "tasks.approvePlan"];
   const deprecatedInCore = core.filter((n) => tools.find((t) => t.name === n)?.deprecated);
 
   const lines = [];

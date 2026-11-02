@@ -163,37 +163,6 @@ export function Segmented<T extends string>({
   );
 }
 
-export interface CardProps {
-  title?: preact.ComponentChildren;
-  description?: preact.ComponentChildren;
-  actions?: preact.ComponentChildren;
-  icon?: IconName;
-  class?: string;
-  children?: preact.ComponentChildren;
-}
-
-export function Card({ title, description, actions, icon, class: className, children }: CardProps): preact.JSX.Element {
-  return (
-    <section class={["card", className ?? ""].filter(Boolean).join(" ")}>
-      {title || actions ? (
-        <header class="card-head">
-          <div class="card-head-text">
-            {title ? (
-              <h2 class="card-title">
-                {icon ? <Icon name={icon} size={16} class="card-title-icon" /> : null}
-                <span>{title}</span>
-              </h2>
-            ) : null}
-            {description ? <p class="card-description">{description}</p> : null}
-          </div>
-          {actions ? <div class="card-actions">{actions}</div> : null}
-        </header>
-      ) : null}
-      {children}
-    </section>
-  );
-}
-
 export interface SearchInputProps {
   value: string;
   placeholder?: string;
@@ -218,27 +187,6 @@ export function SearchInput({ value, placeholder, ariaLabel, onChange }: SearchI
         </button>
       ) : null}
     </div>
-  );
-}
-
-export interface ChipProps {
-  active?: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-  children: preact.ComponentChildren;
-}
-
-export function Chip({ active, disabled, onClick, children }: ChipProps): preact.JSX.Element {
-  return (
-    <button
-      type="button"
-      class={"chip" + (active ? " is-on" : "")}
-      aria-pressed={active ? "true" : "false"}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {children}
-    </button>
   );
 }
 

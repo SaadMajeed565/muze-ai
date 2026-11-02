@@ -92,7 +92,13 @@ function e(
   return { unifiedTool, action, granularTool, risk, requiresApproval, sideEffect, ...opts };
 }
 
-/** Complete per-action risk table for all 13 unified tools. */
+/** Complete per-action risk table for all 13 unified tools (179 entries:
+ * browser 5, tabs 19, windows 4, navigate 75 = action-only 25 +
+ * category=tab 21 + category=window 19 + category=url 6 + category=sync 4,
+ * observe 13, act 13, wait 4, form 6, submit 3, devtools 7, data 26,
+ * clipboard 2, files 2). Every unified tool's dispatched actions are
+ * covered; an undispatched pair is absent by design and throws
+ * INVALID_INPUT in the handler. */
 export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   // ---- browser (5) ----
   e("browser", "status", "browser.info", "read-only", false, "none", { idempotent: true }),
@@ -103,7 +109,7 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   // still applies to the nested browser.search call (see header).
   e("browser", "search", "browser.search", "sensitive-read", false, "none", { idempotent: true, note: "Combines history, bookmarks and open tabs; each source is gated by its own optional group at the point of use." }),
 
-  // ---- tabs (18) ----
+  // ---- tabs (19) ----
   e("tabs", "list", "tabs.list", "read-only", false, "none", { idempotent: true }),
   e("tabs", "get", "tabs.get", "read-only", false, "none", { idempotent: true }),
   e("tabs", "active", "tabs.active", "read-only", false, "none", { idempotent: true }),
@@ -161,7 +167,7 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("navigate", "organize", "workflows.organizeTabs", "consequential", true, "browser-state", { idempotent: false, note: "Unified handler dryRun-gates this through the granular workflow gate before executing." }),
   e("navigate", "update", "windows.update", "reversible", false, "browser-state", { idempotent: true, note: "The only action that reaches the window branch on its own (update is not a tab action)." }),
 
-  // ---- navigate, category=tab (19) ----
+  // ---- navigate, category=tab (21) ----
   // Category=tab enters the tab branch for every action it handles; URL and
   // window actions under category=tab throw INVALID_INPUT in that branch.
   e("navigate", "list", "tabs.list", "read-only", false, "none", { domain: "tab", idempotent: true }),
@@ -242,8 +248,8 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("observe", "tables", "page.tables", "read-only", false, "none", { idempotent: true }),
   e("observe", "forms", "forms.inspect", "read-only", false, "none", { idempotent: true }),
   e("observe", "find", "page.find", "read-only", false, "none", { idempotent: true, note: "Conditional: with a query it is page.find; with by/value/selector and no query it is dom.find (also read-only, no approval)." }),
-  e("observe", "a11y", "page.accessibilityTree", "read-only", false, "none", { idempotent: true, note: "The handler also calls screenshots.viewport (read-only, no approval) when a11y is included." }),
-  e("observe", "ast", "devtools.dom", "read-only", false, "none", { idempotent: true, note: "The handler also calls screenshots.viewport (read-only, no approval) when ast is included." }),
+  e("observe", "a11y", "page.accessibilityTree", "read-only", false, "none", { idempotent: true, note: "The handler also reads viewport metrics via a direct getViewport page op (no screenshot, no approval); it no longer calls screenshots.viewport, which now captures an image." }),
+  e("observe", "ast", "devtools.dom", "read-only", false, "none", { idempotent: true, note: "The handler also reads viewport metrics via a direct getViewport page op (no screenshot, no approval); it no longer calls screenshots.viewport, which now captures an image." }),
   e("observe", "screenshot", "screenshots.visible", "sensitive-read", true, "none", { idempotent: true, note: "Also reached via the includeScreenshot flag (same granular tool). If approval is missing, the executor denies the nested call and observe reports it as a per-include error; no screenshot is ever returned without approval." }),
   e("observe", "selection", "page.selectedText", "read-only", false, "none", { idempotent: true }),
   e("observe", "shadow", "dom.shadow", "read-only", false, "none", { idempotent: true }),
@@ -292,7 +298,7 @@ export const UNIFIED_ACTION_RISK: readonly ActionRiskEntry[] = [
   e("devtools", "dialogs", "page.dialogs", "sensitive-read", false, "none", { idempotent: true, note: "Granular predicate is false; the executor's sensitive-read policy gate still applies to the nested call (see header)." }),
   e("devtools", "respond_dialog", "page.respondDialog", "consequential", true, "browser-state", { idempotent: false, note: "Unified handler dryRun-gates this through the granular page gate before executing." }),
 
-  // ---- data (25, only pairs the handler dispatches) ----
+  // ---- data (26, only pairs the handler dispatches) ----
   // clipboard domain
   e("data", "read", "clipboard.read", "sensitive-read", true, "none", { domain: "clipboard", idempotent: true, note: "Unified handler dryRun-gates this through the granular clipboard gate before executing." }),
   e("data", "write", "clipboard.write", "consequential", true, "external-visible", { domain: "clipboard", idempotent: false, note: "Unified handler dryRun-gates this through the granular clipboard gate before executing. Clipboard content is visible to other applications." }),

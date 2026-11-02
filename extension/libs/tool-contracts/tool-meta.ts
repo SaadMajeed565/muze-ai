@@ -103,6 +103,8 @@ export const TOOL_META: Record<string, ToolMeta> = {
   "dom.type": m(["type", "dom", "interact", "typing"], { requires: ["observe"] }),
   "dom.press": m(["press", "dom", "interact", "keyboard"], { requires: ["observe"] }),
   "dom.clickAt": m(["click", "coordinates", "interact", "dom"], { related: ["screenshots.visible"] }),
+  "dom.typeAt": m(["type", "coordinates", "interact", "dom"], { related: ["dom.type", "dom.clickAt"] }),
+  "dom.pressAt": m(["press", "coordinates", "interact", "keyboard"], { related: ["dom.press", "dom.clickAt"] }),
   "dom.moveTo": m(["move", "coordinates", "interact", "mouse"], { related: ["dom.hover"] }),
   "dom.drag": m(["drag", "dom", "interact", "drag-drop"], { requires: ["observe"] }),
   "dom.dragAt": m(["drag", "coordinates", "interact", "drag-drop"], { related: ["screenshots.visible"] }),
@@ -263,7 +265,18 @@ export function deprecatedUnifiedAction(
     return null;
   }
   if (tool === "data" && (domain === "devtools" || domain === "clipboard")) {
-    const useInstead = domain === "clipboard" ? `clipboard.${action}` : `devtools.${action}`;
+    // The generic devtools.${action} template is wrong for four actions,
+    // whose real granular tools live elsewhere (see the action-risk
+    // table): errors -> devtools.pageErrors, observer -> browser.observer,
+    // dialogs -> page.dialogs, respond_dialog -> page.respondDialog.
+    // Only console / network / performance survive the template.
+    const DEVTOOLS_USE_INSTEAD: Record<string, string> = {
+      errors: "devtools.pageErrors",
+      observer: "browser.observer",
+      dialogs: "page.dialogs",
+      respond_dialog: "page.respondDialog",
+    };
+    const useInstead = domain === "clipboard" ? `clipboard.${action}` : (DEVTOOLS_USE_INSTEAD[action] ?? `devtools.${action}`);
     return { deprecated: true, useInstead, note: `Deprecated: data domain "${domain}" is superseded by ${useInstead}; it still works in 2.x and will be removed in registry 3.0.` };
   }
   return null;
@@ -288,6 +301,12 @@ export const TASK_TYPE_RECOMMENDATIONS: Record<string, { tools: string[]; note: 
     note: "Form suggestion: inspect, fill, preview, then submit — preview is required before submit.",
   },
   organise: {
+    tools: ["tabs", "workflows.organizeTabs", "tabs.group", "tabs.list"],
+    note: "Organise suggestion: list tabs, group or organise them; organising requires approval through the workflow gate.",
+  },
+  // American-spelling alias of `organise` (same object): discovery
+  // normalises the lookup too, so both spellings resolve either way.
+  organize: {
     tools: ["tabs", "workflows.organizeTabs", "tabs.group", "tabs.list"],
     note: "Organise suggestion: list tabs, group or organise them; organising requires approval through the workflow gate.",
   },

@@ -32,7 +32,18 @@ export interface ApprovalBrokerOptions {
   ttlMs?: number;
   now?: () => number;
   idFactory?: () => string;
+  /**
+   * Maximum records held. Default 1000: records were previously never
+   * deleted (purgeExpired only flips statuses), so a long-lived broker
+   * grew without bound. When the cap is hit, the oldest terminal records
+   * (expired/denied/used/cancelled) are dropped; pending/approved records
+   * are never evicted, so a live approval cannot be lost to the cap.
+   */
+  maxRecords?: number;
 }
+
+/** Default cap on approval records; see ApprovalBrokerOptions.maxRecords. */
+export const APPROVAL_BROKER_DEFAULT_MAX_RECORDS = 1000;
 
 /**
  * Issues short-lived, single-use approval tokens bound to an exact operation
@@ -44,11 +55,19 @@ export class ApprovalBroker {
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly idFactory: () => string;
+  private readonly maxRecords: number;
 
   constructor(options: ApprovalBrokerOptions = {}) {
     this.ttlMs = options.ttlMs ?? 120_000;
     this.now = options.now ?? (() => Date.now());
     this.idFactory = options.idFactory ?? (() => `apv_${randomId(18)}`);
+    if (
+      options.maxRecords !== undefined &&
+      (!Number.isFinite(options.maxRecords) || options.maxRecords <= 0)
+    ) {
+      throw new RangeError(`ApprovalBroker maxRecords must be finite and > 0, got ${options.maxRecords}`);
+    }
+    this.maxRecords = Math.floor(options.maxRecords ?? APPROVAL_BROKER_DEFAULT_MAX_RECORDS);
   }
 
   create(input: CreateApprovalInput): ApprovalRecord {
@@ -61,13 +80,31 @@ export class ApprovalBroker {
       risk: input.risk,
       target: input.target,
       client: input.client,
-      fingerprint: fingerprintOperation(input.tool, input.input, input.client.id),
+      fingerprint: fingerprintOperation(input.tool, input.input, input.client.id, input.target),
       status: "pending",
       createdAt: now,
       expiresAt: now + (input.ttlMs ?? this.ttlMs),
     };
     this.records.set(record.id, record);
+    this.evictTerminalPastCap();
     return record;
+  }
+
+  /**
+   * Bound record growth: drop the oldest terminal records while over the
+   * cap. Pending/approved records are live approvals and are never
+   * dropped, even if that leaves the map over cap under pathological
+   * pending churn (a fail-safe, not a leak: pending records expire via
+   * purgeExpired and become evictable on the next create()).
+   */
+  private evictTerminalPastCap(): void {
+    if (this.records.size <= this.maxRecords) return;
+    for (const [id, record] of this.records) {
+      if (this.records.size <= this.maxRecords) return;
+      if (record.status !== "pending" && record.status !== "approved") {
+        this.records.delete(id);
+      }
+    }
   }
 
   get(id: string): ApprovalRecord | undefined {
@@ -145,7 +182,10 @@ export class ApprovalBroker {
    * Validate and burn an approval token immediately before execution.
    * Throws a typed error when the token is missing, mismatched, expired or used.
    */
-  consume(id: string, expected: { tool: string; input: unknown; clientId: string }): ApprovalRecord {
+  consume(
+    id: string,
+    expected: { tool: string; input: unknown; clientId: string; target?: CallTargetHint },
+  ): ApprovalRecord {
     const record = this.records.get(id);
     if (!record) throw new ToolErrorException("APPROVAL_DENIED", "Unknown approval token");
     if (record.expiresAt <= this.now()) {
@@ -156,8 +196,14 @@ export class ApprovalBroker {
     if (record.status === "cancelled") throw new ToolErrorException("APPROVAL_DENIED", "Approval was cancelled");
     if (record.status === "used") throw new ToolErrorException("APPROVAL_DENIED", "Approval token was already used");
     if (record.status !== "approved") throw new ToolErrorException("APPROVAL_REQUIRED", "Approval is still pending");
+    // Fail closed on a target mismatch: a record created with a target
+    // must not be consumable by a caller that omits one (that omission
+    // would otherwise silently drop the target from the fingerprint).
+    if (record.target !== undefined && expected.target === undefined) {
+      throw new ToolErrorException("APPROVAL_DENIED", "Approval does not match this operation");
+    }
 
-    const expectedFp = fingerprintOperation(expected.tool, expected.input, expected.clientId);
+    const expectedFp = fingerprintOperation(expected.tool, expected.input, expected.clientId, expected.target);
     if (record.tool !== expected.tool || record.client.id !== expected.clientId || record.fingerprint !== expectedFp) {
       throw new ToolErrorException("APPROVAL_DENIED", "Approval does not match this operation");
     }
@@ -187,9 +233,27 @@ export class ApprovalBroker {
   }
 }
 
-/** Deterministic 128-bit fingerprint binding an approval to an exact operation. */
-export function fingerprintOperation(tool: string, input: unknown, clientId: string): string {
-  const canonical = canonicalStringify({ tool, input: normalize(input), clientId });
+/**
+ * Deterministic 128-bit fingerprint binding an approval to an exact
+ * operation (tool + input + client + target hint, when one was given).
+ * The target is included only when defined, so fingerprints for
+ * target-less approvals are byte-identical to before this change.
+ * NOTE: this is a best-effort binding, not a cryptographic commitment —
+ * see cyrb128 below. Its strength comes from single-use tokens, the TTL,
+ * and the exact-match check in consume(), not from hash strength.
+ */
+export function fingerprintOperation(
+  tool: string,
+  input: unknown,
+  clientId: string,
+  target?: CallTargetHint,
+): string {
+  const canonical = canonicalStringify({
+    tool,
+    input: normalize(input),
+    clientId,
+    ...(target !== undefined ? { target: normalize(target) } : {}),
+  });
   return cyrb128(canonical);
 }
 
@@ -213,7 +277,15 @@ function canonicalStringify(value: unknown): string {
   return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalStringify((value as Record<string, unknown>)[key])}`).join(",")}}`;
 }
 
-/** Fast deterministic 128-bit string hash (cyrb128), used as a collision-resistant binding. */
+/**
+ * Fast deterministic 128-bit string hash (cyrb128). This is a
+ * NON-cryptographic hash: it is NOT collision-resistant, and an earlier
+ * comment claiming otherwise was wrong. It is used here only as a
+ * compact equality check between a stored approval and the operation
+ * presented at consume time (both computed in-process, single-use,
+ * TTL-bounded); it must never be treated as a signature, a MAC, or
+ * proof against a motivated collision search.
+ */
 function cyrb128(text: string): string {
   let h1 = 1779033703;
   let h2 = 3144134277;

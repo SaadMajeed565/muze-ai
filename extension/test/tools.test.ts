@@ -308,6 +308,12 @@ describe("pointer and keyboard tools", () => {
 
   it("scrolls, fills, and clears via CDP when CDP is available", async () => {
     seedInteractive();
+    // The CDP input paths now fail fast on hidden targets, and jsdom
+    // reports a 0-size rect for every element unless stubbed — so the
+    // element under test is stubbed visible, as the boundingBox and
+    // visible tests already do.
+    (document.getElementById("name") as HTMLElement).getBoundingClientRect = () =>
+      ({ x: 10, y: 10, left: 10, top: 10, width: 100, height: 20, right: 110, bottom: 30, toJSON: () => ({}) }) as DOMRect;
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
     const find = async (selector: string) => {
       const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: selector }, client, ctx: rt.ctx });
@@ -341,6 +347,15 @@ describe("pointer and keyboard tools", () => {
 
   it("clicks and types via CDP in a sub-frame, not just the top frame", async () => {
     seedInteractive();
+    // CDP input paths fail fast on hidden targets; jsdom reports 0-size
+    // rects unless stubbed, so stub both targets visible (see the
+    // boundingBox/visible tests for the same pattern).
+    const stubVisible = (el: HTMLElement) => {
+      el.getBoundingClientRect = () =>
+        ({ x: 10, y: 10, left: 10, top: 10, width: 100, height: 20, right: 110, bottom: 30, toJSON: () => ({}) }) as DOMRect;
+    };
+    stubVisible(document.getElementById("box") as HTMLElement);
+    stubVisible(document.getElementById("name") as HTMLElement);
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
     rt.ctx.mockFrames = [0, 3];
     const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#box", frameId: 3 }, client, ctx: rt.ctx });
@@ -689,7 +704,13 @@ describe("browser-engine regression fixes", () => {
     expect(synthetic.method).toBe("synthetic");
 
     // CDP path that fails: the failure is thrown, never hidden by a fallback.
+    // (TIMEOUT is the one exception — it falls back to synthetic, covered
+    // by the browser-engine-fixes tests.) The CDP gate fails fast on
+    // hidden targets, so stub the button visible: jsdom reports 0-size
+    // rects unless stubbed.
     const rt2 = createTestRuntime({ context: { cdpEnabled: true } });
+    (document.getElementById("b") as HTMLElement).getBoundingClientRect = () =>
+      ({ x: 10, y: 10, left: 10, top: 10, width: 100, height: 20, right: 110, bottom: 30, toJSON: () => ({}) }) as DOMRect;
     const found2 = await rt2.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#b" }, client, ctx: rt2.ctx });
     const ref2 = (found2.result as { elements: { ref: string }[] }).elements[0].ref;
     (rt2.ctx.cdp as { click: unknown }).click = async () => {

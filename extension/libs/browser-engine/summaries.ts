@@ -21,17 +21,31 @@ export function describeOperation(toolName: string, input: unknown, target?: Cal
   switch (toolName) {
     case "act": {
       const steps = Array.isArray(data.steps) ? data.steps : [];
-      const clickStep = steps.find((s: any) => s.do === "click");
-      if (clickStep) {
-        const tgt = (clickStep.target as any)?.ref ?? (clickStep.target as any)?.selector ?? (clickStep.target as any)?.name ?? (clickStep.target as any)?.label ?? "element";
-        return `Click ${short(tgt)}${where ? ` on ${where}` : ""}.`;
-      }
-      const pressStep = steps.find((s: any) => s.do === "press" && (s.key === "Enter" || s.key === "Return"));
-      if (pressStep) {
-        const tgt = (pressStep.target as any)?.ref ?? (pressStep.target as any)?.selector ?? "element";
-        return `Submit/Press Enter on ${short(tgt)}${where ? ` on ${where}` : ""}.`;
-      }
-      return `Perform ${steps.length} interaction step(s)${where ? ` on ${where}` : ""}.`;
+      if (steps.length === 0) return `Perform 0 interaction step(s)${where ? ` on ${where}` : ""}.`;
+      // Describe EVERY step, not just the first click (or first Enter):
+      // a batch that fills fields then submits used to be summarised
+      // as a bare click, hiding the consequential fill/submit from the
+      // approval prompt. Each step is one short phrase; targets are
+      // shortened, values are never included.
+      const phrases = steps.map((s: any) => {
+        const tgt = (s.target as any)?.ref ?? (s.target as any)?.selector ?? (s.target as any)?.name ?? (s.target as any)?.label;
+        const at = tgt !== undefined ? ` ${short(tgt)}` : "";
+        switch (s.do) {
+          case "click": return `Click${at || " element"}`;
+          case "type": return `Type into${at || " element"}`;
+          case "fill": return `Fill${at || " field"}`;
+          case "press": return s.key === "Enter" || s.key === "Return" ? (at ? `Submit/Press Enter on${at}` : "Submit/Press Enter") : `Press ${short(s.key ?? "key")}${at}`;
+          case "select": return `Select${at || " option"}`;
+          case "check": return `${s.checked === false ? "Uncheck" : "Check"}${at || " box"}`;
+          case "clear": return `Clear${at || " field"}`;
+          case "focus": return `Focus${at || " element"}`;
+          case "hover": return `Hover${at}`;
+          case "scroll": return `Scroll${at}`;
+          case "drag": return `Drag${at}`;
+          default: return `${String(s.do ?? "act")}${at}`;
+        }
+      });
+      return `${phrases.join(", ")}${where ? ` on ${where}` : ""}.`;
     }
     case "submit": {
       if (data.action === "submit") {

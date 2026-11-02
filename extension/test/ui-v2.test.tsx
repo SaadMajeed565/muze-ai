@@ -7,7 +7,7 @@ import { render } from "preact";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthPage } from "../dashboard/pages/Auth.js";
 import { ConnectionsPage } from "../dashboard/pages/Connections.js";
-import { AddAppSheet, MenuButton, PauseControl } from "../dashboard/components/shared.js";
+import { AddAppSheet, KebabMenu, PauseControl } from "../dashboard/components/shared.js";
 import { HomePage } from "../dashboard/pages/Home.js";
 import { ConfirmProvider } from "../dashboard/components/feedback.js";
 import { AccountPage } from "../dashboard/pages/Account.js";
@@ -195,13 +195,13 @@ describe("ConnectionsPage browsers/apps separation (v3)", () => {
       appsTab!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    const addApp = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Add app");
+    const addApp = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "+ Add app");
     expect(addApp).toBeTruthy();
     await act(async () => {
       addApp!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(container.textContent).toContain("https://gw.example.com/mcp");
-    expect(container.textContent).toContain("Add this to your AI app, then approve it when it asks.");
+    expect(container.textContent).toContain("Paste this connection URL into your AI app. This sheet is the only place the URL is shown.");
   });
 });
 
@@ -220,27 +220,23 @@ describe("shared v3 components", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("MenuButton opens on click and moves focus with arrow keys", async () => {
+  it("KebabMenu opens on click, selects an item, and closes", async () => {
     const first = vi.fn();
     const second = vi.fn();
-    const container = mount(<MenuButton items={[{ label: "First", onSelect: first }, { label: "Second", onSelect: second }]} />);
-    const opener = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "…");
+    const container = mount(<KebabMenu items={[{ label: "First", onSelect: first }, { label: "Second", onSelect: second }]} />);
+    const opener = Array.from(container.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "More actions");
     expect(opener).toBeTruthy();
     await act(async () => {
       opener!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     const items = Array.from(container.querySelectorAll('[role="menuitem"]')) as HTMLElement[];
     expect(items).toHaveLength(2);
-    items[0]!.focus();
-    await act(async () => {
-      items[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    });
-    expect(document.activeElement).toBe(items[1]);
     await act(async () => {
       items[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(second).toHaveBeenCalled();
     expect(first).not.toHaveBeenCalled();
+    expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(0);
   });
 
   it("PauseControl shows Pause when active and amber Paused + Resume when paused", async () => {
@@ -255,16 +251,14 @@ describe("shared v3 components", () => {
   });
 });
 
-describe("HomePage (v3)", () => {
-  it("shows no inline URL, no Unknown, no gateway wording, no metric cards; approvals section absent when none; PauseControl wired", async () => {
+describe("HomePage (reference)", () => {
+  it("shows no inline URL, no Unknown, no gateway wording, no metric cards; approvals section absent when none; no Pause on Home", async () => {
     stubBrowsers();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-    const onKillSwitch = vi.fn();
     const container = mount(
       <ConfirmProvider>
         <HomePage
-          state={state()} busy={false} approvals={[]} onReconnect={vi.fn()} onOpenWizard={vi.fn()}
-          onNavigate={vi.fn()} onRespond={vi.fn()} onCancelForClient={vi.fn()} onKillSwitch={onKillSwitch}
+          state={state()} busy={false} approvals={[]}
+          onNavigate={vi.fn()} onRespond={vi.fn()}
         />
       </ConfirmProvider>,
     );
@@ -280,30 +274,20 @@ describe("HomePage (v3)", () => {
     expect(text).toContain("Laptop Chrome");
     expect(text).toContain("Online");
     expect(text).toContain("3 tabs");
-    expect(text).toContain("Nothing running.");
+    expect(text).toContain("Nothing running right now");
     expect(text).not.toContain("Upgrade");
-    const pause = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Pause");
-    expect(pause).toBeTruthy();
-    await act(async () => {
-      pause!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await flush();
-    const confirmStop = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Stop activity");
-    await act(async () => {
-      confirmStop!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await flush();
-    expect(onKillSwitch).toHaveBeenCalledWith(true);
+    // The kill switch lives in Me > Permissions and safety, not on Home.
+    expect(Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Pause")).toBeUndefined();
   });
 });
 
-describe("AccountPage (v3)", () => {
-  it("shows avatar letter + email only, plan card without Upgrade, delete only in Profile, no Security/Notifications rows", async () => {
+describe("AccountPage (reference)", () => {
+  it("shows avatar letter + email only, plan card without Upgrade, delete only in Profile, no Security/Notifications/Help rows", async () => {
     stubBrowsers();
     const container = mount(
       <AccountPage
         state={state()} busy={false} appearance="system" onAppearance={vi.fn()} onModeChange={vi.fn()}
-        onPolicyPatch={vi.fn()} onReadOnly={vi.fn()} onKillSwitch={vi.fn()} onGroupToggle={vi.fn()}
+        onKillSwitch={vi.fn()} onGroupToggle={vi.fn()} onReset={vi.fn()}
         onSignOut={vi.fn()} onDeleteAccount={vi.fn()}
       />,
     );
@@ -315,6 +299,7 @@ describe("AccountPage (v3)", () => {
     expect(text).not.toContain("Upgrade");
     expect(text).not.toContain("Security");
     expect(text).not.toContain("Notifications");
+    expect(text).not.toContain("Help and feedback");
     expect(text).toContain("Profile");
     expect(text).not.toContain("Sign out");
     expect(text).not.toContain("Delete account");

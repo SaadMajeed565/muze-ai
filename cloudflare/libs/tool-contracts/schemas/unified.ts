@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ToolDefinition } from "../tools.js";
-import { PageMetadata, TabInfo, WindowInfo, frameIdSchema, tabIdSchema, urlSchema } from "./common.js";
+import { PageMetadata, TabInfo, WindowInfo, coordinateSchema, tabIdSchema, tabRef, urlSchema } from "./common.js";
 
 /**
  * Unified (master) tool contracts.
@@ -29,10 +29,11 @@ import { PageMetadata, TabInfo, WindowInfo, frameIdSchema, tabIdSchema, urlSchem
  * - organise strategy everywhere: "domain" | "titlePrefix" — never "prefix".
  */
 
-const tabRef = { tabId: tabIdSchema.optional().describe("Defaults to the active tab"), frameId: frameIdSchema.optional() };
-
-/** Viewport/page coordinates: finite, non-negative, bounded (see shared decision). */
-const coordinateSchema = z.number().finite().min(0).max(100_000);
+/** tabRef and coordinateSchema are the shared definitions from common.ts
+ * (coordinateSchema there carries the "Coordinate in CSS pixels, 0..100000"
+ * description; the old unified-local copy had identical bounds but no
+ * description, so JSON-schema output for unified coordinate fields now
+ * gains that description and nothing else). */
 
 const includeEnum = z.enum(["metadata", "outline", "text", "links", "tables", "forms", "find", "a11y", "ast", "screenshot", "selection", "shadow", "frames"]);
 
@@ -249,7 +250,19 @@ export const navigateTool: ToolDefinition = {
     value: z.string().max(512).optional(),
     role: z.string().max(64).optional(),
     name: z.string().max(256).optional(),
-  }).strict(),
+  }).strict().superRefine((data, ctx) => {
+    // Validation-time dispatch key: an actionless navigate call used to
+    // pass Zod and only fail deep in the handler ("Unknown navigate
+    // action"). The one legitimate actionless form is the sync dispatch,
+    // which branches on category="sync" / `for` alone (gateway legacy
+    // adaptation emits navigation.wait / page.waitFor / page.networkIdle
+    // exactly this way), so it stays exempt; every other call needs an
+    // action. No test or in-tree client relies on an actionless
+    // non-sync navigate call.
+    if (data.action === undefined && data.category !== "sync" && data.for === undefined) {
+      ctx.addIssue({ code: "custom", message: "navigate requires an action, except for category \"sync\" (or a `for` value), which dispatches on category/`for` alone" });
+    }
+  }),
   output: z.object({
     tab: TabInfo.optional(),
     tabs: z.array(TabInfo).optional(),
@@ -606,7 +619,19 @@ export const dataTool: ToolDefinition = {
     onlyFailed: z.boolean().optional(),
     enabled: z.boolean().optional(),
     response: z.enum(["accept", "dismiss"]).optional(),
-  }).strict(),
+  }).strict().superRefine((data, ctx) => {
+    // Validation-time dispatch key: an empty data call used to pass Zod
+    // and only fail deep in the handler ("Unknown data domain"). No test
+    // or in-tree client relies on omitting domain/store or action, so
+    // both are required here (domain and its legacy alias store are
+    // interchangeable; at least one must be present).
+    if (data.domain === undefined && data.store === undefined) {
+      ctx.addIssue({ code: "custom", message: "data requires a domain (or its alias store)" });
+    }
+    if (data.action === undefined) {
+      ctx.addIssue({ code: "custom", message: "data requires an action" });
+    }
+  }),
   output: z.object({
     bookmarks: z.array(z.object({ id: z.string(), parentId: z.string().optional(), title: z.string(), url: z.string().optional(), dateAdded: z.string().optional(), folder: z.string() })).optional(),
     bookmark: z.object({ id: z.string(), parentId: z.string().optional(), title: z.string(), url: z.string().optional(), dateAdded: z.string().optional(), folder: z.string() }).optional(),

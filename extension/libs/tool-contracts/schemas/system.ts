@@ -1,8 +1,7 @@
 import { z } from "zod";
 import type { ToolDefinition } from "../tools.js";
-import { EmptyInput, TabInfo, frameIdSchema, tabIdSchema, urlSchema } from "./common.js";
+import { EmptyInput, TabInfo, tabIdSchema, tabRef, urlSchema } from "./common.js";
 
-const tabRef = { tabId: tabIdSchema.optional().describe("Defaults to the active tab"), frameId: frameIdSchema.optional() };
 
 export const downloadsList: ToolDefinition = {
   name: "downloads.list",
@@ -231,7 +230,7 @@ export const browserCaptureTab: ToolDefinition = {
   name: "browser.captureTab",
   title: "Capture the active tab",
   description:
-    "Capture a still image of the active tab of a window. Only the visible area is captured, and only for the active tab of a window. Consistent capture rule: browser.captureTab requires approval, exactly like screenshots.visible/element/fullPage; only screenshots.viewport (dimensions, no pixels) does not. Policy-by-risk is a second gate, not a replacement.",
+    "Capture a still image of the active tab of a window. Only the visible area is captured, and only for the active tab of a window. Consistent capture rule: browser.captureTab requires approval, exactly like screenshots.visible/element/fullPage/viewport; policy-by-risk is a second gate, not a replacement.",
   category: "browser",
   risk: "sensitive-read",
   requiresApproval: true,

@@ -73,6 +73,16 @@ export class ChromeCdpCapability implements CdpCapability {
    * like a first move. It is cleared on a sequence timeout, because a
    * timed-out sequence leaves the true cursor position unknown. */
   private readonly lastMouse = new Map<number, { x: number; y: number }>();
+  /** Per-tab sequence generation, bumped when a sequence times out.
+   * A timed-out fn() promise keeps running after withTab's race has
+   * settled and its detach has run; without this guard its late
+   * sendCommand calls would dispatch into the NEXT sequence's attached
+   * session on the same tab. Every in-sequence command goes through
+   * send(), which refuses to dispatch once the generation has moved
+   * on, so a late command fails the orphaned sequence instead of
+   * interleaving with its successor. Normal (non-timed-out) sequences
+   * never see a generation change and are unaffected. */
+  private readonly generations = new Map<number, number>();
 
   constructor() {
     if (typeof chrome !== "undefined") {
@@ -85,6 +95,7 @@ export class ChromeCdpCapability implements CdpCapability {
         chrome.tabs.onRemoved.addListener((tabId) => {
           this.attachedTabs.delete(tabId);
           this.lastMouse.delete(tabId);
+          this.generations.delete(tabId);
         });
       }
     }
@@ -127,18 +138,42 @@ export class ChromeCdpCapability implements CdpCapability {
    * On a sequence timeout the tracked position is cleared, so a retry
    * starts from a clean state instead of interpolating from a position
    * the timed-out sequence may never have reached. */
-  private async withTab<T>(tabId: number, fn: () => Promise<T>): Promise<T> {
+  /** Dispatch one CDP command for the running sequence, or refuse it
+   * when the sequence has already timed out (see generations). Attach,
+   * detach, and out-of-sequence calls never go through here. */
+  private async send(tabId: number, generation: number, method: string, params: Record<string, unknown>): Promise<unknown> {
+    // A tab with no entry yet is generation 0: get() returns undefined,
+    // which must compare equal to a fresh sequence's generation, or
+    // every first sequence on a tab would be refused.
+    if ((this.generations.get(tabId) ?? 0) !== generation) {
+      throw new ToolErrorException("CANCELLED", "CDP sequence superseded after its timeout; late commands are not dispatched");
+    }
+    return chrome.debugger.sendCommand({ tabId }, method, params);
+  }
+
+  private async withTab<T>(tabId: number, fn: (generation: number) => Promise<T>): Promise<T> {
     const previous = this.queues.get(tabId) ?? Promise.resolve();
     const run = previous.then(async (): Promise<T> => {
       await this.ensureAttached(tabId);
+      const generation = this.generations.get(tabId) ?? 0;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let timedOut = false;
       try {
+        // The orphaned fn()'s late rejection must never surface as an
+        // unhandled rejection after the race has settled on TIMEOUT:
+        // the no-op catch marks it handled; the race below still
+        // observes the same promise and decides the outcome.
+        const fnPromise = fn(generation);
+        fnPromise.catch(() => undefined);
         return await Promise.race([
-          fn(),
+          fnPromise,
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => {
               timedOut = true;
+              // Bump before rejecting: any command the orphaned fn()
+              // still tries to send after this point is refused by
+              // send() instead of landing in the next sequence.
+              this.generations.set(tabId, generation + 1);
               reject(
                 new ToolErrorException(
                   "TIMEOUT",
@@ -173,8 +208,8 @@ export class ChromeCdpCapability implements CdpCapability {
    * it also drags the cursor across every intermediate element, whose
    * hover handlers can re-render the page mid-sequence. A single move
    * is what a first move — and the passing clickAt path — always did. */
-  private async moveInside(tabId: number, x: number, y: number): Promise<void> {
-    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+  private async moveInside(tabId: number, x: number, y: number, generation: number): Promise<void> {
+    await this.send(tabId, generation, "Input.dispatchMouseEvent", {
       type: "mouseMoved",
       x: Math.round(x),
       y: Math.round(y),
@@ -184,22 +219,21 @@ export class ChromeCdpCapability implements CdpCapability {
   }
 
   async move(tabId: number, x: number, y: number): Promise<void> {
-    await this.withTab(tabId, async () => {
-      await this.moveInside(tabId, x, y);
+    await this.withTab(tabId, async (generation) => {
+      await this.moveInside(tabId, x, y, generation);
     });
   }
 
   async click(tabId: number, x: number, y: number, button: "left" | "right" | "middle" = "left", clickCount = 1): Promise<void> {
-    await this.withTab(tabId, async () => {
-      const target = { tabId };
+    await this.withTab(tabId, async (generation) => {
       const cdpButton = button === "right" ? "right" : button === "middle" ? "middle" : "left";
 
       // Travel -> hover dwell -> press -> hold -> release. The old version
       // sent move/press/release back to back with no timing, which is a
       // recognisably non-human sequence even though every event isTrusted.
-      await this.moveInside(tabId, x, y);
+      await this.moveInside(tabId, x, y, generation);
       await delay(50);
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      await this.send(tabId, generation, "Input.dispatchMouseEvent", {
         type: "mousePressed",
         x: Math.round(x),
         y: Math.round(y),
@@ -208,7 +242,7 @@ export class ChromeCdpCapability implements CdpCapability {
         clickCount,
       });
       await delay(60);
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      await this.send(tabId, generation, "Input.dispatchMouseEvent", {
         type: "mouseReleased",
         x: Math.round(x),
         y: Math.round(y),
@@ -221,23 +255,36 @@ export class ChromeCdpCapability implements CdpCapability {
   }
 
   async type(tabId: number, text: string): Promise<void> {
-    await this.withTab(tabId, async () => {
-      const target = { tabId };
+    await this.withTab(tabId, async (generation) => {
       // Input.insertText dispatches trusted input directly to the focused element
-      await chrome.debugger.sendCommand(target, "Input.insertText", { text });
+      await this.send(tabId, generation, "Input.insertText", { text });
     });
   }
 
   async press(tabId: number, key: string, modifiers = 0): Promise<void> {
-    await this.withTab(tabId, async () => {
-      const target = { tabId };
-      await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+    await this.withTab(tabId, async (generation) => {
+      await this.send(tabId, generation, "Input.dispatchKeyEvent", {
         type: "rawKeyDown",
         key,
         modifiers,
         windowsVirtualKeyCode: getKeyCode(key),
       });
-      await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+      // A printable character with no modifiers must also produce a char
+      // event: rawKeyDown + keyUp alone inserts nothing in editors that
+      // listen for text input, and a named key must never be reduced to
+      // its first letter's code (see getKeyCode). Modifier chords
+      // (Ctrl+A etc.) and non-printable keys get no char event.
+      if (modifiers === 0 && key.length === 1 && key >= " " && key !== "\x7f") {
+        await this.send(tabId, generation, "Input.dispatchKeyEvent", {
+          type: "char",
+          key,
+          text: key,
+          unmodifiedText: key,
+          modifiers,
+          windowsVirtualKeyCode: getKeyCode(key),
+        });
+      }
+      await this.send(tabId, generation, "Input.dispatchKeyEvent", {
         type: "keyUp",
         key,
         modifiers,
@@ -247,9 +294,8 @@ export class ChromeCdpCapability implements CdpCapability {
   }
 
   async scroll(tabId: number, x: number, y: number, deltaX: number, deltaY: number): Promise<void> {
-    await this.withTab(tabId, async () => {
-      const target = { tabId };
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+    await this.withTab(tabId, async (generation) => {
+      await this.send(tabId, generation, "Input.dispatchMouseEvent", {
         type: "mouseWheel",
         x: Math.round(x),
         y: Math.round(y),
@@ -260,15 +306,14 @@ export class ChromeCdpCapability implements CdpCapability {
   }
 
   async drag(tabId: number, fromX: number, fromY: number, toX: number, toY: number): Promise<void> {
-    await this.withTab(tabId, async () => {
-      const target = { tabId };
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+    await this.withTab(tabId, async (generation) => {
+      await this.send(tabId, generation, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
         x: Math.round(fromX),
         y: Math.round(fromY),
         buttons: 0,
       });
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      await this.send(tabId, generation, "Input.dispatchMouseEvent", {
         type: "mousePressed",
         x: Math.round(fromX),
         y: Math.round(fromY),
@@ -297,14 +342,14 @@ export class ChromeCdpCapability implements CdpCapability {
       // synthetic page-agent drag (DragEvent dispatch) on TIMEOUT
       // only — see tools/interact.ts — rather than failing outright.
       await delay(100);
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      await this.send(tabId, generation, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
         x: Math.round(toX),
         y: Math.round(toY),
         buttons: 1,
       });
       await delay(100);
-      await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      await this.send(tabId, generation, "Input.dispatchMouseEvent", {
         type: "mouseReleased",
         x: Math.round(toX),
         y: Math.round(toY),
@@ -322,8 +367,7 @@ export class ChromeCdpCapability implements CdpCapability {
     format: "jpeg" | "png" = "jpeg",
     quality = 60,
   ): Promise<string> {
-    return this.withTab(tabId, async () => {
-      const target = { tabId };
+    return this.withTab(tabId, async (generation) => {
       const params: Record<string, unknown> = {
         format,
         ...(format === "jpeg" ? { quality } : {}),
@@ -333,7 +377,7 @@ export class ChromeCdpCapability implements CdpCapability {
       if (clip) {
         params.clip = { ...clip, scale: clip.scale ?? 1 };
       }
-      const result = (await chrome.debugger.sendCommand(target, "Page.captureScreenshot", params)) as { data: string };
+      const result = (await this.send(tabId, generation, "Page.captureScreenshot", params)) as { data: string };
       return `data:image/${format};base64,${result.data}`;
     });
   }
@@ -359,16 +403,47 @@ export class ChromeCdpCapability implements CdpCapability {
 }
 
 function getKeyCode(key: string): number {
+  // Named keys must map to their real virtual-key codes. The old
+  // default (key.charCodeAt(0)) turned "F5" into 70 ("F"), "Control"
+  // into 67 ("C"), and "Shift" into 83 ("S") — the wrong key entirely.
+  // Single printable characters still fall through to charCodeAt(0);
+  // anything unlisted and multi-character maps to 0 rather than to a
+  // misleading letter code.
   switch (key) {
     case "Enter": return 13;
     case "Backspace": return 8;
     case "Tab": return 9;
     case "Escape": return 27;
-    case "ArrowUp": return 38;
-    case "ArrowDown": return 40;
+    case " ": return 32;
+    case "PageUp": return 33;
+    case "PageDown": return 34;
+    case "End": return 35;
+    case "Home": return 36;
     case "ArrowLeft": return 37;
+    case "ArrowUp": return 38;
     case "ArrowRight": return 39;
+    case "ArrowDown": return 40;
+    case "Insert": return 45;
     case "Delete": return 46;
-    default: return key.charCodeAt(0) || 0;
+    case "Control": return 17;
+    case "Shift": return 16;
+    case "Alt": return 18;
+    case "Meta": return 91;
+    case "CapsLock": return 20;
+    case "NumLock": return 144;
+    case "ScrollLock": return 145;
+    case "F1": return 112;
+    case "F2": return 113;
+    case "F3": return 114;
+    case "F4": return 115;
+    case "F5": return 116;
+    case "F6": return 117;
+    case "F7": return 118;
+    case "F8": return 119;
+    case "F9": return 120;
+    case "F10": return 121;
+    case "F11": return 122;
+    case "F12": return 123;
+    default: return key.length === 1 ? key.charCodeAt(0) : 0;
   }
 }

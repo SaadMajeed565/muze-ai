@@ -99,6 +99,15 @@ interface TokenRow {
   userId?: string;
   createdAt: number;
   lastRefreshedAt: number;
+  /**
+   * Refresh-token rows only: the sha-256 hash of the access token minted
+   * alongside this refresh token. Refresh uses it to retire exactly the
+   * paired access token, without touching any concurrent access tokens
+   * for the same session+client. Rows minted before this field existed
+   * lack it; their paired access token then simply expires on its own
+   * 1-hour TTL instead of being retired early (see refresh).
+   */
+  pairedAccessHash?: string;
 }
 interface ExtensionCodeRow {
   /** Bound browser when adopting an existing one; empty when redeem creates one. */
@@ -147,7 +156,12 @@ export class DirectoryDO implements DurableObject {
       }
       return json({ ok: true, ...result }, result.status ?? 200);
     } catch (error) {
-      return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 400);
+      // Never surface exception text to callers: it can carry storage or
+      // runtime internals, and Worker routes forward result.error verbatim
+      // (e.g. into OAuth error_description). Detail stays in the server
+      // log; callers get a generic code and can be correlated by request.
+      console.error(JSON.stringify({ event: "directory.error", action, message: String(error) }));
+      return json({ ok: false, error: "internal_error" }, 500);
     }
   }
 
@@ -565,8 +579,13 @@ export class DirectoryDO implements DurableObject {
 
   /**
    * Move an OAuth client's future MCP routing to another browser of the
-   * same account. Every access/refresh token for that client bound to the
-   * current browser is rebound; tokens bound to other browsers are left
+   * same account. The rebind is account-wide, not per-browser: every
+   * access/refresh token for that client on ANY browser of this account
+   * is rebound (predicate below: the token's session is the current
+   * session OR the token row carries this account's userId). That is the
+   * intended behaviour — a client is authorized per account, and leaving
+   * its tokens on other browsers behind would split its routing — but an
+   * earlier comment wrongly claimed other browsers' tokens were left
    * alone. Live transports on the old browser are NOT moved — the client
    * re-initializes on the new browser (see browsers.select).
    */
@@ -689,6 +708,13 @@ export class DirectoryDO implements DurableObject {
       expiresAt: nowMs() + AUTH_CODE_TTL_MS,
     };
     await this.storage.put(`ac:${codeHash}`, row);
+    // Consume the authorization request: unlike exchangeCode/refresh/
+    // redeemExtensionCode, this path previously left the ar: row in place,
+    // so the same request could be replayed for a fresh code until its
+    // 10-minute TTL expired. Failed attempts above return early and do
+    // NOT consume the row (no code was issued, so there is nothing to
+    // replay); only a successful authorization burns it.
+    await this.storage.delete(`ar:${authReqId}`);
     return { code, redirectUri, state, sessionId: defaultSessionId };
   }
 
@@ -869,6 +895,45 @@ export class DirectoryDO implements DurableObject {
     for (const [key, value] of await this.storage.list<ExtensionCodeRow>({ prefix: "ec:" })) {
       if (value.userId === userId) await this.storage.delete(key);
     }
+    // Orphan cleanup, scoped so other accounts are untouched. revokeSession
+    // (above) already removed this account's sessions, device-token index
+    // entries, OAuth tokens, pair codes and session-bound extension codes.
+    // Remaining, previously orphaned rows:
+    // - ac: authorization codes: attributable via their sessionId, which
+    //   belongs to one of this account's (now deleted) browsers. Safe to
+    //   delete: minting a token from a code requires a live s: row
+    //   (mintTokens returns "unknown session" otherwise), so these codes
+    //   could never yield tokens again anyway.
+    // - c: client rows: shared — one client can serve many accounts — so
+    //   they are deleted ONLY when no row anywhere still references the
+    //   client (no at:/rt: token, ac: code, or ar: authorization request).
+    // - ar: authorization requests: deliberately NOT bulk-deleted. They
+    //   carry no userId or sessionId, so they cannot be attributed to
+    //   this account, and this DirectoryDO is a single shared instance
+    //   for all accounts; deleting them all would cancel other accounts'
+    //   in-flight authorizations. The orphans are inert: authorizeWithUser
+    //   requires a live account+session, and they self-expire in 10 min.
+    if (account) {
+      const sessionIds = new Set(account.browsers.map((entry) => entry.sessionId));
+      for (const [key, value] of await this.storage.list<AuthCodeRow>({ prefix: "ac:" })) {
+        if (sessionIds.has(value.sessionId)) await this.storage.delete(key);
+      }
+    }
+    const referencedClients = new Set<string>();
+    for (const prefix of ["at:", "rt:"] as const) {
+      for (const [, row] of await this.storage.list<TokenRow>({ prefix })) {
+        if (row.clientId) referencedClients.add(row.clientId);
+      }
+    }
+    for (const [, row] of await this.storage.list<AuthCodeRow>({ prefix: "ac:" })) {
+      if (row.clientId) referencedClients.add(row.clientId);
+    }
+    for (const [, row] of await this.storage.list<AuthRequestRow>({ prefix: "ar:" })) {
+      if (row.clientId) referencedClients.add(row.clientId);
+    }
+    for (const [key, row] of await this.storage.list<ClientRow>({ prefix: "c:" })) {
+      if (!referencedClients.has(row.clientId)) await this.storage.delete(key);
+    }
     return { ok: true };
   }
 
@@ -1004,7 +1069,10 @@ export class DirectoryDO implements DurableObject {
       lastRefreshedAt: now,
     };
     await this.storage.put(`at:${accessHash}`, { ...base, expiresAt: now + ACCESS_TTL_MS } satisfies TokenRow);
-    await this.storage.put(`rt:${refreshHash}`, { ...base, expiresAt: now + REFRESH_TTL_MS } satisfies TokenRow);
+    await this.storage.put(
+      `rt:${refreshHash}`,
+      { ...base, expiresAt: now + REFRESH_TTL_MS, pairedAccessHash: accessHash } satisfies TokenRow,
+    );
     return { accessToken, refreshToken, expiresIn: Math.floor(ACCESS_TTL_MS / 1000), scope };
   }
 
@@ -1037,15 +1105,47 @@ export class DirectoryDO implements DurableObject {
     });
     if (!row) return { ok: false, error: "invalid_grant" };
     if (!clientId || row.clientId !== clientId) return { ok: false, error: "invalid_grant" };
+    // Retire the previous access token too: previously only the old rt:
+    // row was deleted (transactionally, above) and mintTokens issued a
+    // fresh pair, so the old access token stayed valid for up to its
+    // 1-hour TTL. The paired hash retires exactly that token; deleting
+    // every at: row for the session+client instead would also kill
+    // concurrent access tokens, so it is deliberately NOT done here.
+    // Rows minted before pairedAccessHash existed have no hash: their
+    // old access token is left to expire on its TTL (bounded, ≤ 1h).
+    if (row.pairedAccessHash) await this.storage.delete(`at:${row.pairedAccessHash}`);
     return this.mintTokens(row.sessionId, row.clientId, row.scope, row);
   }
 
+  /**
+   * Revoke a token (RFC 7009: unknown tokens also report success).
+   * Revocation kills the whole session+client token set, following the
+   * revokeSession pattern: access and refresh tokens are independently
+   * random, so deleting only the presented token's row left its pair
+   * alive. The presented token is only an anchor — it must match the
+   * caller's clientId when one is given — and every at:/rt: row for the
+   * same session+client is deleted. Behaviour change, flagged in the
+   * security report: previously, other tokens of the same client+session
+   * survived a single-token revocation; they no longer do.
+   */
   private async revokeToken(token: string, clientId: string): Promise<Record<string, any>> {
     if (!token) return { revoked: true };
     const hash = await sha256Hex(token);
-    for (const prefix of ["at:", "rt:"]) {
+    let anchor: TokenRow | undefined;
+    for (const prefix of ["at:", "rt:"] as const) {
       const row = await this.storage.get<TokenRow>(`${prefix}${hash}`);
-      if (row && (!clientId || row.clientId === clientId)) await this.storage.delete(`${prefix}${hash}`);
+      if (row && (!clientId || row.clientId === clientId)) {
+        anchor = row;
+        break;
+      }
+    }
+    if (!anchor) return { revoked: true };
+    for (const prefix of ["at:", "rt:"] as const) {
+      for (const [key, row] of await this.storage.list<TokenRow>({ prefix })) {
+        if (row.sessionId === anchor.sessionId && row.clientId === anchor.clientId) {
+          await this.storage.delete(key);
+        }
+      }
     }
     return { revoked: true };
   }

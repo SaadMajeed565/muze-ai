@@ -13,6 +13,7 @@ import {
   clipboardRead,
   clipboardTool,
   clipboardWrite,
+  dataTool,
   domClickAt,
   formTool,
   navigateTool,
@@ -70,6 +71,30 @@ describe("tool registry schema", () => {
     expect(() => navigateTool.input.parse({ action: "organize", strategy: "titlePrefix" })).not.toThrow();
     expect(() => navigateTool.input.parse({ action: "organize", strategy: "prefix" })).toThrow();
     expect(() => tabsTool.input.parse({ action: "organize", strategy: "titlePrefix" })).not.toThrow();
+  });
+
+  it("requires a dispatch key on navigate/data at validation time, except navigate sync", () => {
+    // An empty call used to pass Zod and fail deep in the handler.
+    expect(() => navigateTool.input.parse({})).toThrow(/requires an action/);
+    expect(() => navigateTool.input.parse({ category: "tab" })).toThrow(/requires an action/);
+    expect(() => navigateTool.input.parse({ category: "window" })).toThrow(/requires an action/);
+    // The sync dispatch branches on category/`for` alone, so it stays
+    // exempt (the gateway legacy adaptation emits exactly this form).
+    expect(() => navigateTool.input.parse({ category: "sync" })).not.toThrow();
+    expect(() => navigateTool.input.parse({ category: "sync", for: "delay" })).not.toThrow();
+    expect(() => navigateTool.input.parse({ for: "network_idle" })).not.toThrow();
+    expect(() => navigateTool.input.parse({ action: "open", url: "https://example.com/" })).not.toThrow();
+    const emptyData = dataTool.input.safeParse({});
+    expect(emptyData.success).toBe(false);
+    if (!emptyData.success) {
+      const messages = emptyData.error.issues.map((i) => i.message).join(" ");
+      expect(messages).toMatch(/requires a domain/);
+      expect(messages).toMatch(/requires an action/);
+    }
+    expect(() => dataTool.input.parse({ domain: "bookmarks" })).toThrow(/requires an action/);
+    expect(() => dataTool.input.parse({ action: "list" })).toThrow(/requires a domain/);
+    expect(() => dataTool.input.parse({ domain: "bookmarks", action: "list" })).not.toThrow();
+    expect(() => dataTool.input.parse({ store: "history", action: "search", query: "x" })).not.toThrow();
   });
 
   it("rejects client-supplied approval flags in unified inputs", () => {

@@ -5,11 +5,18 @@ import { sendRequest } from "../logic.js";
 import { dedupeAppsByName } from "../ui-logic.js";
 import { Button, Segmented } from "../components/primitives.js";
 import { EmptyLine, ErrorState, ListRow, Page, Section, SectionSkeleton } from "../components/layout.js";
-import { BrowserRow, McpClientRow } from "../components/browser-rows.js";
+import { BrowserRowsList, McpClientRow } from "../components/browser-rows.js";
 import { AddAppSheet, Sheet } from "../components/shared.js";
 import { showToast } from "../components/feedback.js";
 
 const POLL_MS = 5000;
+
+/** Friendly copy for post-load failures, same mapping as initial load. */
+function friendlyError(error: string): string {
+  return error === "gateway-unreachable"
+    ? "The connection is unreachable. Check your network, then try again. No browser data is shown because none could be verified."
+    : error;
+}
 
 export type ConnectionsSegment = "browsers" | "apps";
 
@@ -23,7 +30,9 @@ export interface ConnectionsPageProps {
 
 /**
  * Connect: browsers and apps, separate and never mixed. Apps dedupe by
- * name; revoking a row revokes every underlying authorisation.
+ * name; revoking a row revokes every underlying authorisation. The
+ * browser rows are the same component Home renders, so the two lists
+ * cannot drift.
  */
 export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }: ConnectionsPageProps): preact.JSX.Element {
   const { gateway } = state;
@@ -45,8 +54,30 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
 
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), POLL_MS);
-    return () => clearInterval(timer);
+    // Visibility-gated like App's poll: pause while hidden, refresh
+    // immediately and restart on show. The interval never changes.
+    let timer = 0;
+    const poll = (): void => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    const restart = (): void => {
+      clearInterval(timer);
+      timer = window.setInterval(poll, POLL_MS);
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === "visible") {
+        void refresh();
+        restart();
+      } else {
+        clearInterval(timer);
+      }
+    };
+    restart();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [refresh]);
 
   const act = useCallback(async (request: Record<string, unknown>): Promise<void> => {
@@ -68,19 +99,26 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
   const revokeAll = useCallback(async (group: ReturnType<typeof dedupeAppsByName>[number]): Promise<void> => {
     setBrowsersBusy(true);
     try {
+      let revoked = 0;
+      const failed: string[] = [];
       for (const client of group.clients) {
         const response = await sendRequest({
           type: "muze/mcp-sessions/revoke",
           clientId: client.clientId,
           sessionId: client.sessionId,
         });
-        if (!response.ok) {
-          setError(response.error ?? "That action failed");
-          break;
-        }
+        if (response.ok) revoked += 1;
+        else failed.push(client.clientName);
       }
       await refresh();
-      showToast(`${group.name} revoked`);
+      if (failed.length === 0) {
+        showToast(`${group.name} revoked`);
+      } else {
+        // Refresh above clears errors, so report failures after it.
+        // Never claim a full revocation when only part succeeded.
+        setError(`Could not revoke ${failed.join(", ")}`);
+        if (revoked > 0) showToast(`${revoked} of ${group.clients.length} revoked`);
+      }
     } finally {
       setBrowsersBusy(false);
     }
@@ -109,11 +147,7 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
 
       {error && !data ? (
         <ErrorState
-          message={
-            error === "gateway-unreachable"
-              ? "The connection is unreachable. Check your network, then try again. No browser data is shown because none could be verified."
-              : error
-          }
+          message={friendlyError(error)}
           onRetry={() => void refresh()}
         />
       ) : !data ? (
@@ -123,20 +157,16 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
           {data.browsers.length === 0 ? (
             <EmptyLine text="No browsers attached yet." />
           ) : (
-            <ul class="ui-list">
-              {data.browsers.map((browser) => (
-                <BrowserRow key={browser.sessionId} data={data} browser={browser} busy={browsersBusy} onAction={act} />
-              ))}
-            </ul>
+            <BrowserRowsList data={data} withMenus busy={browsersBusy} onAction={act} />
           )}
-          <ul class="ui-list ui-list--spaced">
+          <div class="ui-list">
             <ListRow
               icon="plus"
               title="Add a browser"
               meta="Sign in with the same account in another browser."
               onSelect={() => setAddBrowserOpen(true)}
             />
-          </ul>
+          </div>
           {data.browsers.length === 1 ? (
             <p class="ui-row-meta">
               To remove your last browser, delete your account from{" "}
@@ -152,8 +182,8 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
           title="Apps"
           description="AI apps authorised against this account."
           action={
-            <Button variant="ghost" size="sm" icon="plus" disabled={busy} onClick={() => setAddAppOpen(true)}>
-              Add app
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setAddAppOpen(true)}>
+              + Add app
             </Button>
           }
         >
@@ -162,39 +192,37 @@ export function ConnectionsPage({ state, busy, segment, onSegment, onNavigate }:
           ) : (
             <>
               {connectedApps.length > 0 ? (
-                <ul class="ui-list">
+                <div class="ui-list">
                   {connectedApps.map((group) => (
                     <McpClientRow
                       key={group.name}
                       group={group}
                       browserName={browserName}
-                      busy={browsersBusy}
                       onRevokeAll={() => void revokeAll(group)}
                     />
                   ))}
-                </ul>
+                </div>
               ) : null}
               {previousApps.length > 0 ? (
                 <details class="ui-disclosure">
-                  <summary class="ui-disclosure-summary">Previously connected</summary>
-                  <ul class="ui-list">
+                  <summary class="ui-disclosure-summary">Previously connected ({previousApps.length})</summary>
+                  <div class="ui-list">
                     {previousApps.map((group) => (
                       <McpClientRow
                         key={group.name}
                         group={group}
                         browserName={browserName}
-                        busy={browsersBusy}
                         onRevokeAll={() => void revokeAll(group)}
                       />
                     ))}
-                  </ul>
+                  </div>
                 </details>
               ) : null}
             </>
           )}
         </Section>
       )}
-      {error && data ? <ErrorState message={error} /> : null}
+      {error && data ? <ErrorState message={friendlyError(error)} /> : null}
 
       <Sheet open={addBrowserOpen} label="Add a browser" onClose={() => setAddBrowserOpen(false)}>
         <ol class="steps-list">

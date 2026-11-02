@@ -54,12 +54,20 @@ export interface PolicyConfig {
   defaultTimeoutMs: number;
 }
 
+/**
+ * "Unrestricted" allows every reachable risk tier — but never `restricted`,
+ * which tools.ts defines as reserved for tools that should never be
+ * reachable (cookies, credentials). No schema tool carries it today, so
+ * this is preventive: a future restricted tool must not become runnable
+ * merely because a user picked the widest level. (mergePolicy also clamps
+ * any patch that tries to enable a tier its level disables.)
+ */
 const ALL_RISK_ALLOWED: Record<RiskLevel, boolean> = {
   "read-only": true,
   reversible: true,
   "sensitive-read": true,
   consequential: true,
-  restricted: true,
+  restricted: false,
 };
 
 const NO_APPROVAL: Record<RiskLevel, boolean> = {
@@ -255,13 +263,21 @@ export class PolicyEngine {
   /**
    * Drop every manual override and put the permission level back to its
    * preset. The level itself and the kill switch are left alone, so a reset
-   * never quietly re-enables a stopped extension.
+   * never quietly re-enables a stopped extension. Optional permission groups
+   * are overrides, not configuration: a reset turns every group back on.
+   * Per-client policies, output/timeout limits and blocked domains are user
+   * configuration, not overrides, and are preserved.
    */
   resetOverrides(): PolicyConfig {
-    const mode = this.config.mode;
-    const killSwitch = this.config.killSwitch;
-    const blockedDomains = [...this.config.blockedDomains];
-    this.config = mergePolicy(DEFAULT_POLICY, { mode, killSwitch, blockedDomains });
+    const { mode, killSwitch, blockedDomains, clients, maxOutputChars, defaultTimeoutMs } = this.config;
+    this.config = mergePolicy(DEFAULT_POLICY, {
+      mode,
+      killSwitch,
+      blockedDomains: [...blockedDomains],
+      clients: structuredClone(clients),
+      maxOutputChars,
+      defaultTimeoutMs,
+    });
     this.applyMode(mode);
     this.config.killSwitch = killSwitch;
     this.bumpVersion();
@@ -322,10 +338,9 @@ export class PolicyEngine {
       return { ...base, reason: "Emergency stop is engaged" };
     }
 
-    const toolExists = TOOL_SCHEMAS.some((t) => t.name === tool.name);
-    if (!toolExists) {
-      return { ...base, reason: `Unknown tool "${tool.name}"` };
-    }
+    // NOTE: an earlier second "Unknown tool" check lived here, but it was
+    // unreachable — the canonical lookup above already returns for unknown
+    // tools, with the identical predicate. It was removed, not moved.
 
     if (target.url && isRestrictedUrl(target.url)) {
       return { ...base, reason: "Target is a restricted browser page" };
@@ -385,8 +400,24 @@ export class PolicyEngine {
       return { ...base, reason: `Risk level "${risk}" is not allowed in the "${this.config.mode}" level; enable it explicitly` };
     }
 
+    // Approval sources, in precedence order: an explicit per-tool override
+    // wins; otherwise the tool definition's own requiresApproval flag (the
+    // static advertised flag from TOOL_SCHEMAS) OR the risk-tier gate,
+    // when approval is enforced at all. Previously only the override and
+    // the risk gate were consulted here, so a tool that declares itself
+    // approval-gated could report requiresApproval:false from decide()
+    // (the executor ORs the tool flag in separately, but other decide()
+    // consumers did not). Input-dependent approval predicates cannot be
+    // evaluated here — decide() has no input — and remain the executor's
+    // job via toolRequiresApproval(tool, input).
+    // The canonical flag may be an input predicate (ToolDefinition form);
+    // only the static boolean form is usable here — predicates stay with
+    // the executor, which has the input.
+    const toolRequiresApproval =
+      typeof canonical.requiresApproval === "boolean" ? canonical.requiresApproval : false;
     const requiresApproval =
-      override.requiresApproval ?? (this.config.approvalMode === "never" ? false : this.config.approvalByRisk[risk]);
+      override.requiresApproval ??
+      (this.config.approvalMode === "never" ? false : toolRequiresApproval || this.config.approvalByRisk[risk]);
     return { allowed: true, requiresApproval, risk, reason: requiresApproval ? "Requires user approval" : "Allowed" };
   }
 

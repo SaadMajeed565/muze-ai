@@ -132,7 +132,7 @@ export class MockBrowserContext implements BrowserContext {
     this.browserInfo = {
       userAgent: "MockBrowser/1.0",
       platform: "test",
-      // Product version 0.4.0: the mock must report the same version the
+      // Product version 0.5.0: the mock must report the same version the
       // real extension reports (manifest.version), or tests that compare
       // browser.info against the product version pass against a stale value.
       extensionVersion: "0.5.0",

@@ -185,7 +185,7 @@ export class ChromeBrowserContext implements BrowserContext {
   readonly cdp: ChromeCdpCapability;
   captureElement?: BrowserContext["captureElement"];
   private readonly captureLocks = new Map<number, Promise<void>>();
-  private readonly injectionLocks = new Map<number, Promise<void>>();
+  private readonly injectionLocks = new Map<string, Promise<void>>();
 
   constructor(private readonly offscreen?: OffscreenMessenger) {
     if (offscreen?.available()) {
@@ -398,7 +398,11 @@ export class ChromeBrowserContext implements BrowserContext {
         return await send();
       } catch (error) {
         if (!/Receiving end does not exist|Could not establish connection/i.test(String(error))) throw error;
-        const key = tabId * 1000 + targetFrameId;
+        // String key: the old numeric key (tabId * 1000 + frameId)
+        // collided for frame ids >= 1000 (tab 1/frame 1000 and tab 2/
+        // frame 0 both yielded 2000), serialising injections for two
+        // unrelated tabs against each other.
+        const key = `${tabId}:${targetFrameId}`;
         const previous = this.injectionLocks.get(key) ?? Promise.resolve();
         let release!: () => void;
         const lock = new Promise<void>((resolve) => { release = resolve; });

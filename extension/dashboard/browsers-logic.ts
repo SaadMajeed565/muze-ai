@@ -31,6 +31,24 @@ export function defaultBrowser(data: BrowsersDashboard): DashboardBrowser | null
   return data.browsers.find((browser) => browser.sessionId === data.defaultSessionId) ?? data.browsers[0] ?? null;
 }
 
+/**
+ * The browser running this dashboard ("this browser"), the single
+ * resolution shared by Home and any other this-browser caller.
+ * Priority: currentSessionId first — it names the session this
+ * dashboard runs in, so it must win over the account default; then
+ * the row flagged isLocal; then the account default (defaultBrowser),
+ * which exists for routing old clients, not for identifying this
+ * browser. defaultBrowser itself is unchanged: it still answers the
+ * account-default question (e.g. browserCounts) only.
+ */
+export function currentBrowser(data: BrowsersDashboard): DashboardBrowser | null {
+  return (
+    data.browsers.find((browser) => browser.sessionId === data.currentSessionId) ??
+    data.browsers.find((browser) => browser.isLocal) ??
+    defaultBrowser(data)
+  );
+}
+
 /** The last browser cannot be removed (account deletion is the path for it). */
 export function canRemoveBrowser(data: BrowsersDashboard, sessionId: string): boolean {
   return data.browsers.length > 1 && data.browsers.some((browser) => browser.sessionId === sessionId);

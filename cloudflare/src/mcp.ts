@@ -348,7 +348,7 @@ function shouldShowAllTools(env?: { MCP_SHOW_ALL_TOOLS?: string }): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
-/** Full-registry descriptors for discovery: unified + granular + tasks (135). */
+/** Full-registry descriptors for discovery: unified + granular + tasks (136). */
 export const SEARCH_DESCRIPTORS: ToolDescriptor[] = FULL_TOOL_SCHEMAS.map((tool) => toToolDescriptor(tool));
 
 /**

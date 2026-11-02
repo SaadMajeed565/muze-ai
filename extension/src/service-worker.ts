@@ -171,6 +171,13 @@ function toDashboardTaskView(view: RunnerTaskView): DashboardTaskView {
     totalBudgetMs: view.totalBudgetMs,
     correlationId: view.correlationId,
     resultSummary: view.resultSummary,
+    // Mode and child status pass through: the dashboard types accept
+    // both (mode?, isChild?), and dropping them made deriveLoopStatus
+    // always see mode "act" and child:false. The parent id itself is
+    // never exposed — only the boolean, matching the dashboard type's
+    // documented rule.
+    ...(view.mode ? { mode: view.mode } : {}),
+    ...(view.parentId ? { isChild: true } : {}),
     ...(view.finalReport ? { finalReport: view.finalReport } : {}),
     createdAt: view.createdAt,
     updatedAt: view.updatedAt,
@@ -484,9 +491,19 @@ async function ensureKeepAliveDocument(wanted: boolean): Promise<void> {
         reasons: [chrome.offscreen.Reason.CLIPBOARD, chrome.offscreen.Reason.BLOBS],
         justification: "Keep service worker alive and provide canvas/clipboard DOM access.",
       });
+    } else if (!wanted && has) {
+      // Previously there was no close path: signing out (which calls
+      // syncKeepAlive with gatewayEnabled=false) left the offscreen
+      // document — and its 20s keepalive pings — alive indefinitely.
+      // closeDocument may be absent from older chrome typings, so it is
+      // called through a guarded cast, never assumed present.
+      const offscreen = chrome.offscreen as typeof chrome.offscreen & {
+        closeDocument?: () => Promise<void>;
+      };
+      await offscreen.closeDocument?.();
     }
   } catch {
-    // Ignore if already created or offscreen is unsupported in current environment
+    // Ignore if already created/closed or offscreen is unsupported in current environment
   }
 }
 
@@ -554,16 +571,36 @@ function plainAuthError(error: unknown): string {
  * alarms are ignored until the user signs in again.
  */
 let connectGatewayInFlight: Promise<void> | null = null;
+/**
+ * The single pending offline-resume listener, if one is registered.
+ * Previously every offline connectGateway call registered a new `online`
+ * listener before the single-flight check, stacking listeners that all
+ * fired (and all dialled) when the network returned.
+ */
+let offlineResumeHandler: (() => void) | null = null;
 async function connectGateway(settings: BridgeSettings): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     // Offline: do nothing now. Resume automatically when the network
-    // comes back, instead of hammering a dead endpoint.
-    const handler = (): void => {
-      globalThis.removeEventListener("online", handler);
-      void connectGateway(settings);
-    };
-    globalThis.addEventListener("online", handler, { once: true });
+    // comes back, instead of hammering a dead endpoint. Exactly one
+    // resume listener is ever registered: repeat offline calls while one
+    // is pending return without stacking another.
+    if (!offlineResumeHandler) {
+      const handler = (): void => {
+        offlineResumeHandler = null;
+        globalThis.removeEventListener("online", handler);
+        void connectGateway(settings);
+      };
+      offlineResumeHandler = handler;
+      globalThis.addEventListener("online", handler, { once: true });
+    }
     return;
+  }
+  // Online again (or the online event never fired but onLine flipped):
+  // a stale resume listener would re-dial with captured old settings,
+  // so drop it — this call is connecting now anyway.
+  if (offlineResumeHandler) {
+    globalThis.removeEventListener("online", offlineResumeHandler);
+    offlineResumeHandler = null;
   }
   if (connectGatewayInFlight) return connectGatewayInFlight;
   connectGatewayInFlight = (async () => {

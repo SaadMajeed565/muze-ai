@@ -382,9 +382,25 @@ const CONSEQUENTIAL_TOOLS = new Set([
   "windows.close",
   "bookmarks.create",
   "bookmarks.update",
+  // NOTE: "bookmarks.remove" and "history.deleteUrl" below are the
+  // chrome.* API method names, not tool names — no tool by either name
+  // exists in the registry, so they never matched anything. They are
+  // kept for backward compatibility; the real tool names
+  // ("bookmarks.delete", "history.delete") are listed alongside them,
+  // because with defaultIsConsequential only, those deletes previously
+  // skipped the tab gate, pre-step snapshot, pre-step re-observation,
+  // verify-after-step, and idempotency dedup.
   "bookmarks.remove",
+  "bookmarks.delete",
   "downloads.start",
+  // Lowercase spelling of the chrome.* name: defaultIsConsequential
+  // lowercases its input before the set lookup, so a camelCase
+  // "history.deleteUrl" entry on its own could never match anything
+  // (the same trap as the missing real names above). Both spellings
+  // are listed so neither lookup form misses.
+  "history.deleteurl",
   "history.deleteUrl",
+  "history.delete",
   "workflows.fillFormForReview",
   "workflows.openSequence",
   "workflows.organizeTabs",

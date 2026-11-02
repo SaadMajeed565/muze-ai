@@ -50,6 +50,68 @@ describe("ApprovalBroker", () => {
     expect(() => b.consume(record.id, { tool: "clipboard.read", input: {}, clientId: "c1" })).toThrow(/still pending/);
   });
 
+  it("binds the target hint into the fingerprint", () => {
+    const { broker: b } = broker();
+    const target = { tabId: 7, url: "https://example.com" };
+    const record = b.create({
+      tool: "tabs.navigate",
+      risk: "reversible",
+      summary: "navigate",
+      client,
+      input: { url: "https://example.com" },
+      target,
+    });
+    b.approve(record.id);
+    // Same tool/input/client but a different target must not consume it.
+    expect(() =>
+      b.consume(record.id, {
+        tool: "tabs.navigate",
+        input: { url: "https://example.com" },
+        clientId: "c1",
+        target: { tabId: 8, url: "https://example.com" },
+      }),
+    ).toThrow(/does not match/);
+    // Omitting the target entirely must also fail closed, not silently
+    // drop the target from the fingerprint.
+    expect(() =>
+      b.consume(record.id, { tool: "tabs.navigate", input: { url: "https://example.com" }, clientId: "c1" }),
+    ).toThrow(/does not match/);
+    // The exact target consumes it.
+    const consumed = b.consume(record.id, {
+      tool: "tabs.navigate",
+      input: { url: "https://example.com" },
+      clientId: "c1",
+      target,
+    });
+    expect(consumed.status).toBe("used");
+    // Target-less approvals keep their old fingerprints (no behaviour change).
+    expect(fingerprintOperation("t", { a: 1 }, "c")).toBe(fingerprintOperation("t", { a: 1 }, "c"));
+    expect(fingerprintOperation("t", { a: 1 }, "c", target)).not.toBe(fingerprintOperation("t", { a: 1 }, "c"));
+  });
+
+  it("caps record growth by evicting terminal records, never live approvals", () => {
+    let n = 0;
+    const small = new ApprovalBroker({
+      ttlMs: 1000,
+      now: () => 1000,
+      maxRecords: 3,
+      idFactory: () => `apv_${++n}`,
+    });
+    const mk = (tool: string) => small.create({ tool, risk: "read-only", summary: tool, client, input: {} });
+    const r1 = mk("tabs.list");
+    const r2 = mk("tabs.get");
+    small.deny(r1.id);
+    small.deny(r2.id);
+    const r3 = mk("tabs.create"); // size 3, at cap
+    mk("tabs.close"); // size 4 -> oldest terminal record (r1) evicted
+    expect(small.get(r1.id)).toBeUndefined();
+    expect(small.get(r2.id)).toBeDefined();
+    expect(small.get(r3.id)).toBeDefined();
+    // A pending record is never evicted for the cap, even over it.
+    const pending = mk("tabs.reload");
+    expect(small.get(pending.id)).toBeDefined();
+  });
+
   it("produces deterministic 128-bit fingerprints independent of key order", () => {
     const first = fingerprintOperation("t", { a: 1, b: 2 }, "c");
     expect(first).toBe(fingerprintOperation("t", { b: 2, a: 1 }, "c"));

@@ -23,6 +23,10 @@ export type PageOp =
   | { op: "click"; ref: string; button: "left" | "right" | "middle" }
   | { op: "activationCheck"; ref?: string; x?: number; y?: number; key?: string }
   | { op: "focus"; ref: string }
+  | { op: "focusAt"; x: number; y: number }
+  | { op: "focusedValue" }
+  | { op: "typeFocused"; text: string }
+  | { op: "pressFocused"; key: string; modifiers: ("Control" | "Shift" | "Alt" | "Meta")[] }
   | { op: "hover"; ref: string }
   | { op: "scrollPage"; direction: "up" | "down" | "top" | "bottom"; amount: number }
   | { op: "scrollTo"; ref: string }
@@ -807,6 +811,31 @@ export function pageAgent(request: PageOp): any {
       el.focus();
       return { focused: true, ref: request.ref };
     }
+    case "focusAt": {
+      // Coordinate-path focus: the element at the point, focused
+      // directly. A synthetic mousedown does not move focus, so the
+      // coordinate typing path needs this instead of relying on the
+      // click to focus. Returns the tag so the caller can report it.
+      const target = targetAt(request.x, request.y) as HTMLElement | null;
+      if (!target || typeof target.focus !== "function") return { focused: false, tagName: target?.tagName.toLowerCase() ?? "" };
+      target.focus();
+      return { focused: true, tagName: target.tagName.toLowerCase() };
+    }
+    case "focusedValue": {
+      // Read-back for the coordinate typing path: what the browser
+      // actually has focused (not what a ref resolved to), whether it
+      // is visible, and what text it holds. Used only for the landed
+      // check inside the handler; the handler never returns the value.
+      const active = doc.activeElement as HTMLElement | null;
+      if (!active) return { tagName: "", visible: false };
+      const isField = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
+      return {
+        tagName: active.tagName.toLowerCase(),
+        visible: isVisible(active),
+        ...(isField ? { value: (active as HTMLInputElement | HTMLTextAreaElement).value } : {}),
+        ...(active.isContentEditable ? { textContent: active.textContent ?? "" } : {}),
+      };
+    }
     case "hover": {
       const el = resolve(request.ref) as HTMLElement | null;
       if (!el) return { error: "STALE_ELEMENT" };
@@ -1166,6 +1195,65 @@ export function pageAgent(request: PageOp): any {
       el.dispatchEvent(new KeyboardEvent("keypress", init));
       el.dispatchEvent(new KeyboardEvent("keyup", init));
       return { pressed: true, ref: request.ref };
+    }
+    case "typeFocused": {
+      // Coordinate-path typing: type into the element the browser
+      // actually has focused, WITHOUT resolving or focusing any ref —
+      // that refocus is exactly what sent CDP input to a hidden
+      // element. Per-character, mirroring the "type" case.
+      const el = doc.activeElement as HTMLElement | null;
+      if (!el) return { error: "UNSUPPORTED" };
+      const isField = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+      if (!isField && !el.isContentEditable) return { error: "UNSUPPORTED" };
+      for (const ch of request.text) {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true }));
+        el.dispatchEvent(new KeyboardEvent("keypress", { key: ch, bubbles: true, cancelable: true }));
+        if (isField) {
+          const field = el as HTMLInputElement | HTMLTextAreaElement;
+          const start = field.selectionStart ?? field.value.length;
+          const end = field.selectionEnd ?? field.value.length;
+          const proto = field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+          const next = field.value.slice(0, start) + ch + field.value.slice(end);
+          if (setter) setter.call(field, next);
+          else field.value = next;
+          try {
+            field.setSelectionRange(start + ch.length, start + ch.length);
+          } catch {
+            /* input types such as email or number reject selection APIs */
+          }
+          fireInput(field);
+        } else {
+          const inserted = typeof document.execCommand === "function" && document.execCommand("insertText", false, ch);
+          if (!inserted) {
+            el.textContent = (el.textContent ?? "") + ch;
+            fireInput(el);
+          }
+        }
+        el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
+      }
+      return { typed: true };
+    }
+    case "pressFocused": {
+      // Coordinate-path press: key events on the actually focused
+      // element, without resolving or focusing any ref.
+      const el = doc.activeElement as HTMLElement | null;
+      if (!el) return { error: "UNSUPPORTED" };
+      const mods = request.modifiers;
+      const init: KeyboardEventInit = {
+        key: request.key,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        ctrlKey: mods.includes("Control"),
+        shiftKey: mods.includes("Shift"),
+        altKey: mods.includes("Alt"),
+        metaKey: mods.includes("Meta"),
+      };
+      el.dispatchEvent(new KeyboardEvent("keydown", init));
+      el.dispatchEvent(new KeyboardEvent("keypress", init));
+      el.dispatchEvent(new KeyboardEvent("keyup", init));
+      return { pressed: true };
     }
     case "clickAt": {
       const target = (targetAt(request.x, request.y) as HTMLElement | null) ?? (doc.documentElement as HTMLElement);

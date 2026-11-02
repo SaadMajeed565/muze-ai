@@ -271,11 +271,15 @@ export const unifiedToolHandlers: RegisteredTool[] = [
       case "ungroup": return exec.invoke("tabs.ungroup", { tabIds: data.tabIds ?? [] });
       case "reload": return exec.invoke("tabs.reload", { tabId: data.tabId, bypassCache: data.bypassCache ?? false });
       case "save_session": {
+        // Aligned with navigate.save_session: pass the caller's windowId
+        // (undefined = all windows, per workflows.saveSession) instead of
+        // forcing undefined, which silently dropped a caller-supplied
+        // windowId on the tabs path.
         if (!exec.approvalValidated) {
-          const dry = await exec.invoke<{ requiresApproval?: boolean }>("workflows.saveSession", { name: data.title ?? "session", windowId: undefined }, { dryRun: true });
+          const dry = await exec.invoke<{ requiresApproval?: boolean }>("workflows.saveSession", { name: data.title ?? "session", windowId: data.windowId }, { dryRun: true });
           if (dry?.requiresApproval) throw new ToolErrorException("APPROVAL_REQUIRED", "tabs.save_session requires user approval");
         }
-        return exec.invoke("workflows.saveSession", { name: data.title ?? "session", windowId: undefined });
+        return exec.invoke("workflows.saveSession", { name: data.title ?? "session", windowId: data.windowId });
       }
       case "restore_session": {
         if (!exec.approvalValidated) {
@@ -576,9 +580,16 @@ export const unifiedToolHandlers: RegisteredTool[] = [
       });
     }
     if (include.has("a11y") || include.has("ast") || include.has("screenshot") || data.includeScreenshot) {
-      await taskFor("viewport", "screenshots.viewport", { tabId }, (vp) => {
-        out.viewport = vp;
-      });
+      // Viewport metrics are a page read, not a screenshot: read them
+      // directly instead of invoking screenshots.viewport, which now
+      // captures an image (and requires approval). Routing through the
+      // tool here would turn every a11y/ast observe into a capture or
+      // a per-include approval error.
+      try {
+        out.viewport = await runPageOp(exec.ctx, tabId, { op: "getViewport" }, frameId, exec.signal);
+      } catch (error) {
+        errors.push({ include: "viewport", error: error instanceof Error ? error.message : String(error) });
+      }
     }
     out.coordinateHint = "dom.clickAt uses CSS viewport pixels. For screenshot pixels, set coordinateSpace=screenshot or divide by devicePixelRatio.";
     if (errors.length > 0) out.errors = errors;

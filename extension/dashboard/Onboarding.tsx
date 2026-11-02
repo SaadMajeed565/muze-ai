@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "preact/hooks";
 import type { PermissionMode } from "../libs/security/index.js";
+import { clampStep, ONBOARDING_STEPS } from "./logic.js";
 import { Icon } from "./components/Icon.js";
 import { Button, Callout } from "./components/primitives.js";
 import { Field } from "./components/layout.js";
@@ -18,10 +19,20 @@ export interface OnboardingProps {
   onSkip: () => void;
 }
 
-const STEPS = [
-  { id: "level", eyebrow: "Step 1 of 2", title: "How far may the agent go?", body: "Pick a starting point. You can change it any time from Me → Permissions and safety." },
-  { id: "client", eyebrow: "Step 2 of 2", title: "Point your AI app here.", body: "Add this connection to your AI app, then authorise it through your account. No token paste." },
-];
+// Step titles, order, and count come from the single source in
+// logic.ts (ONBOARDING_STEPS): its caption is the onboarding title, so
+// the two can no longer drift. Only the step bodies are local copy.
+const STEP_BODIES: Record<string, string> = {
+  level: "Pick a starting point. You can change it any time from Me → Permissions and safety.",
+  client: "Add this connection to your AI app, then authorise it through your account. No token paste.",
+};
+
+const STEPS = ONBOARDING_STEPS.map((step, index) => ({
+  id: step.id,
+  eyebrow: `Step ${index + 1} of ${ONBOARDING_STEPS.length}`,
+  title: step.caption,
+  body: STEP_BODIES[step.id] ?? "",
+}));
 
 /** Two-step setup: permission level, then connect an AI app. */
 export function Onboarding({
@@ -36,7 +47,7 @@ export function Onboarding({
   onFinish,
   onSkip,
 }: OnboardingProps): preact.JSX.Element {
-  const safeStep = Math.min(STEPS.length, Math.max(1, Math.round(Number.isFinite(step) ? step : 1)));
+  const safeStep = clampStep(step);
   const current = STEPS[safeStep - 1];
   const heading = useRef<HTMLHeadingElement>(null);
 

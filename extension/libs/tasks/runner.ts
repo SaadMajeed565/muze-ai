@@ -2371,7 +2371,9 @@ export class TaskRunner {
     batch: TaskStep[],
     signal: AbortSignal,
   ): Promise<StepOutcome> {
-    const planApproved = this.activeApproval(task) !== null;
+    // Recomputed after the re-check below (see there); the initial
+    // value only covers the pre-flight phase.
+    let planApproved = this.activeApproval(task) !== null;
     // Phase B pre-flight: per-iteration resolution and snapshot capture
     // for every member BEFORE anything launches, so a denied tool or a
     // failed snapshot pauses the batch without partial execution.
@@ -2407,6 +2409,61 @@ export class TaskRunner {
           return "paused";
         }
       }
+    }
+    // Per-step bounds re-check, immediately before launch: members were
+    // bounds-checked at collection time, but resolution and snapshot
+    // capture above take time, and a plan approval can expire in that
+    // window. executeOne re-checks per step; the batch path used to
+    // pass planApproved for every member from a single stale check, so
+    // an expired or out-of-bounds member would have run under a dead
+    // approval. Re-checking here pauses the whole batch before anything
+    // launches (mirroring the run loop's expiry/bounds pauses), so no
+    // member runs, and no attempt is consumed, under a dead approval.
+    {
+      const approval = this.activeApproval(task);
+      if (task.planApproval && approval === null) {
+        task.status = "paused";
+        task.pauseReason = "plan-approval-expired";
+        task.updatedAt = this.now();
+        this.refreshSummary(task);
+        await this.checkpoint(all, task, {
+          kind: "task.paused",
+          taskId: task.id,
+          stepIndex: batch[0].index,
+          tool: batch[0].tool,
+          decision: "paused",
+          outcome: "plan-approval-expired",
+        });
+        return "paused";
+      }
+      if (approval) {
+        for (const step of batch) {
+          const reason = this.stepBoundsReason(step, approval);
+          if (reason !== null) {
+            step.state = "waiting_approval";
+            step.outsideBoundsReason = reason;
+            task.status = "waiting_approval";
+            task.pauseReason = `plan-bounds: ${reason}`;
+            task.updatedAt = this.now();
+            this.refreshSummary(task);
+            await this.checkpoint(all, task, {
+              kind: "task.waiting-approval",
+              taskId: task.id,
+              stepIndex: step.index,
+              tool: step.tool,
+              decision: "approval-required",
+              outcome: `plan-bounds: ${reason}`,
+            });
+            return "waiting";
+          }
+          step.outsideBoundsReason = null;
+        }
+      }
+      // Launch under the approval state re-checked above, not the one
+      // from function entry (an approval could also have arrived during
+      // pre-flight; either way the launch flag matches executeOne's
+      // per-step check at launch time).
+      planApproved = this.activeApproval(task) !== null;
     }
     for (const step of batch) {
       step.state = "running";

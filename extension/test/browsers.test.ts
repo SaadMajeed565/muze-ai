@@ -3,6 +3,7 @@ import { browserInfoFromUserAgent } from "../src/gateway-client.js";
 import {
   attachedClients,
   browserCounts,
+  currentBrowser,
   browserDetail,
   canRemoveBrowser,
   defaultBrowser,
@@ -100,6 +101,20 @@ describe("browsers dashboard view logic", () => {
     expect(canRemoveBrowser(data, "browser-a")).toBe(true);
     expect(canRemoveBrowser({ ...data, browsers: [data.browsers[0]] }, "browser-a")).toBe(false);
     expect(canRemoveBrowser(data, "browser-missing")).toBe(false);
+  });
+
+  test("this browser prefers the running session over the account default", () => {
+    // Fixture: current session is browser-a, which is also the default.
+    expect(currentBrowser(data)?.sessionId).toBe("browser-a");
+    // A different current session wins over the default.
+    expect(currentBrowser({ ...data, currentSessionId: "browser-b" })?.sessionId).toBe("browser-b");
+    // No current session: the local row wins over the default.
+    expect(currentBrowser({ ...data, currentSessionId: undefined, browsers: [
+      browser({ sessionId: "browser-a", isDefault: true }),
+      browser({ sessionId: "browser-b", name: "Browser B", isDefault: false, connected: false, tabCount: null, isLocal: true }),
+    ] })?.sessionId).toBe("browser-b");
+    // Neither current nor local: fall back to the account default.
+    expect(currentBrowser({ ...data, currentSessionId: undefined })?.sessionId).toBe("browser-a");
   });
 
   test("default browser and counts", () => {

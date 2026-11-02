@@ -444,7 +444,20 @@ export const systemToolHandlers: RegisteredTool[] = [
 
   defineTool(browserCaptureTab, async (input, { ctx, signal }) => {
     const data = input as { windowId?: number; format: "png" | "jpeg"; quality: number };
-    const tab = await raceWithAbort(ctx.getActiveTab(), signal);
+    // windowId selects the window: capture that window's active tab, not
+    // the last-focused window's. Without it, fall back to the active tab
+    // (previous behaviour). listTabs has no active filter, so pick the
+    // tab Chrome reports as active in that window.
+    let tab: { id?: number } | null;
+    if (typeof data.windowId === "number") {
+      const tabs = await raceWithAbort(ctx.listTabs({ windowId: data.windowId }), signal);
+      tab = tabs.find((t) => t.active) ?? null;
+      if (!tab || typeof tab.id !== "number") {
+        throw new ToolErrorException("INVALID_INPUT", `Window ${data.windowId} has no active tab to capture`);
+      }
+    } else {
+      tab = await raceWithAbort(ctx.getActiveTab(), signal);
+    }
     if (!tab || typeof tab.id !== "number") {
       throw new ToolErrorException("INVALID_INPUT", "There is no active tab to capture");
     }

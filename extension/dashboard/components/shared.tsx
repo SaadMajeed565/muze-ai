@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import type { ApprovalRequestInfo } from "../../libs/tool-contracts/index.js";
 import { formatCountdown } from "../logic.js";
 import { Button } from "./primitives.js";
-import { Field } from "./layout.js";
 import { Icon } from "./Icon.js";
+import { BrandIcon } from "./brand-icons.js";
 import { useConfirm } from "./confirm.js";
 
 export interface MenuItem {
@@ -12,65 +12,78 @@ export interface MenuItem {
   onSelect: () => void;
 }
 
-/** Accessible "..." overflow menu retained for compact desktop surfaces. */
-export function MenuButton({ items, ariaLabel = "More actions" }: { items: MenuItem[]; ariaLabel?: string }): preact.JSX.Element {
+/**
+ * Kebab (three-dot) menu, like the reference Files menus: one floating
+ * panel, right-aligned under the kebab, flipping above the row near
+ * the viewport bottom. Closes on outside tap, on scroll, or after any
+ * action. Used by file rows and by browser/app rows.
+ */
+export function KebabMenu({ items, ariaLabel = "More actions" }: { items: MenuItem[]; ariaLabel?: string }): preact.JSX.Element {
   const [open, setOpen] = useState(false);
-  const opener = useRef<HTMLElement | null>(null);
-  const list = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const menu = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open || !menu.current || !opener.current) return;
+    const rect = opener.current.getBoundingClientRect();
+    const width = menu.current.offsetWidth;
+    const height = menu.current.offsetHeight;
+    let left = rect.right - width;
+    if (left < 8) left = 8;
+    let top = rect.bottom + 4;
+    if (top + height > window.innerHeight - 8) top = rect.top - height - 4;
+    if (top < 8) top = 8;
+    setPosition({ left, top });
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
-    const onDocClick = (event: MouseEvent): void => {
-      if (!(event.target as HTMLElement).closest?.(".ui-menu")) setOpen(false);
+    const close = (event: Event): void => {
+      if (!(event.target as HTMLElement).closest?.(".ctxmenu") && !(event.target as HTMLElement).closest?.(".kebab")) {
+        setOpen(false);
+      }
     };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [open]);
-
-  const close = (): void => {
-    setOpen(false);
-    opener.current?.focus();
-  };
-
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      close();
-      return;
-    }
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    event.preventDefault();
-    const options = Array.from(list.current?.querySelectorAll<HTMLElement>("[role='menuitem']") ?? []);
-    if (options.length === 0) return;
-    const current = options.indexOf(document.activeElement as HTMLElement);
-    const next = event.key === "ArrowDown" ? (current + 1) % options.length : (current - 1 + options.length) % options.length;
-    options[next]?.focus();
-  };
+    const onScroll = (): void => setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open ]);
 
   return (
-    <div class="ui-menu">
-      <Button
-        variant="ghost"
-        size="sm"
-        ariaLabel={ariaLabel}
-        ariaHasPopup="menu"
-        ariaExpanded={open}
-        title={ariaLabel}
+    <>
+      <button
+        type="button"
+        class="kebab"
+        aria-label={ariaLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        ref={opener}
         onClick={(event) => {
-          opener.current = event.currentTarget as unknown as HTMLElement;
+          event.stopPropagation();
+          setPosition(null);
           setOpen((value) => !value);
         }}
       >
-        <span aria-hidden="true">…</span>
-      </Button>
+        <Icon name="dots" size={18} />
+      </button>
       {open ? (
-        <div class="ui-menu-list" role="menu" aria-label={ariaLabel} ref={list} onKeyDown={onKeyDown}>
+        <div
+          class="ctxmenu"
+          role="menu"
+          aria-label={ariaLabel}
+          ref={menu}
+          style={position ? { left: `${position.left}px`, top: `${position.top}px` } : { visibility: "hidden", left: "0px", top: "0px" }}
+        >
           {items.map((item) => (
             <button
               key={item.label}
               type="button"
               role="menuitem"
-              class={"ui-menu-item" + (item.danger ? " ui-menu-item--danger" : "")}
+              class={"ctxItem" + (item.danger ? " danger" : "")}
               onClick={() => {
                 setOpen(false);
                 item.onSelect();
@@ -81,7 +94,7 @@ export function MenuButton({ items, ariaLabel = "More actions" }: { items: MenuI
           ))}
         </div>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -93,9 +106,10 @@ export interface SheetProps {
 }
 
 /**
- * Mobile bottom sheet. Focus-trapped, Escape closes, body scroll locks,
- * focus returns to the opener, and the panel becomes a centred dialog on
- * wide option pages.
+ * Bottom sheet in the reference pattern: scrim + panel sliding up.
+ * Escape closes, body scroll locks, focus returns to the opener.
+ * (The old centred-dialog markup is gone; the reference sheet is the
+ * only sheet language now.)
  */
 export function Sheet({ open, label, onClose, children }: SheetProps): preact.JSX.Element | null {
   const panel = useRef<HTMLDivElement>(null);
@@ -139,74 +153,23 @@ export function Sheet({ open, label, onClose, children }: SheetProps): preact.JS
 
   if (!open) return null;
   return (
-    <div class="sheet-backdrop" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div class="sheet" role="dialog" aria-modal="true" aria-label={label} ref={panel} tabIndex={-1}>
-        <div class="sheet-grabber" aria-hidden="true" />
-        <div class="sheet-head">
-          <h2 class="sheet-title">{label}</h2>
-          <Button variant="ghost" size="sm" icon="close" ariaLabel="Close" onClick={onClose} />
+    <div class="sheet open" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div class="box" role="dialog" aria-modal="true" aria-label={label} ref={panel} tabIndex={-1}>
+        <div class="between">
+          <b>{label}</b>
+          <button type="button" class="btn small" onClick={onClose}>
+            Close
+          </button>
         </div>
-        <div class="sheet-body">{children}</div>
+        {children}
       </div>
     </div>
   );
 }
 
-export interface ActionSheetItem {
-  label: string;
-  icon?: "pencil" | "browser" | "plug" | "trash" | "check" | "logout";
-  danger?: boolean;
-  onSelect: () => void;
-}
-
-export function ActionSheet({
-  open,
-  title,
-  items,
-  onClose,
-}: {
-  open: boolean;
-  title: string;
-  items: ActionSheetItem[];
-  onClose: () => void;
-}): preact.JSX.Element {
-  return (
-    <Sheet open={open} label={title} onClose={onClose}>
-      <div class="action-list">
-        {items.map((item) => (
-          <button
-            key={item.label}
-            type="button"
-            class={"action-item" + (item.danger ? " action-item--danger" : "")}
-            onClick={() => {
-              onClose();
-              item.onSelect();
-            }}
-          >
-            {item.icon ? <Icon name={item.icon} size={18} /> : null}
-            <span>{item.label}</span>
-          </button>
-        ))}
-      </div>
-      <Button variant="secondary" block onClick={onClose}>
-        Cancel
-      </Button>
-    </Sheet>
-  );
-}
-
-/** Count badge for a tab, with an accessible label. */
-export function NavBadge({ count, label }: { count: number; label: string }): preact.JSX.Element {
-  return (
-    <span class="nav-badge" role="status" aria-label={`${count} ${label}`}>
-      {count > 9 ? "9+" : count}
-    </span>
-  );
-}
-
 /**
- * Pause control, reused on Home and in Me > Permissions and safety. Every
- * toggle is confirmed through the app's own sheet, never window.confirm.
+ * Pause control, reused in Me > Permissions and safety. Every toggle
+ * is confirmed through the app's own sheet, never window.confirm.
  */
 export function PauseControl({
   paused,
@@ -254,12 +217,22 @@ export function PauseControl({
  * Home and from Connect > Apps.
  */
 export function AddAppSheet({ open, onClose, mcpUrl }: { open: boolean; onClose: () => void; mcpUrl: string }): preact.JSX.Element | null {
+  const [copied, setCopied] = useState(false);
+  const copy = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(mcpUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  };
   return (
     <Sheet open={open} label="Add an app" onClose={onClose}>
-      <p class="ui-row-meta">Add this to your AI app, then approve it when it asks.</p>
-      <Field label="Connection" value={mcpUrl} copyable />
-      <Button variant="primary" block onClick={onClose}>
-        Close
+      <p class="muted">Paste this connection URL into your AI app. This sheet is the only place the URL is shown.</p>
+      <div class="mono">{mcpUrl}</div>
+      <Button variant="primary" block onClick={() => void copy()}>
+        {copied ? "Copied" : "Copy URL"}
       </Button>
     </Sheet>
   );
@@ -268,34 +241,22 @@ export function AddAppSheet({ open, onClose, mcpUrl }: { open: boolean; onClose:
 export const BROWSER_CAP = 10;
 
 /** Static plan row. Only "Free plan" and "N of 10 browsers" — no Upgrade. */
-export function PlanCard({ browserCount, onSelect }: { browserCount: number; onSelect?: () => void }): preact.JSX.Element {
-  const inner = (
-    <>
-      <span class="plan-icon" aria-hidden="true">
-        <Icon name="shield" size={18} />
-      </span>
-      <span class="plan-card-main">
-        <span class="plan-card-plan">Free plan</span>
-        <span class="plan-card-meta">
+export function PlanCard({ browserCount }: { browserCount: number }): preact.JSX.Element {
+  return (
+    <div class="plan-row">
+      <span class="plan-row-main">
+        <span class="plan-row-plan">Free plan</span>
+        <span class="plan-row-meta">
           {browserCount} of {BROWSER_CAP} browsers
         </span>
       </span>
-      {onSelect ? <Icon name="chevron-right" size={17} class="plan-card-chevron" /> : null}
-    </>
+    </div>
   );
-  if (onSelect) {
-    return (
-      <button type="button" class="plan-card plan-card--action" onClick={onSelect} aria-label="Open account">
-        {inner}
-      </button>
-    );
-  }
-  return <div class="plan-card">{inner}</div>;
 }
 
 /**
- * One approval card, used on Home and in the app-bar approvals sheet.
- * Expiry updates every second.
+ * One approval card, used on Home: brand tile + plain verb + target +
+ * Allow/Deny + small countdown text, like the reference.
  */
 export function ApprovalCard({
   approval,
@@ -315,21 +276,21 @@ export function ApprovalCard({
   }, []);
   return (
     <article class="approval-card">
-      <header class="approval-head">
-        <span class="approval-app">
-          <Icon name="plug" size={15} />
-          {appName}
-        </span>
-        <span class="approval-expiry">{formatCountdown(approval.expiresAt, now)}</span>
-      </header>
-      <h3 class="approval-title">{approval.title}</h3>
-      <p class="approval-summary">{approval.summary}</p>
-      <div class="approval-actions">
-        <Button variant="secondary" disabled={busy} onClick={() => onRespond(approval.id, false)}>
-          Deny
-        </Button>
-        <Button variant="primary" icon="check" disabled={busy} onClick={() => onRespond(approval.id, true)}>
+      <div class="flex">
+        <BrandIcon name={appName} small />
+        <div style={{ flex: 1 }}>
+          <b style={{ fontSize: "14px" }}>{approval.title}</b>
+          <div class="muted" style={{ fontSize: "12px" }}>
+            {approval.summary} · <span style={{ color: "var(--amber)" }}>{formatCountdown(approval.expiresAt, now)}</span>
+          </div>
+        </div>
+      </div>
+      <div class="mt12" style={{ display: "flex", gap: "8px" }}>
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => onRespond(approval.id, true)}>
           Allow
+        </Button>
+        <Button variant="secondary" size="sm" disabled={busy} onClick={() => onRespond(approval.id, false)}>
+          Deny
         </Button>
       </div>
     </article>

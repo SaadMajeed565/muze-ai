@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { TOOL_SCHEMAS, type ClientIdentity } from "../libs/tool-contracts/index.js";
-import { PolicyEngine } from "../libs/security/policy.js";
+import { TOOL_SCHEMAS, type ClientIdentity, type RiskLevel } from "../libs/tool-contracts/index.js";
+import { MODE_PRESETS, PolicyEngine } from "../libs/security/policy.js";
 import { AuditLog } from "../libs/security/audit.js";
 import { redact } from "../libs/security/redact.js";
 
@@ -105,6 +105,61 @@ describe("PolicyEngine", () => {
     expect(grouped.decide(tool("history.search"), client).allowed).toBe(false);
     grouped.setGroupEnabled("history", true);
     expect(grouped.decide(tool("history.search"), client).allowed).toBe(true);
+  });
+
+  it("never allows restricted risk, even in the unrestricted level", () => {
+    // tools.ts defines restricted as never-reachable; the unrestricted
+    // preset previously allowed it. No schema tool carries it today, so
+    // this is a preventive invariant, including against patches that try
+    // to re-enable it (mergePolicy clamps to the level preset).
+    expect(MODE_PRESETS.unrestricted.allowByRisk.restricted).toBe(false);
+    const policy = new PolicyEngine({ mode: "unrestricted" });
+    expect(policy.getConfig().allowByRisk.restricted).toBe(false);
+    policy.setConfig({ allowByRisk: { restricted: true } as unknown as Record<RiskLevel, boolean> });
+    expect(policy.getConfig().allowByRisk.restricted).toBe(false);
+  });
+
+  it("decide() consults the tool definition's own requiresApproval flag", () => {
+    // Unrestricted + approvalMode switched to risk: every risk gate says
+    // "no approval", so only the tool's own flag can require one.
+    const policy = new PolicyEngine({ mode: "unrestricted" });
+    policy.setConfig({ approvalMode: "risk" });
+    expect(policy.decide(tool("bookmarks.delete"), client).requiresApproval).toBe(true);
+    expect(policy.decide(tool("tabs.list"), client).requiresApproval).toBe(false);
+    // An explicit per-tool override still wins over the tool flag.
+    policy.setConfig({ toolOverrides: { "bookmarks.delete": { requiresApproval: false } } });
+    expect(policy.decide(tool("bookmarks.delete"), client).requiresApproval).toBe(false);
+    // And approvalMode "never" still means never, regardless of the flag.
+    policy.setConfig({ mode: "unrestricted" });
+    expect(policy.decide(tool("bookmarks.delete"), client).requiresApproval).toBe(false);
+  });
+
+  it("resetOverrides() resets only overrides, not user configuration", () => {
+    const policy = new PolicyEngine();
+    policy.setToolAllowed("tabs.create", false);
+    policy.setGroupEnabled("history", false);
+    policy.setConfig({
+      clients: { c1: { deniedTools: ["tabs.get"] } },
+      maxOutputChars: 1234,
+      defaultTimeoutMs: 5000,
+      blockedDomains: ["example.com"],
+    });
+    policy.engageKillSwitch();
+    const reset = policy.resetOverrides();
+    expect(reset.toolOverrides).toEqual({});
+    // The kill switch survives the reset (that is the point), so release
+    // it before checking that the tool override itself is gone.
+    policy.releaseKillSwitch();
+    expect(policy.decide(tool("tabs.create"), client).allowed).toBe(true);
+    expect(reset.mode).toBe("default");
+    expect(reset.killSwitch).toBe(true);
+    // Groups are overrides: reset turns a disabled group back on.
+    expect(reset.enabledGroups.history).toBe(true);
+    expect(reset.clients.c1.deniedTools).toEqual(["tabs.get"]);
+    expect(reset.maxOutputChars).toBe(1234);
+    expect(reset.defaultTimeoutMs).toBe(5000);
+    expect(reset.blockedDomains).toEqual(["example.com"]);
+    expect(policy.decide(tool("tabs.get"), client).allowed).toBe(false);
   });
 
   it("emergency stop overrides everything", () => {

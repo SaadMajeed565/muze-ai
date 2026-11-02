@@ -372,6 +372,12 @@ export class ToolExecutor {
   private buildRuntime(client: ClientIdentity): RuntimeSnapshot {
     const cacheKey = `${client.id}:${this.policyVersionKey()}`;
     let cached = this.runtimeCache.get(cacheKey);
+    if (cached) {
+      // LRU touch: a hit refreshes recency, so eviction below drops the
+      // genuinely least-recently-used entry, not a random one.
+      this.runtimeCache.delete(cacheKey);
+      this.runtimeCache.set(cacheKey, cached);
+    }
     if (!cached) {
       const tools = this.deps.registry.list();
       const allowedTools: string[] = [];
@@ -393,7 +399,12 @@ export class ToolExecutor {
       };
       // One entry per client; stale entries for other clients are harmless
       // but bounded here so a long-lived executor cannot grow without limit.
-      if (this.runtimeCache.size > 50) this.runtimeCache.clear();
+      // Evict only the least-recently-used entry: the old clear() dropped
+      // every client's snapshot at once (a 51st client invalidated 50).
+      if (this.runtimeCache.size > 50) {
+        const oldest = this.runtimeCache.keys().next().value;
+        if (oldest !== undefined) this.runtimeCache.delete(oldest);
+      }
       this.runtimeCache.set(cacheKey, cached);
     }
     const extra = typeof this.deps.runtime === "function" ? this.deps.runtime() : this.deps.runtime;

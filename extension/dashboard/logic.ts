@@ -64,7 +64,18 @@ export type IconName =
   | "bookmark"
   | "form"
   | "organize"
-  | "activity";
+  | "activity"
+  | "folder"
+  | "folder-plus"
+  | "pointer"
+  | "keyboard"
+  | "camera"
+  | "mouse"
+  | "nav-arrow"
+  | "wifi"
+  | "bulb"
+  | "dots"
+  | "fail";
 
 /**
  * End-user destinations only, exactly five (v3): Home, Tasks,
@@ -85,7 +96,7 @@ export const TABS: TabDefinition[] = [
   { id: "home", label: "Home", icon: "home" },
   { id: "tasks", label: "Tasks", icon: "clock" },
   { id: "connections", label: "Connect", icon: "link" },
-  { id: "files", label: "Files", icon: "file" },
+  { id: "files", label: "Files", icon: "folder" },
   { id: "account", label: "Me", icon: "user" },
 ];
 

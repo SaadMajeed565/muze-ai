@@ -1,14 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   NAV_TABS,
-  activityRows,
   activityVerb,
   dedupeAppsByName,
-  homeNextAction,
-  mergeActivity,
-  plainActivityKind,
   plainCapabilities,
-  plainDecision,
   plainPauseReason,
   plainStep,
   plainTaskStatus,
@@ -80,44 +75,7 @@ describe("v3 audit presentation", () => {
     expect(activityVerb(undefined)).toBe("acted in the browser");
   });
 
-  it("merges only consecutive call/result pairs, and never drops unpaired records", () => {
-    const call = (id: string, tool: string, client = "c1") =>
-      ({ id, kind: "tool.call", tool, decision: "allowed", client: { id: client, name: "ChatGPT" }, at: new Date(1000).toISOString() }) as never;
-    const result = (id: string, tool: string, decision = "allowed", client = "c1") =>
-      ({ id, kind: "tool.result", tool, decision, client: { id: client, name: "ChatGPT" }, at: new Date(2000).toISOString() }) as never;
-    // Newest-first input: audit_3 result, audit_2 call merge; audit_1 stays.
-    expect(mergeActivity([result("audit_3", "tabs.list"), call("audit_2", "tabs.list"), call("audit_1", "tabs.list")])).toHaveLength(2);
-    // Interleaved concurrent call breaks consecutiveness: nothing merges.
-    const interleaved = [
-      result("audit_4", "tabs.list"),
-      call("audit_3", "dom.click"),
-      call("audit_2", "tabs.list"),
-    ];
-    expect(mergeActivity(interleaved as never)).toHaveLength(3);
-    // Different tool or different client: no merge.
-    expect(mergeActivity([result("audit_3", "dom.click"), call("audit_2", "tabs.list")] as never)).toHaveLength(2);
-    expect(mergeActivity([result("audit_3", "tabs.list", "allowed", "c2"), call("audit_2", "tabs.list")] as never)).toHaveLength(2);
-    // Non-sequential ids: no merge.
-    expect(mergeActivity([result("audit_9", "tabs.list"), call("audit_2", "tabs.list")] as never)).toHaveLength(2);
-  });
 
-  it("builds merged rows with one plain sentence, relative time, and Denied/Failed only", () => {
-    const events = [
-      { id: "audit_2", kind: "tool.result", tool: "tabs.list", decision: "denied", client: { id: "oc_1", name: "Universal Browser Tools (remote MCP)" }, at: new Date(2000).toISOString() },
-      { id: "audit_1", kind: "tool.call", tool: "tabs.list", decision: "allowed", client: { id: "oc_1", name: "Universal Browser Tools (remote MCP)" }, at: new Date(1000).toISOString() },
-    ] as never;
-    const rows = activityRows(events, registered, 2000);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].sentence).toBe("ChatGPT read a page.");
-    expect(rows[0].state).toBe("Denied");
-    expect(rows[0].time).toBe("0s");
-    expect(rows[0].sentence).not.toContain("tabs.list");
-    const allowed = activityRows(
-      [{ id: "audit_5", kind: "tool.call", tool: "tabs.list", decision: "allowed", client: { id: "c1", name: "Claude" }, at: new Date(2000).toISOString() }] as never,
-      registered, 2000,
-    );
-    expect(allowed[0].state).toBeNull();
-  });
 });
 
 describe("plain-word mappings", () => {
@@ -145,13 +103,6 @@ describe("plain-word mappings", () => {
     expect(plainPauseReason(undefined)).toBeNull();
   });
 
-  it("maps activity kinds and decisions to plain words", () => {
-    expect(plainActivityKind("client.connect")).toBe("AI app connected");
-    expect(plainActivityKind("tool.call")).toBe("Agent acted");
-    expect(plainDecision("approval-required")).toBe("Waiting for approval");
-    expect(plainDecision("denied")).toBe("Denied");
-  });
-
   it("derives capabilities from level and groups only, never tool names", () => {
     const caps = plainCapabilities("default", { bookmarks: true, history: false, downloads: true, clipboard: true });
     expect(caps).toContain("Read pages");
@@ -162,10 +113,4 @@ describe("plain-word mappings", () => {
     expect(plainCapabilities("restricted", {})).toEqual(["Read pages"]);
   });
 
-  it("picks exactly one next action for Home, by priority", () => {
-    expect(homeNextAction({ signedIn: false, setupRemaining: 3, pendingApprovals: 2 })).toBe("sign-in");
-    expect(homeNextAction({ signedIn: true, setupRemaining: 1, pendingApprovals: 2 })).toBe("setup");
-    expect(homeNextAction({ signedIn: true, setupRemaining: 0, pendingApprovals: 1 })).toBe("approvals");
-    expect(homeNextAction({ signedIn: true, setupRemaining: 0, pendingApprovals: 0 })).toBe("browsers");
-  });
 });

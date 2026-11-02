@@ -47,8 +47,7 @@ Estimated time: 30 to 45 minutes, first time only.
    - Set permission level to Balanced (the default). Do not use
      Unrestricted for these tests, because then approvals are skipped
      and the approval test proves nothing.
-   - Confirm dashboard shows: gateway Live, signed in, token masked
-     (last 4 characters only).
+   - Confirm dashboard shows: gateway Live, signed in. [SUPERSEDED in 0.5.0: no token is shown in the dashboard at all, not even masked — the masked display and reveal control were deleted; do not expect a masked token here.]
 4. Connect one client at a time. Test Claude first, then ChatGPT web,
    with the same task and the same test pages, so results are comparable.
    - Claude: add the gateway MCP URL as a remote MCP server, OAuth

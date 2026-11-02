@@ -9,7 +9,6 @@ import { ConfirmProvider } from "../dashboard/components/feedback.js";
 import { PermissionsSections } from "../dashboard/components/permissions-sections.js";
 import { TasksPage } from "../dashboard/pages/Tasks.js";
 import type { DashboardState } from "../src/messages.js";
-import type { AuditEvent } from "../libs/security/index.js";
 import { Switch } from "../dashboard/components/primitives.js";
 
 let root: HTMLElement | null = null;
@@ -194,7 +193,7 @@ describe("Onboarding", () => {
 describe("BottomNav", () => {
   it("has exactly five tabs and no Tools, Browsers, Safety, or Activity entry", () => {
     const { container } = (getQueries(mount(
-      <BottomNav active="home" onChange={vi.fn()} pending={2} />,
+      <BottomNav active="home" onChange={vi.fn()} />,
     )));
     expect(container.textContent).toContain("Home");
     expect(container.textContent).toContain("Tasks");
@@ -204,7 +203,6 @@ describe("BottomNav", () => {
     expect(container.textContent).not.toContain("Tools");
     expect(container.textContent).not.toContain("Safety");
     expect(container.querySelectorAll(".tabbar button")).toHaveLength(5);
-    expect(container.querySelector(".tabbar [aria-label=\"2 requests waiting\"]")?.textContent).toBe("2");
   });
 });
 
@@ -243,22 +241,13 @@ describe("PermissionsSections end-user only", () => {
 
 describe("TasksPage activity only", () => {
   it("keeps approvals off Tasks and shows plain activity without tool names", async () => {
-    const approvals = [{
-      id: "a1", tool: "downloads.start", title: "Start a download",
-      summary: "Writes muze-report.pdf to your downloads folder", risk: "consequential",
-      client: { id: "c1", name: "Claude", transport: "remote" },
-      createdAt: Date.now(), expiresAt: Date.now() + 60_000,
-    }];
-    const audit: AuditEvent[] = [{
-      id: "e1", kind: "tool.call", tool: "tabs.list", decision: "allowed",
-      client: { id: "c1", name: "Claude", transport: "remote" }, at: new Date().toISOString(),
-    } as unknown as AuditEvent];
+    // TasksPage takes no approvals/audit props: approvals live on Home
+    // only, and there is no audit feed on Tasks.
     const { container } = (getQueries(mount(
-      <TasksPage approvals={approvals as never} audit={audit} auditLoading={false} busy={false} onRespond={vi.fn()} onCancelForClient={vi.fn()} onRefreshAudit={vi.fn()} />,
+      <TasksPage busy={false} />,
     )));
-    // Approvals live on Home and the app-bar pill, never on Tasks.
+    // Approvals live on Home, never on Tasks.
     expect(container.textContent).not.toContain("Waiting for you");
-    expect(container.textContent).not.toContain("Start a download");
     // Activity is no longer a separate tab; task steps live in task detail.
     expect(container.textContent).not.toContain("Activity");
   });

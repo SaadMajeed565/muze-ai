@@ -1,8 +1,7 @@
 import { z } from "zod";
 import type { ToolDefinition } from "../tools.js";
-import { ElementRef, FillReport, coordinateSchema, frameIdSchema, tabIdSchema } from "./common.js";
+import { ElementRef, FillReport, coordinateSchema, tabRef } from "./common.js";
 
-const tabRef = { tabId: tabIdSchema.optional().describe("Defaults to the active tab"), frameId: frameIdSchema.optional() };
 
 const findBy = z.enum(["selector", "text", "label", "placeholder", "role", "name"]);
 const findInput = z
@@ -203,6 +202,51 @@ export const domPress: ToolDefinition = {
   targetsActiveTab: true,
   input: z.object({ ...tabRef, ref: z.string().min(1).max(128), key: z.string().min(1).max(32), modifiers: z.array(z.enum(["Control", "Shift", "Alt", "Meta"])).default([]) }).strict(),
   output: z.object({ pressed: z.literal(true), ref: z.string(), hardware: z.boolean().optional(), method: z.enum(["cdp", "synthetic"]).optional() }).strict(),
+};
+
+export const domTypeAt: ToolDefinition = {
+  name: "dom.typeAt",
+  title: "Type at coordinates",
+  description:
+    "Type text into whatever is at coordinates, without a ref: click the visible target, then send input to the actually focused element (never refocusing a hidden element). The typed text is verified in the focused element; a miss is an error, never typed:true. Use when the ref resolves to a hidden input (e.g. a rich editor whose visible row is not the resolved element).",
+  category: "dom",
+  risk: "reversible",
+  requiresApproval: false,
+  targetsActiveTab: true,
+  input: z
+    .object({
+      ...tabRef,
+      x: coordinateSchema,
+      y: coordinateSchema,
+      coordinateSpace: z.enum(["css", "screenshot"]).default("css"),
+      text: z.string().max(10_000),
+      waitMs: z.number().int().min(0).max(10_000).default(0),
+      waitForNetworkIdle: z.boolean().default(false),
+    })
+    .strict(),
+  output: z.object({ typed: z.literal(true), x: z.number(), y: z.number(), hardware: z.boolean().optional(), method: z.enum(["cdp", "synthetic"]).optional() }).strict(),
+};
+
+export const domPressAt: ToolDefinition = {
+  name: "dom.pressAt",
+  title: "Press key at coordinates",
+  description:
+    "Press a key on whatever is at coordinates, without a ref: click the visible target, then send the key to the actually focused element (never refocusing a hidden element). Fails fast when what ends up focused is hidden.",
+  category: "dom",
+  risk: "reversible",
+  requiresApproval: false,
+  targetsActiveTab: true,
+  input: z
+    .object({
+      ...tabRef,
+      x: coordinateSchema,
+      y: coordinateSchema,
+      coordinateSpace: z.enum(["css", "screenshot"]).default("css"),
+      key: z.string().min(1).max(32),
+      modifiers: z.array(z.enum(["Control", "Shift", "Alt", "Meta"])).default([]),
+    })
+    .strict(),
+  output: z.object({ pressed: z.literal(true), x: z.number(), y: z.number(), key: z.string(), hardware: z.boolean().optional(), method: z.enum(["cdp", "synthetic"]).optional() }).strict(),
 };
 
 export const domClickAt: ToolDefinition = {
@@ -545,14 +589,15 @@ export const screenshotsElement: ToolDefinition = {
 
 export const screenshotsViewport: ToolDefinition = {
   name: "screenshots.viewport",
-  title: "Get viewport size",
-  description: "Return the viewport dimensions and device pixel ratio of a tab.",
+  title: "Capture viewport screenshot",
+  description:
+    "Capture a screenshot of the visible viewport, with its dimensions and device pixel ratio. (Previously this returned dimensions only despite the screenshots.* name; it now returns a real image and requires approval like the other screenshot tools.)",
   category: "screenshots",
-  risk: "read-only",
-  requiresApproval: false,
+  risk: "sensitive-read",
+  requiresApproval: true,
   targetsActiveTab: true,
-  input: z.object({ ...tabRef }).strict(),
-  output: z.object({ width: z.number(), height: z.number(), devicePixelRatio: z.number(), scrollY: z.number() }).strict(),
+  input: z.object({ ...tabRef, format: z.enum(["png", "jpeg"]).default("png"), quality: z.number().int().min(1).max(100).default(80) }).strict(),
+  output: z.object({ dataUrl: z.string(), format: z.string(), width: z.number(), height: z.number(), devicePixelRatio: z.number(), scrollY: z.number() }).strict(),
 };
 
 export const screenshotsFullPage: ToolDefinition = {
@@ -588,7 +633,9 @@ export const interactTools: ToolDefinition[] = [
   domSetRadio,
   domFill,
   domType,
+  domTypeAt,
   domPress,
+  domPressAt,
   domClickAt,
   domMoveTo,
   domDrag,

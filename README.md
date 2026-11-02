@@ -4,7 +4,7 @@ Muze AI connects a user's Chrome browser to AI clients (for example Claude) over
 
 Two projects live in this repo:
 
-- `extension/` — a Chrome Manifest V3 extension. Its service worker owns the tool registry, policy engine, approval broker, audit log, and rate limiter, and executes tool calls against real Chrome APIs. A Preact dashboard (side panel and options page) shows state, approvals, permissions, tools, files, and activity.
+- `extension/` — a Chrome Manifest V3 extension. Its service worker owns the tool registry, policy engine, approval broker, audit log, and rate limiter, and executes tool calls against real Chrome APIs. A Preact dashboard (side panel and options page) shows state, approvals, permissions, files, and activity across five tabs (Home, Tasks, Connections, Files, Account). There is no Tools page: per-action risk and tool health are not rendered in the dashboard.
 - `cloudflare/` — a Cloudflare Worker gateway with Durable Objects. It owns website accounts, OAuth for MCP clients, device-token pairing, session routing, and the MCP server. It never executes browser actions itself; it authenticates, routes, rate-limits, and relays to the extension over a WebSocket bridge.
 
 ```
@@ -26,7 +26,7 @@ The registry is the single source of truth. Tool counts are derived from it at r
 
 Unified tools are a facade: every unified action resolves to a granular
 tool before scope, policy, approval, rate limiting, or audit. The table
-lives in `extension/libs/tool-contracts/action-risk.ts` (175 entries for
+lives in `extension/libs/tool-contracts/action-risk.ts` (179 entries for
 the 13 unified tools) and is synced to the gateway by
 `npm run sync:contracts`. Gateway OAuth scope is checked against the
 granular risk, so a `read:tools` client can call `tabs.list` through
@@ -122,9 +122,7 @@ validation; the unified output now accepts boolean or number.
   that maps granular `tabs.*`/`windows.*` back to `navigate` is a
   blocker for removal and must be removed first, with live-usage
   evidence, before any 3.0 removal.
-- Dashboard Tools page adds per-action risk for unified tools and
-  per-canonical-tool health (calls, success, timeout, error, denial,
-  latency, output size, truncated rate) with no auto-disable.
+- The dashboard has no Tools page (five tabs: Home, Tasks, Connections, Files, Account); per-action risk for unified tools lives in `extension/libs/tool-contracts/action-risk.ts` and is used by scope, approval, and discovery, not rendered as a dashboard page.
   Task-type recommendations and telemetry suggestions appear in
   discovery only, as suggestions, never restrictions, never
   replacing policy or approval.
@@ -153,7 +151,7 @@ OAuth scopes are enforced on tool calls before forwarding to the bridge: a token
 4. An MCP client registers as a public OAuth client (S256 PKCE only, `response_type=code` required), and the signed-in website user authorises it on the authorize page. No device token is pasted into that form in 0.3.0.
 5. The client calls `/mcp` with its OAuth access token (1 hour; refresh tokens rotate once, 30 days).
 
-Device tokens are long-lived by design for a paired browser, so they can be rotated: extension dashboard "Rotate device token", website account page Rotate button, or `POST /session/rotate` with a Bearer device token or a signed-in website session. Rotation invalidates the old token immediately and keeps the same session id. The dashboard shows only a masked token (last 4 characters) by default; the full token is returned only on an explicit, audited reveal request.
+Device tokens are long-lived by design for a paired browser, so they can be rotated: website account page Rotate button, or `POST /session/rotate` with a Bearer <redacted> token or a signed-in website session. Rotation invalidates the old token immediately and keeps the same session id. No token value reaches the dashboard at all — not even masked: the masked display, Reveal/Copy buttons, the `muze/gateway/token` reveal route, the `tokenMasked` dashboard field, and the `token.reveal` audit kind were all deleted in 0.5.0. The token still lives in extension storage for bridge authentication.
 
 ## Build, test, deploy
 
@@ -195,7 +193,7 @@ A task is a durable multi-step job owned by the extension, not by the MCP client
 - Safety pauses, never silent failures: pinned tab closed or navigated externally, rate limit (429/503, with `resumeAfterMs` backoff), policy version/mode change, different client, or weaker scope on resume, and bridge disconnect (step marked `unknown`, re-observed before any retry, never blindly retried).
 - Honest endings only: `done`, `failed`, `cancelled`, or `partial`, always with done and undone step lists and best-effort compensations (external submits are reported as done and not undoable, never claimed as rolled back).
 - The gateway only mirrors task status (status-only, from `tasks.*` results, exposed on `/session/status`); it never executes a step and never synthesises a task view. The dashboard Tasks page shows progress (polling every 5 seconds while open) and pause/resume/cancel, with sanitised views only.
-- Not yet built (Phase 1/2): plan-level approval (`tasks.approvePlan`) and dry-run, parallel steps, and durable audit export. A task still cannot undo an external submit, cannot make a slow page fast, and cannot survive a client turn limit on its own — but it can be resumed in a later turn with `tasks.resume`, because the task now lives in the extension.
+- Not yet built (Phase 1/2, as of the 0.4.0 section this list sits in — see the 0.5.0 section above, where plan-level approval (`tasks.approvePlan`) and dry-run and parallel read-only steps are built; durable audit export is still not built): plan-level approval (`tasks.approvePlan`) and dry-run, parallel steps, and durable audit export. A task still cannot undo an external submit, cannot make a slow page fast, and cannot survive a client turn limit on its own — but it can be resumed in a later turn with `tasks.resume`, because the task now lives in the extension.
 - Known task limits, stated plainly: OAuth scope is enforced at the gateway, not forwarded over the bridge, so the extension task snapshot records scope as `gateway-enforced` and enforces client identity, policy version, and mode; per-client task isolation therefore relies on the gateway's verified OAuth client id (host dispatch uses bridge client id, not name). Direct executor calls to `tasks.*` fail with UNSUPPORTED — tasks must go through host dispatch to the runner.
 
 ## Known limitations (honest, not fixed by 0.4.0)

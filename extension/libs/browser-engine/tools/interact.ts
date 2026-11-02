@@ -11,6 +11,7 @@ import {
   domHover,
   domMoveTo,
   domPress,
+  domPressAt,
   domRead,
   domScroll,
   domScrollTo,
@@ -20,6 +21,7 @@ import {
   domShadow,
   domSubmit,
   domType,
+  domTypeAt,
   domVisible,
   domWaitFor,
   formsFill,
@@ -127,7 +129,88 @@ async function assertNotSensitiveField(
 const UPLOAD_BASE64_LIMIT = 15_000_000;
 const SET_FILE_BASE64_LIMIT = 35_000_000;
 
-/** Inline-file caps matching the granular handlers, stated in characters. */
+/** Focused-element read-back for the coordinate typing path (see
+ * dom.typeAt): what the browser actually has focused, and what text it
+ * holds. The value/text is used only for the landed check inside the
+ * handler and is never returned to the caller. */
+type FocusedValue = { tagName: string; visible: boolean; value?: string; textContent?: string };
+
+async function readFocusedValue(
+  ctx: BrowserContext,
+  tabId: number,
+  frameId: number | undefined,
+  signal: AbortSignal,
+): Promise<FocusedValue> {
+  return runPageOp<FocusedValue>(ctx, tabId, { op: "focusedValue" }, frameId, signal);
+}
+
+function focusedText(focused: FocusedValue): string | null {
+  if (typeof focused.value === "string") return focused.value;
+  if (typeof focused.textContent === "string") return focused.textContent;
+  return null;
+}
+
+/**
+ * Visibility gate for CDP input paths (Gmail recipient-editor failure
+ * mode: the recipient editor resolves to a 0x0 hidden input, focus()
+ * succeeds on it, CDP insertText goes nowhere, yet the tool reported
+ * typed:true/filled:true). The gate runs on the CDP path only, before
+ * any focus/CDP input, and fails fast with a "target is hidden" error.
+ * The synthetic page-agent paths are not gated: those ops write into
+ * the element itself (value setter / dispatched input events), so a
+ * synthetic success is a real write, not a false one — and a blanket
+ * gate would false-positive wherever geometry is unavailable (jsdom
+ * reports a 0-size rect for every element). dom.click's CDP path is
+ * gated the same way: a hidden element's box centre is (0,0), so an
+ * ungated CDP click would click the viewport's top-left corner.
+ */
+async function requireVisibleTarget(
+  ctx: BrowserContext,
+  tabId: number,
+  ref: string,
+  frameId: number | undefined,
+  signal: AbortSignal,
+): Promise<void> {
+  const seen = await runPageOp<{ visible: boolean }>(ctx, tabId, { op: "visible", ref }, frameId, signal);
+  if (!seen.visible) {
+    throw new ToolErrorException(
+      "INVALID_INPUT",
+      `target ${ref} is hidden (0x0, display:none, visibility:hidden, or opacity:0); CDP input to a hidden element goes nowhere, so this fails fast instead of reporting success — re-observe and use the visible target instead`,
+    );
+  }
+}
+
+/**
+ * Coordinate typing preparation, shared by dom.typeAt/dom.pressAt: map
+ * and bounds-check the point, activation-check it, click it (CDP when
+ * top-frame CDP is available, synthetic otherwise), then focus the
+ * element at that point — a synthetic mousedown does not move focus,
+ * so the synthetic path needs an explicit focusAt — and fail fast when
+ * what ended up focused is hidden. CDP input after this goes to the
+ * actually focused element with NO refocus to any hidden element.
+ */
+async function prepareCoordinateTarget(
+  exec: { ctx: BrowserContext; approvalValidated: boolean; signal: AbortSignal },
+  tabId: number,
+  data: { frameId?: number; x: number; y: number; coordinateSpace?: "css" | "screenshot"; key?: string },
+  mapped: { x: number; y: number },
+): Promise<FocusedValue> {
+  await requireActivationApproval(exec, tabId, { op: "activationCheck", x: mapped.x, y: mapped.y, key: data.key }, data.frameId);
+  if (isTopFrameCdp(exec.ctx, data.frameId)) {
+    await exec.ctx.cdp!.click(tabId, mapped.x, mapped.y, "left", 1);
+  } else {
+    await runPageOp<{ clicked: true }>(exec.ctx, tabId, { op: "clickAt", x: mapped.x, y: mapped.y }, data.frameId, exec.signal);
+  }
+  await runPageOp(exec.ctx, tabId, { op: "focusAt", x: mapped.x, y: mapped.y }, data.frameId, exec.signal);
+  const focused = await readFocusedValue(exec.ctx, tabId, data.frameId, exec.signal);
+  if (!focused.visible) {
+    throw new ToolErrorException(
+      "INVALID_INPUT",
+      `target is hidden: the element at (${mapped.x}, ${mapped.y}) resolved to a hidden element (${focused.tagName}); CDP input to it would go nowhere — click the visible target instead`,
+    );
+  }
+  return focused;
+}
 function assertInlineFileCaps(files: { dataBase64: string }[], perFileLimit: number, totalLimit: number, tool: string): void {
   for (const file of files) {
     if (file.dataBase64.length > perFileLimit) {
@@ -167,19 +250,28 @@ export const interactToolHandlers: RegisteredTool[] = [
       await requireActivationApproval(exec, tab.id!, { op: "activationCheck", ref: data.ref }, data.frameId);
     }
     // CDP click in any frame: topViewportBox maps the element to
-    // top-viewport coordinates, which is what CDP input uses. A CDP
-    // failure is thrown explicitly — it is never silently hidden behind
-    // a synthetic fallback. The synthetic path runs only when CDP is
-    // unavailable, or for a cross-origin sub-frame whose offset cannot
-    // be computed, and records method: "synthetic".
+    // top-viewport coordinates, which is what CDP input uses. The
+    // synthetic path runs when CDP is unavailable, for a cross-origin
+    // sub-frame whose offset cannot be computed, or — aligned with the
+    // dom.drag/dom.dragAt policy — when a CDP click stalls to TIMEOUT
+    // only. Any other CDP failure is thrown explicitly and never hidden
+    // behind a synthetic fallback, and the fallback honestly reports
+    // method: "synthetic".
     if (isCdpAvailable(exec.ctx)) {
+      // Fail fast on a hidden target: its box centre is (0,0), so an
+      // ungated CDP click would click the viewport's top-left corner.
+      await requireVisibleTarget(exec.ctx, tab.id!, data.ref, data.frameId, exec.signal);
       const box = await runPageOp<{ viewportX: number; viewportY: number; width: number; height: number; crossOrigin: boolean }>(
         exec.ctx, tab.id!, { op: "topViewportBox", ref: data.ref }, data.frameId, exec.signal,
       );
       if (!box.crossOrigin) {
-        await exec.ctx.cdp!.click(tab.id!, box.viewportX + box.width / 2, box.viewportY + box.height / 2, data.button);
-        await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
-        return { clicked: true as const, ref: data.ref, hardware: true, method: "cdp" as const };
+        try {
+          await exec.ctx.cdp!.click(tab.id!, box.viewportX + box.width / 2, box.viewportY + box.height / 2, data.button);
+          await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
+          return { clicked: true as const, ref: data.ref, hardware: true, method: "cdp" as const };
+        } catch (error) {
+          if (!(ToolErrorException.is(error) && error.code === "TIMEOUT")) throw error;
+        }
       }
     }
     const result = await runPageOp(exec.ctx, tab.id!, { op: "click", ref: data.ref, button: data.button }, data.frameId, exec.signal);
@@ -358,7 +450,9 @@ export const interactToolHandlers: RegisteredTool[] = [
       // with trusted CDP insertText, instead of setting the value by
       // script and firing untrusted input/change events. CDP text goes
       // to the focused element, in any frame, so this is not top-frame
-      // only.
+      // only. Gated: focusing a hidden element then typing into it
+      // reports filled:true while nothing lands (see requireVisibleTarget).
+      await requireVisibleTarget(ctx, tab.id!, data.ref, data.frameId, signal);
       await cdpClearField(ctx, tab.id!, data.ref, data.frameId, signal);
       if (data.value) await ctx.cdp!.type(tab.id!, data.value);
       return { filled: true as const, ref: data.ref };
@@ -381,6 +475,11 @@ export const interactToolHandlers: RegisteredTool[] = [
     const data = input as { tabId?: number; frameId?: number; ref: string; text: string; waitMs?: number; waitForNetworkIdle?: boolean };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
     await assertNotSensitiveField(ctx, tab.id!, data.ref, data.frameId, signal);
+    if (isCdpAvailable(ctx)) {
+      // Gated before focus: CDP insertText to a hidden element's focus
+      // goes nowhere while the old code still returned typed:true.
+      await requireVisibleTarget(ctx, tab.id!, data.ref, data.frameId, signal);
+    }
     await runPageOp(ctx, tab.id!, { op: "focus", ref: data.ref }, data.frameId, signal);
     if (isCdpAvailable(ctx)) {
       await ctx.cdp!.type(tab.id!, data.text);
@@ -401,7 +500,10 @@ export const interactToolHandlers: RegisteredTool[] = [
     if (isCdpAvailable(exec.ctx)) {
       // Focus first, as the synthetic path does: CDP key events go to
       // the focused element, in any frame, so without this a press could
-      // land on whatever happened to be focused before.
+      // land on whatever happened to be focused before. Gated before
+      // focus: key events to a hidden element do nothing while the old
+      // code still returned pressed:true.
+      await requireVisibleTarget(exec.ctx, tab.id!, data.ref, data.frameId, exec.signal);
       await runPageOp(exec.ctx, tab.id!, { op: "focus", ref: data.ref }, data.frameId, exec.signal);
       let bitmask = 0;
       if (data.modifiers?.includes("Alt")) bitmask |= 1;
@@ -413,6 +515,92 @@ export const interactToolHandlers: RegisteredTool[] = [
     }
     await runPageOp<{ pressed: true }>(exec.ctx, tab.id!, { op: "press", ref: data.ref, key: data.key, modifiers: data.modifiers }, data.frameId, exec.signal);
     return { pressed: true as const, ref: data.ref, method: "synthetic" as const };
+  }),
+
+  defineTool(domTypeAt, async (input, exec) => {
+    const data = input as {
+      tabId?: number;
+      frameId?: number;
+      x: number;
+      y: number;
+      coordinateSpace?: "css" | "screenshot";
+      text: string;
+      waitMs?: number;
+      waitForNetworkIdle?: boolean;
+    };
+    const tab = await requireScriptableTab(exec.ctx, data.tabId, exec.signal);
+    const mapped = await mapScreenshotCoords(exec.ctx, tab.id!, data.x, data.y, data.coordinateSpace, data.frameId, exec.signal);
+    await assertViewportCoords(exec.ctx, tab.id!, [mapped], data.frameId, exec.signal);
+    // Coordinate typing path (Gmail recipient-editor failure mode):
+    // click the VISIBLE target, then send CDP input to the element
+    // that is actually focused — never refocusing a hidden element by
+    // ref. The typed text is verified in the focused element afterwards;
+    // a miss is an error, never typed:true.
+    await prepareCoordinateTarget(exec, tab.id!, data, mapped);
+    const verifyLanded = async (): Promise<boolean> => {
+      if (data.text === "") return true;
+      const after = await readFocusedValue(exec.ctx, tab.id!, data.frameId, exec.signal);
+      const text = focusedText(after);
+      return text !== null && text.includes(data.text);
+    };
+    if (isCdpAvailable(exec.ctx)) {
+      await exec.ctx.cdp!.type(tab.id!, data.text);
+      if (await verifyLanded()) {
+        await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
+        return { typed: true as const, x: mapped.x, y: mapped.y, hardware: true, method: "cdp" as const };
+      }
+      // CDP verification failed: synthetic per-character fallback into
+      // the still-focused element (no refocus to any hidden element).
+      await runPageOp(exec.ctx, tab.id!, { op: "typeFocused", text: data.text }, data.frameId, exec.signal);
+      if (await verifyLanded()) {
+        await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
+        return { typed: true as const, x: mapped.x, y: mapped.y, method: "synthetic" as const };
+      }
+      throw new ToolErrorException(
+        "INTERNAL",
+        `dom.typeAt: typed text did not land in the element focused at (${mapped.x}, ${mapped.y}) via CDP or the synthetic fallback; nothing is reported as typed`,
+      );
+    }
+    await runPageOp(exec.ctx, tab.id!, { op: "typeFocused", text: data.text }, data.frameId, exec.signal);
+    if (await verifyLanded()) {
+      await settlePage(exec.ctx, tab.id!, data, data.frameId, exec.signal);
+      return { typed: true as const, x: mapped.x, y: mapped.y, method: "synthetic" as const };
+    }
+    throw new ToolErrorException(
+      "INTERNAL",
+      `dom.typeAt: typed text did not land in the element focused at (${mapped.x}, ${mapped.y}); nothing is reported as typed`,
+    );
+  }),
+
+  defineTool(domPressAt, async (input, exec) => {
+    const data = input as {
+      tabId?: number;
+      frameId?: number;
+      x: number;
+      y: number;
+      coordinateSpace?: "css" | "screenshot";
+      key: string;
+      modifiers: ("Control" | "Shift" | "Alt" | "Meta")[];
+    };
+    const tab = await requireScriptableTab(exec.ctx, data.tabId, exec.signal);
+    const mapped = await mapScreenshotCoords(exec.ctx, tab.id!, data.x, data.y, data.coordinateSpace, data.frameId, exec.signal);
+    await assertViewportCoords(exec.ctx, tab.id!, [mapped], data.frameId, exec.signal);
+    // Same coordinate path as dom.typeAt: click the visible target,
+    // fail fast if what ends up focused is hidden, then press without
+    // refocusing. A press has no text to verify landing, so the
+    // focused-visible check in prepareCoordinateTarget is the guard.
+    await prepareCoordinateTarget(exec, tab.id!, data, mapped);
+    if (isCdpAvailable(exec.ctx)) {
+      let bitmask = 0;
+      if (data.modifiers?.includes("Alt")) bitmask |= 1;
+      if (data.modifiers?.includes("Control")) bitmask |= 2;
+      if (data.modifiers?.includes("Meta")) bitmask |= 4;
+      if (data.modifiers?.includes("Shift")) bitmask |= 8;
+      await exec.ctx.cdp!.press(tab.id!, data.key, bitmask);
+      return { pressed: true as const, x: mapped.x, y: mapped.y, key: data.key, hardware: true, method: "cdp" as const };
+    }
+    await runPageOp(exec.ctx, tab.id!, { op: "pressFocused", key: data.key, modifiers: data.modifiers }, data.frameId, exec.signal);
+    return { pressed: true as const, x: mapped.x, y: mapped.y, key: data.key, method: "synthetic" as const };
   }),
 
   defineTool(domClickAt, async (input, exec) => {
@@ -834,7 +1022,35 @@ export const interactToolHandlers: RegisteredTool[] = [
   }),
 
   defineTool(screenshotsViewport, async (input, { ctx, signal }) => {
-    const tab = await requireScriptableTab(ctx, (input as { tabId?: number }).tabId, signal);
-    return runPageOp(ctx, tab.id!, { op: "getViewport" }, undefined, signal);
+    const data = input as { tabId?: number; format: "png" | "jpeg"; quality: number };
+    const tab = await requireScriptableTab(ctx, data.tabId, signal);
+    // A screenshots.* tool must return a screenshot: the old handler
+    // returned only getViewport dimensions despite the name. Capture
+    // via the same CDP viewport-clip path as screenshots.visible
+    // (falling back to the tabs capture), and keep the dimensions in
+    // the result. Observe's internal viewport read no longer goes
+    // through this tool (it uses a direct getViewport page op), so
+    // making this capture no longer turns every observe into a
+    // screenshot or an approval error.
+    const vp = await runPageOp<{ width: number; height: number; devicePixelRatio: number; scrollY: number }>(
+      ctx, tab.id!, { op: "getViewport" }, undefined, signal,
+    );
+    if (ctx.cdp?.available() && ctx.cdp.captureScreenshot) {
+      try {
+        const dpr = vp.devicePixelRatio > 0 ? vp.devicePixelRatio : 1;
+        const dataUrl = await ctx.cdp.captureScreenshot(
+          tab.id!,
+          { x: 0, y: 0, width: Math.max(1, vp.width), height: Math.max(1, vp.height), scale: dpr },
+          data.format,
+          data.quality,
+        );
+        return { dataUrl, format: data.format, width: vp.width, height: vp.height, devicePixelRatio: vp.devicePixelRatio, scrollY: vp.scrollY };
+      } catch (error) {
+        const isTimeout = ToolErrorException.is(error) ? error.code === "TIMEOUT" : /did not complete within/i.test(error instanceof Error ? error.message : String(error));
+        if (!isTimeout) throw error;
+      }
+    }
+    const shot = await ctx.captureVisibleTab(tab.id!, { format: data.format, quality: data.quality });
+    return { dataUrl: shot.dataUrl, format: data.format, width: vp.width, height: vp.height, devicePixelRatio: vp.devicePixelRatio, scrollY: vp.scrollY };
   }),
 ];

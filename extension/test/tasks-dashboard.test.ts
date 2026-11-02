@@ -220,7 +220,7 @@ describe("TasksPage", () => {
     root = document.createElement("div");
     document.body.appendChild(root);
     // No JSX here: this file is .ts (per the section spec), so mount via h().
-    render(h(ConfirmProvider, null, h(TasksPage, { approvals: [] })), root);
+    render(h(ConfirmProvider, null, h(TasksPage, { busy: false })), root);
     return root;
   }
 
@@ -256,19 +256,23 @@ describe("TasksPage", () => {
     vi.restoreAllMocks();
   });
 
-  it("lists tasks newest first with step X of Y progress and expands to steps", async () => {
+  it("lists the running task first, then newest first, with step X of Y progress and expands to steps", async () => {
     const container = mount();
     await flush();
     await flush();
 
     expect(container.textContent).toContain("Fill the test form");
     expect(container.textContent).toContain("Research 10 pages and organise tabs");
-    // Newest first: the createdAt:3000 task renders before createdAt:1000.
-    expect(container.textContent!.indexOf("Fill the test form")).toBeLessThan(
-      container.textContent!.indexOf("Research 10 pages and organise tabs"),
+    // Reference order: the running task sorts first, then newest first —
+    // so the running createdAt:1000 task renders before the paused
+    // createdAt:3000 one.
+    expect(container.textContent!.indexOf("Research 10 pages and organise tabs")).toBeLessThan(
+      container.textContent!.indexOf("Fill the test form"),
     );
     expect(container.textContent).toContain("Step 1 of 2");
-    expect(container.textContent).toContain("waiting on plan approval");
+    // The paused row shows its status word in the list; the reason
+    // itself lives in that task's detail (see the next test).
+    expect(container.textContent).toContain("Paused");
     // No step input ever renders, even though the fake record carries one.
     expect(container.textContent).not.toContain("hunter2");
     expect(container.textContent).not.toContain("secret.example");
@@ -283,6 +287,19 @@ describe("TasksPage", () => {
     expect(container.textContent).not.toContain("tabs.list");
     expect(container.textContent).toContain("Step 1 of 2");
     expect(container.textContent).toContain("read first page");
+  });
+
+  it("shows the pause reason in task detail", async () => {
+    const container = mount();
+    await flush();
+    await flush();
+    const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Fill the test form")) ?? null;
+    expect(row).not.toBeNull();
+    await act(() => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(container.textContent).toContain("waiting on plan approval");
   });
 
   it("shows an empty state when no tasks exist", async () => {
@@ -432,7 +449,7 @@ describe("Phase D TasksPage push reload", () => {
     });
     root = document.createElement("div");
     document.body.appendChild(root);
-    render(h(ConfirmProvider, null, h(TasksPage, { approvals: [] })), root);
+    render(h(ConfirmProvider, null, h(TasksPage, { busy: false })), root);
     await flush();
     await flush();
     expect(listeners.length).toBe(1);

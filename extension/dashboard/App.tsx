@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
-import type { AuditEvent, PermissionMode, PolicyConfig } from "../libs/security/index.js";
+import type { PermissionMode } from "../libs/security/index.js";
 import type { DashboardState } from "../src/messages.js";
 import type { Appearance, TabId } from "./logic.js";
 import { APPEARANCE_KEY, LEGACY_APPEARANCE_KEY, readAppearance, sendRequest, TABS } from "./logic.js";
@@ -7,8 +7,6 @@ import { plainGroupName as groupLabel } from "./ui-logic.js";
 import { AppBar, BottomNav } from "./components/AppShell.js";
 import { Icon } from "./components/Icon.js";
 import { Button, Callout, Skeleton } from "./components/primitives.js";
-import { EmptyLine } from "./components/layout.js";
-import { ApprovalCard, Sheet } from "./components/shared.js";
 import { showToast } from "./components/feedback.js";
 import { Onboarding } from "./Onboarding.js";
 import { AuthPage, type AuthMode } from "./pages/Auth.js";
@@ -21,7 +19,7 @@ import { TasksPage } from "./pages/Tasks.js";
 const POLL_MS = 5000;
 
 const TAB_TITLES: Record<TabId, string> = {
-  home: "Home",
+  home: "Muze AI",
   tasks: "Tasks",
   connections: "Connect",
   files: "Files",
@@ -29,11 +27,11 @@ const TAB_TITLES: Record<TabId, string> = {
 };
 
 const TAB_SUBTITLES: Record<TabId, string> = {
-  home: "Your browser, your rules.",
-  tasks: "What your AI app is doing, newest first.",
-  connections: "Browsers and AI apps on your account.",
-  files: "Files stay on this device.",
-  account: "Your account and this browser.",
+  home: "Your browser, your rules",
+  tasks: "What your AI app is doing, newest first",
+  connections: "Browsers and AI apps",
+  files: "Files your AI app can use",
+  account: "Your account",
 };
 
 interface Route {
@@ -85,12 +83,10 @@ export function App(): preact.JSX.Element {
   const busyCount = useRef(0);
   const [route, setRoute] = useState<Route>({ tab: "home", detail: null });
   const [connectionsSegment, setConnectionsSegment] = useState<"browsers" | "apps">("browsers");
-  const [audit, setAudit] = useState<AuditEvent[] | null>(null);
-  const [auditLoading, setAuditLoading] = useState(false);
   const [appearance, setAppearance] = useState<Appearance>("system");
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
-  const [approvalsOpen, setApprovalsOpen] = useState(false);
+  const [browserCount, setBrowserCount] = useState<number | null>(null);
 
   const initialised = useRef(false);
   const content = useRef<HTMLElement>(null);
@@ -180,17 +176,26 @@ export function App(): preact.JSX.Element {
     });
   }, [currentKey]);
 
-  const loadAudit = useCallback(async (): Promise<void> => {
-    setAuditLoading(true);
-    const response = await sendRequest({ type: "muze/audit", limit: 50 });
-    if (response.ok && response.audit) setAudit(response.audit);
-    else if (response.error) setError(response.error);
-    setAuditLoading(false);
-  }, []);
-
+  // Browser count for the header donut: fetched once and on every
+  // dashboard event, never on the 5s state poll (the donut does not
+  // need to tick that fast).
   useEffect(() => {
-    if (route.tab === "tasks") void loadAudit();
-  }, [route.tab, loadAudit, state?.snapshot.auditEvents]);
+    let cancelled = false;
+    const fetchCount = (): void => {
+      void sendRequest({ type: "muze/browsers/list" }).then((response) => {
+        if (!cancelled && response.ok && response.browsers) setBrowserCount(response.browsers.browsers.length);
+      });
+    };
+    fetchCount();
+    const listener = (message: { type?: string }): void => {
+      if (message?.type === "muze/event" || message?.type === "uabb/event") fetchCount();
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    return () => {
+      cancelled = true;
+      chrome.runtime.onMessage.removeListener(listener);
+    };
+  }, []);
 
   const request = async (message: unknown, success?: string): Promise<boolean> => {
     busyCount.current += 1;
@@ -221,12 +226,7 @@ export function App(): preact.JSX.Element {
   };
 
   const goToTab = (next: TabId): void => {
-    setApprovalsOpen(false);
     setRoute({ tab: next, detail: null });
-  };
-
-  const openTask = (taskId: string): void => {
-    setRoute({ tab: "tasks", detail: taskId });
   };
 
   const openAccountDetail = (detail: AccountDetail | null): void => {
@@ -235,12 +235,6 @@ export function App(): preact.JSX.Element {
 
   const goBack = (): void => {
     setRoute((current) => ({ tab: current.tab, detail: null }));
-  };
-
-  const openWizard = (): void => {
-    setWizardStep(1);
-    setError(null);
-    setWizardOpen(true);
   };
 
   const closeWizard = (step: number): void => {
@@ -300,18 +294,25 @@ export function App(): preact.JSX.Element {
   const { snapshot, approvals } = state;
   const tab = route.tab;
   const detailTitle = tab === "account" ? accountDetailTitle(route.detail as AccountDetail | null) : null;
-  const title = route.detail ? (detailTitle ?? (tab === "tasks" ? "Task" : TAB_TITLES[tab])) : TAB_TITLES[tab];
+  // Detail headers follow the reference: task detail keeps the Tasks
+  // title, Me sub-screens keep their own title with "Me" beneath.
+  const title = route.detail ? (detailTitle ?? TAB_TITLES[tab]) : TAB_TITLES[tab];
+  const subtitle = route.detail
+    ? tab === "account"
+      ? "Me"
+      : TAB_SUBTITLES[tab]
+    : TAB_SUBTITLES[tab];
 
   return (
     <div class="app-shell" data-tab={tab}>
       <AppBar
         title={title}
-        subtitle={route.detail ? undefined : TAB_SUBTITLES[tab]}
+        subtitle={subtitle}
         icon={TABS.find((entry) => entry.id === tab)?.icon}
         connected={snapshot.bridgeStatus === "connected"}
-        clients={snapshot.connectedClients}
-        pending={approvals.length}
-        onApprovals={() => setApprovalsOpen(true)}
+        paused={snapshot.killSwitch}
+        browserCount={browserCount}
+        onPlan={() => setRoute({ tab: "account", detail: "plan" })}
         onBack={route.detail ? goBack : undefined}
       />
 
@@ -331,13 +332,8 @@ export function App(): preact.JSX.Element {
               state={state}
               busy={busy}
               approvals={approvals}
-              onReconnect={() => run({ type: "muze/bridge/reconnect" }, "Reconnecting")}
-              onOpenWizard={openWizard}
               onNavigate={goToTab}
-              onOpenTask={openTask}
               onRespond={respond}
-              onCancelForClient={(clientId) => run({ type: "muze/approvals/cancel-for-client", clientId }, "Waiting requests cancelled")}
-              onKillSwitch={(engaged) => run({ type: "muze/killswitch", engaged }, engaged ? "All activity stopped" : "Activity resumed")}
             />
           ) : null}
 
@@ -349,13 +345,7 @@ export function App(): preact.JSX.Element {
 
           {tab === "tasks" ? (
             <TasksPage
-              approvals={approvals}
-              audit={audit}
-              auditLoading={auditLoading}
               busy={busy}
-              onRespond={respond}
-              onCancelForClient={(clientId) => run({ type: "muze/approvals/cancel-for-client", clientId })}
-              onRefreshAudit={() => void loadAudit()}
               selectedId={route.detail}
               onSelectTask={(taskId) => setRoute({ tab: "tasks", detail: taskId })}
             />
@@ -368,12 +358,11 @@ export function App(): preact.JSX.Element {
               appearance={appearance}
               onAppearance={changeAppearance}
               onModeChange={(mode) => run({ type: "muze/policy/mode", mode }, "Permission level updated")}
-              onPolicyPatch={(patch: Partial<PolicyConfig>) => run({ type: "muze/policy/update", patch }, "Settings saved")}
-              onReadOnly={(enabled) => run({ type: "muze/policy/readonly", enabled }, enabled ? "Read-only mode on" : "Read-only mode off")}
               onKillSwitch={(engaged) => run({ type: "muze/killswitch", engaged }, engaged ? "All activity stopped" : "Activity resumed")}
               onGroupToggle={(group, enabled) =>
                 run({ type: "muze/policy/group", group, enabled }, `${groupLabel(group)} ${enabled ? "on" : "off"}`)
               }
+              onReset={() => run({ type: "muze/policy/reset" }, "Permissions reset")}
               onSignOut={() => run({ type: "muze/gateway/sign-out" }, "Signed out")}
               onDeleteAccount={() => run({ type: "muze/gateway/delete-account" }, "Account deleted")}
               detail={route.detail as AccountDetail | null}
@@ -383,19 +372,7 @@ export function App(): preact.JSX.Element {
         </div>
       </main>
 
-      <BottomNav active={tab} onChange={goToTab} pending={approvals.length} />
-
-      <Sheet open={approvalsOpen} label="Waiting for you" onClose={() => setApprovalsOpen(false)}>
-        {approvals.length === 0 ? (
-          <EmptyLine text="Nothing waiting right now." />
-        ) : (
-          <div class="approval-list">
-            {approvals.map((approval) => (
-              <ApprovalCard key={approval.id} approval={approval} appName="AI app" busy={busy} onRespond={respond} />
-            ))}
-          </div>
-        )}
-      </Sheet>
+      <BottomNav active={tab} onChange={goToTab} />
     </div>
   );
 }

@@ -125,7 +125,7 @@ describe("TasksPage Phase 2 rendering", () => {
   function mount(): HTMLElement {
     root = document.createElement("div");
     document.body.appendChild(root);
-    render(h(ConfirmProvider, null, h(TasksPage, { approvals: [] })), root);
+    render(h(ConfirmProvider, null, h(TasksPage, { busy: false })), root);
     return root;
   }
 
@@ -165,10 +165,10 @@ describe("TasksPage Phase 2 rendering", () => {
     const container = mount();
     await flush();
     await flush();
-    // Newest first: the created task renders before the cancelled one.
-    expect(container.textContent).toContain("click");
+    // List view shows goals and status, never tool tokens or step reasons.
+    expect(container.textContent).toContain("Click the form");
+    expect(container.textContent).toContain("Organise tabs");
     expect(container.textContent).not.toContain("dom.click");
-    expect(container.textContent).toContain("domain other.com is not in the approved domains");
 
     const title = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Organise tabs")) ?? null;
     expect(title).not.toBeNull();
@@ -182,6 +182,20 @@ describe("TasksPage Phase 2 rendering", () => {
     expect(container.textContent).toContain("close-tab");
     expect(container.textContent).not.toContain("tabs.list");
     expect(container.textContent).toContain("Needs doing by hand:");
+    expect(container.textContent).not.toContain("dom.click");
+  });
+
+  it("shows the outside-bounds reason in task detail", async () => {
+    const container = mount();
+    await flush();
+    await flush();
+    const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Click the form")) ?? null;
+    expect(row).not.toBeNull();
+    await act(() => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(container.textContent).toContain("domain other.com is not in the approved domains");
     expect(container.textContent).not.toContain("dom.click");
   });
 

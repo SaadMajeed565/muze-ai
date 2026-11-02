@@ -286,6 +286,73 @@ const PATHS: Partial<Record<IconName, preact.ComponentChildren>> = {
     </>
   ),
   activity: <path d="M3 12h4l2.5-7 4 14 2.5-7h5" />,
+  folder: <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" />,
+  "folder-plus": (
+    <>
+      <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" />
+      <path d="M12 10v6M9 13h6" />
+    </>
+  ),
+  /* Timeline stroke set (reference): pointer w/ rays = click, keyboard
+   * = typing, camera = screenshot, mouse = scroll, arrow-up-right =
+   * navigation, check, X = failed. All foreground colour, no state
+   * colour — the disc behind them is neutral grey. */
+  pointer: (
+    <>
+      <path d="m9 9 5 12 1.8-5.2L21 14Z" />
+      <path d="M7.2 2.2 8 5.1" />
+      <path d="M5.1 8l-2.9-.8" />
+      <path d="M14 4.1 12 6" />
+      <path d="m5.5 11.5-1.9 3.5" />
+    </>
+  ),
+  keyboard: (
+    <>
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" />
+    </>
+  ),
+  camera: (
+    <>
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+      <circle cx="12" cy="13" r="4" />
+    </>
+  ),
+  mouse: (
+    <>
+      <rect x="5" y="2" width="14" height="20" rx="7" />
+      <path d="M12 6v4" />
+    </>
+  ),
+  "nav-arrow": (
+    <>
+      <path d="M7 7h10v10" />
+      <path d="M7 17 17 7" />
+    </>
+  ),
+  wifi: (
+    <>
+      <path d="M5 13a10 10 0 0 1 14 0" />
+      <path d="M8.5 16.5a5 5 0 0 1 7 0" />
+      <path d="M2 8.5a15 15 0 0 1 20 0" />
+      <line x1="12" x2="12.01" y1="19" y2="19" />
+    </>
+  ),
+  bulb: (
+    <>
+      <path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5" />
+      <path d="M9 18h6" />
+      <path d="M10 22h4" />
+    </>
+  ),
+  dots: (
+    <>
+      <circle cx="12" cy="5" r="1.8" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="19" r="1.8" fill="currentColor" stroke="none" />
+    </>
+  ),
+  fail: <path d="M18 6 6 18M6 6l12 12" />,
 };
 
 export interface IconProps {
@@ -297,6 +364,9 @@ export interface IconProps {
 
 /** Inline SVG icon set — no icon dependency in the MV3 bundle. */
 export function Icon({ name, size = 16, class: className, strokeWidth = 1.7 }: IconProps): preact.JSX.Element {
+  // The logo is the auth-screen tile only (the header tile shows the
+  // active tab icon): a monochrome M tile, never a gradient — the
+  // design system has no purple gradients anywhere.
   if (name === "logo") {
     return (
       <svg
@@ -308,14 +378,8 @@ export function Icon({ name, size = 16, class: className, strokeWidth = 1.7 }: I
         aria-hidden="true"
         focusable="false"
       >
-        <defs>
-          <linearGradient id="muze-logo-gradient" x1="4" y1="3" x2="20" y2="21" gradientUnits="userSpaceOnUse">
-            <stop stop-color="#9b8cff" />
-            <stop offset="1" stop-color="#5b4bdb" />
-          </linearGradient>
-        </defs>
-        <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="url(#muze-logo-gradient)" />
-        <path d="M7.2 16.8V8.4l4.8 4.6 4.8-4.6v8.4" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
+        <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="currentColor" />
+        <path d="M7.2 16.8V8.4l4.8 4.6 4.8-4.6v8.4" stroke="var(--logo-on-tile, #fff)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
     );
   }

@@ -139,6 +139,17 @@ function stripRefPrefixes(value: unknown, frameId: number): unknown {
       if (REF_KEYS.has(key) && typeof val === "string") {
         const parsed = parseFrameRef(val);
         out[key] = parsed.frameId === frameId ? parsed.ref : val;
+      } else if (key === "refs" && Array.isArray(val)) {
+        // Plural-ref ops (topViewportBoxes): their array items are refs
+        // too, but the old code passed them through unstripped, so a
+        // sub-frame agent received "f3.a" and its resolve() (bare-ref
+        // regex) returned null → STALE_ELEMENT for every sub-frame
+        // call. Strip exactly like singular refs.
+        out[key] = val.map((item) => {
+          if (typeof item !== "string") return item;
+          const parsed = parseFrameRef(item);
+          return parsed.frameId === frameId ? parsed.ref : item;
+        });
       } else {
         out[key] = stripRefPrefixes(val, frameId);
       }
@@ -151,10 +162,15 @@ function stripRefPrefixes(value: unknown, frameId: number): unknown {
 /**
  * Determine the target frame from an explicit frameId and/or refs embedded in the op.
  * A frameId/ref contradiction is an explicit INVALID_INPUT failure, never a
- * silent fallback to one of the two frames.
+ * silent fallback to one of the two frames. Likewise, refs from two
+ * different frames in one op are an error: the old code took the maximum
+ * frame id, silently routing the whole op to one frame while its other
+ * refs resolved in that frame's document instead of their own.
+ * Bare (top-frame) refs carry no frame inference and are ignored here,
+ * preserving the established explicit-frameId behaviour for them.
  */
 function resolveFrameTarget(op: PageOp, explicitFrameId?: number): number {
-  let inferred = 0;
+  const inferredFrames = new Set<number>();
   const scan = (value: unknown): void => {
     if (Array.isArray(value)) {
       value.forEach(scan);
@@ -164,7 +180,17 @@ function resolveFrameTarget(op: PageOp, explicitFrameId?: number): number {
       for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
         if (REF_KEYS.has(key) && typeof val === "string") {
           const { frameId } = parseFrameRef(val);
-          if (frameId > inferred) inferred = frameId;
+          if (frameId > 0) inferredFrames.add(frameId);
+        } else if (key === "refs" && Array.isArray(val)) {
+          // Plural-ref ops (topViewportBoxes) carry their refs as an
+          // array, not under a REF_KEYS key: without this branch those
+          // refs were never scanned and mixed frames slipped through.
+          for (const item of val) {
+            if (typeof item === "string") {
+              const { frameId } = parseFrameRef(item);
+              if (frameId > 0) inferredFrames.add(frameId);
+            }
+          }
         } else {
           scan(val);
         }
@@ -172,6 +198,11 @@ function resolveFrameTarget(op: PageOp, explicitFrameId?: number): number {
     }
   };
   scan(op);
+  if (inferredFrames.size > 1) {
+    const frames = [...inferredFrames].sort((a, b) => a - b).join(", ");
+    throw new ToolErrorException("INVALID_INPUT", `Refs in one operation belong to different frames (${frames}); re-observe and retry with refs from a single frame`);
+  }
+  const inferred = inferredFrames.size === 1 ? [...inferredFrames][0] : 0;
   const frameId = explicitFrameId ?? 0;
   if (frameId > 0 && inferred > 0 && inferred !== frameId) {
     throw new ToolErrorException("INVALID_INPUT", `frameId ${frameId} does not match the frame ${inferred} encoded in the ref`);

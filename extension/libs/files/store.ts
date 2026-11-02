@@ -64,12 +64,27 @@ export async function getFile(id: string): Promise<StoredFile | undefined> {
 export async function listFiles(): Promise<Array<Omit<StoredFile, "data">>> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
+    // Cursor iteration, not getAll(): getAll materialised every file's
+    // full ArrayBuffer at once and only then stripped `data` from the
+    // returned metadata, so listing N files held N buffers in memory.
+    // A cursor still reads each record's value as it advances, but the
+    // buffer is dropped before moving on, so peak memory is one file,
+    // not the whole store. (A metadata-only read would need a second
+    // store or a schema bump; the cursor keeps the v1 schema intact.)
     const tx = db.transaction(STORE_NAME, "readonly");
-    const req = tx.objectStore(STORE_NAME).getAll();
+    const items: Array<Omit<StoredFile, "data">> = [];
+    const req = tx.objectStore(STORE_NAME).openCursor();
     req.onsuccess = () => {
-      const items = (req.result as StoredFile[]).map(({ data, ...rest }) => rest);
-      items.sort((a, b) => b.createdAt - a.createdAt);
-      resolve(items);
+      const cursor = req.result;
+      if (!cursor) {
+        items.sort((a, b) => b.createdAt - a.createdAt);
+        resolve(items);
+        return;
+      }
+      const { data, ...rest } = cursor.value as StoredFile;
+      void data;
+      items.push(rest);
+      cursor.continue();
     };
     req.onerror = () => reject(req.error);
   });

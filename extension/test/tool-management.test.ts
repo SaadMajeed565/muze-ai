@@ -226,3 +226,48 @@ describe("generated instructions + task plan tools (Phase 2)", () => {
     expect(toolRows.sort()).toEqual(TOOL_SCHEMAS.map((t) => t.name).sort());
   });
 });
+
+describe("deprecation demotion, domain risk, task-type alias (contracts fixes)", () => {
+  it("never returns a deprecated match first on a fuzzy query, but still surfaces it with its warning", () => {
+    const { results } = discoverTools(DESCRIPTORS, "navigate tab close");
+    expect(results.length).toBeGreaterThan(1);
+    expect(results[0]!.name).not.toBe("navigate");
+    const nav = results.find((r) => r.name === "navigate")!;
+    expect(nav).toBeDefined();
+    expect(nav.matchedAction).toBe("close");
+    expect(nav.deprecatedWarning).toMatch(/tabs\.close/);
+    expect(results.indexOf(nav)).toBeGreaterThan(0);
+  });
+
+  it("resolves navigate search risk by dispatch domain: tab is read-only, bare (URL) is reversible", () => {
+    const tab = discoverTools(DESCRIPTORS, "navigate tab search").results.find((r) => r.name === "navigate")!;
+    expect(tab.matchedAction).toBe("search");
+    expect(tab.matchedActionRisk).toBe("read-only");
+    const bare = discoverTools(DESCRIPTORS, "navigate search").results.find((r) => r.name === "navigate")!;
+    expect(bare.matchedAction).toBe("search");
+    expect(bare.matchedActionRisk).toBe("reversible");
+  });
+
+  it("an exact name match still lets a deprecated tool lead", () => {
+    const { results } = discoverTools(DESCRIPTORS, "navigate");
+    expect(results[0]!.name).toBe("navigate");
+  });
+
+  it("data devtools deprecation names the real granular tool, not the template", () => {
+    expect(deprecatedUnifiedAction("data", "errors", "devtools")?.useInstead).toBe("devtools.pageErrors");
+    expect(deprecatedUnifiedAction("data", "observer", "devtools")?.useInstead).toBe("browser.observer");
+    expect(deprecatedUnifiedAction("data", "dialogs", "devtools")?.useInstead).toBe("page.dialogs");
+    expect(deprecatedUnifiedAction("data", "respond_dialog", "devtools")?.useInstead).toBe("page.respondDialog");
+    expect(deprecatedUnifiedAction("data", "console", "devtools")?.useInstead).toBe("devtools.console");
+    const { results } = discoverTools(DESCRIPTORS, "data devtools errors");
+    const data = results.find((r) => r.name === "data")!;
+    expect(data.useInstead).toBe("devtools.pageErrors");
+  });
+
+  it("task-type recommendations resolve for both organise and organize", () => {
+    for (const taskType of ["organise", "organize"]) {
+      const { results } = discoverTools(DESCRIPTORS, "zzzzqq", { taskType });
+      expect(results.map((r) => r.name), taskType).toContain("workflows.organizeTabs");
+    }
+  });
+});

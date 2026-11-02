@@ -1,7 +1,9 @@
 # Muze AI — Smart tool management plan: fix unified tools, then manage them intelligently
 
 Version: Muze AI 0.4.0, registry 2.1.0, 135 tools (116 granular + 13 unified + 6 tasks)
-Status: plan only, nothing built yet. This plan follows the unified-tools
+Status: plan only, nothing built yet.
+
+> SUPERSEDED (0.4.1/0.5.0): this plan's phases have since been built — the registry is now 136 tools (116 granular + 13 unified + 7 tasks, tasks.approvePlan included), the per-action risk table is 179 entries, and discovery/deprecation are implemented. Read CHANGELOG.md 0.4.1/0.5.0 for the built state; this document is retained as the original plan, not as a description of the current code. This plan follows the unified-tools
 verdict in the previous turn: unified as a client-facing layer is right,
 unified risk as the only gate is wrong, and tasks tools must stay granular.
 

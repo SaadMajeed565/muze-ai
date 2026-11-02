@@ -29,7 +29,8 @@ source of truth for the browser.
 
 ### 2.1 No task object — the main blocker
 
-- Evidence: no task id, plan, steps, checkpoint, or resume anywhere
+- [SUPERSEDED in 0.4.0: the task engine (task id, plan, steps, checkpoint, resume, pause/cancel, tasks.approvePlan in 0.5.0) is built; this section describes the pre-0.4.0 state only.]
+  Evidence: no task id, plan, steps, checkpoint, or resume anywhere
   in the extension, gateway, or tool contracts. A task exists only as
   text in the client's conversation.
 - What happens in a real task: research 10 pages, collect links,

@@ -1,7 +1,6 @@
 import type { PermissionMode } from "../libs/security/index.js";
-import type { AuditEvent } from "../libs/security/index.js";
 import type { DashboardMcpClient } from "../src/messages.js";
-import type { IconName, TabId } from "./logic.js";
+import { TABS, type IconName, type TabId } from "./logic.js";
 
 /**
  * Pure presentation helpers for the end-user dashboard. Nothing here
@@ -12,12 +11,14 @@ import type { IconName, TabId } from "./logic.js";
  */
 
 /**
- * Navigation (v3): exactly five destinations, in this order. Activity
- * lives inside Tasks; browsers and apps live inside Connections;
- * permissions, appearance, privacy, help and the account itself live
- * inside Account. There is no sixth tab.
+ * Navigation (v3): exactly five destinations, in this order. Task
+ * steps live inside task detail; browsers and apps live inside
+ * Connections; permissions, appearance, privacy, help and the account
+ * itself live inside Account. There is no sixth tab. Derived from the
+ * single canonical definition in logic.ts (TABS) — never a second
+ * literal list, so the two can never diverge.
  */
-export const NAV_TABS: TabId[] = ["home", "tasks", "connections", "files", "account"];
+export const NAV_TABS: TabId[] = TABS.map((tab) => tab.id);
 
 /**
  * Short date, or null when the value is unknown. Unknown values are
@@ -154,62 +155,6 @@ export function activityVerb(tool: string | undefined): string {
   return "acted in the browser";
 }
 
-function auditSeq(id: string): number | null {
-  const match = /^audit_(\d+)$/.exec(id);
-  return match ? Number(match[1]) : null;
-}
-
-/**
- * Merge audit events with the ONLY provably-safe pairing rule: the
- * input is newest-first (audit.list() order), so chronological order
- * is its reverse. A tool.call and the IMMEDIATELY NEXT event merge
- * only when their numeric audit ids are consecutive, they share the
- * same client id, the same tool, and the first is tool.call and the
- * second tool.result. Any interleaved concurrent call breaks
- * consecutiveness, so unrelated actions can never merge. Unpaired
- * records are always kept, never dropped. There is no time-window
- * heuristic here: AuditEvent carries no call id or correlation key,
- * so no other pairing is safe.
- */
-export function mergeActivity(events: readonly AuditEvent[]): AuditEvent[] {
-  const chronological = [...events].reverse();
-  const merged: AuditEvent[] = [];
-  for (let i = 0; i < chronological.length; i += 1) {
-    const current = chronological[i];
-    const next = chronological[i + 1];
-    const seq = auditSeq(current.id);
-    const nextSeq = next ? auditSeq(next.id) : null;
-    const pairable =
-      next !== undefined &&
-      seq !== null &&
-      nextSeq !== null &&
-      nextSeq === seq + 1 &&
-      current.kind === "tool.call" &&
-      next.kind === "tool.result" &&
-      (current.client?.id ?? null) === (next.client?.id ?? null) &&
-      (current.tool ?? null) === (next.tool ?? null);
-    if (pairable) {
-      merged.push(next);
-      i += 1;
-    } else {
-      merged.push(current);
-    }
-  }
-  return merged.reverse();
-}
-
-export interface ActivityRow {
-  id: string;
-  sentence: string;
-  actor: string;
-  time: string | null;
-  icon: IconName;
-  /** Only Denied / Failed are surfaced as a state word; "Allowed" and "Recorded" never render. */
-  state: "Denied" | "Failed" | null;
-}
-
-/** One merged-feed row: one plain sentence, resolved actor, relative time, no tool name. */
-
 /** Map an audit event / tool to a plain action icon. Never exposes the tool name. */
 export function activityIcon(tool: string | undefined, kind?: string): IconName {
   if (kind === "policy.change") return "sliders";
@@ -240,37 +185,6 @@ export function activityIcon(tool: string | undefined, kind?: string): IconName 
   if (name === "workflows.saveSession") return "bookmark";
   if (name === "workflows.restoreSession") return "navigate";
   return "activity";
-}
-
-export function activityRows(
-  events: readonly AuditEvent[],
-  registeredClients: readonly { clientId: string; clientName: string }[],
-  now: number,
-): ActivityRow[] {
-  return mergeActivity(events).map((event) => {
-    const actor = resolveAppName(event.client ?? null, registeredClients);
-    const state = event.decision === "denied" ? "Denied" : event.decision === "error" ? "Failed" : null;
-    const time = relativeTime(Date.parse(event.at), now);
-    let sentence: string;
-    if (event.kind === "tool.call" || event.kind === "tool.result") {
-      sentence = `${actor} ${activityVerb(event.tool)}.`;
-    } else if (event.kind === "policy.change") {
-      sentence = "Permissions changed.";
-    } else if (event.kind === "client.connect") {
-      sentence = `${actor} connected.`;
-    } else if (event.kind === "client.disconnect") {
-      sentence = `${actor} disconnected.`;
-    } else if (event.kind === "approval") {
-      sentence = "An approval was answered.";
-    } else if (event.kind === "kill-switch") {
-      sentence = "All activity stopped.";
-    } else if (event.kind === "token.rotate") {
-      sentence = "Connection refreshed.";
-    } else {
-      sentence = `${plainActivityKind(event.kind)}.`;
-    }
-    return { id: event.id, sentence, actor, time, icon: activityIcon(event.tool, event.kind), state };
-  });
 }
 
 /** Truncate to at most maxChars characters, keeping whole words where possible. */
@@ -376,48 +290,6 @@ export function plainFinalSummary(done: number, undone: number, failed: number):
   return parts.length > 0 ? parts.join(" · ") : "No steps recorded.";
 }
 
-/** Audit decision in plain words. */
-export function plainDecision(decision: string): string {
-  switch (decision) {
-    case "allowed":
-      return "Allowed";
-    case "denied":
-      return "Denied";
-    case "error":
-      return "Failed";
-    case "approval-required":
-      return "Waiting for approval";
-    case "preflight-unavailable":
-      return "Needs a check first";
-    default:
-      return "Recorded";
-  }
-}
-
-/** Audit kind in plain words. The tool, if any, is never included. */
-export function plainActivityKind(kind: string): string {
-  switch (kind) {
-    case "tool.call":
-      return "Agent acted";
-    case "tool.result":
-      return "Agent finished an action";
-    case "policy.change":
-      return "Permissions changed";
-    case "client.connect":
-      return "AI app connected";
-    case "client.disconnect":
-      return "AI app disconnected";
-    case "approval":
-      return "Approval answered";
-    case "kill-switch":
-      return "All activity stopped";
-    case "token.rotate":
-      return "Connection refreshed";
-    default:
-      return "Activity";
-  }
-}
-
 /** A permission-group key in plain words (bookmarks, history, downloads, clipboard). */
 export function plainGroupName(group: string): string {
   switch (group) {
@@ -432,6 +304,98 @@ export function plainGroupName(group: string): string {
     default:
       return group.replace(/[-_]+/g, " ").replace(/^./, (c) => c.toUpperCase());
   }
+}
+
+/**
+ * Task status in the reference's words for rows and detail headers:
+ * Running / Completed / Failed. (plainTaskStatus above keeps the older
+ * "In progress / Done / Didn't finish" wording used elsewhere.)
+ */
+export function taskStatusWord(status: string): string {
+  switch (status) {
+    case "running":
+    case "created":
+      return "Running";
+    case "done":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "paused":
+      return "Paused";
+    case "waiting_approval":
+      return "Waiting for you";
+    case "cancelled":
+      return "Cancelled";
+    case "partial":
+      return "Partly done";
+    default:
+      return "Running";
+  }
+}
+
+/**
+ * Honest task progress text, per the reference rule: fixed plans show
+ * "Step X of N" with a percentage bar; a task with no known total never
+ * invents one — "N steps done so far · total unknown" with an
+ * indeterminate bar.
+ */
+export interface TaskProgress {
+  text: string;
+  percent: number;
+  indeterminate: boolean;
+}
+
+export function taskProgress(doneCount: number, totalSteps: number, stepsDone: number): TaskProgress {
+  if (totalSteps > 0) {
+    return {
+      text: `Step ${doneCount} of ${totalSteps}`,
+      percent: Math.round((doneCount / totalSteps) * 100),
+      indeterminate: false,
+    };
+  }
+  return {
+    text: `${stepsDone} steps done so far · total unknown`,
+    percent: 0,
+    indeterminate: true,
+  };
+}
+
+/**
+ * A task step's timeline icon from the reference's single monochrome
+ * stroke set: pointer = click, keyboard = typing, camera = screenshot,
+ * mouse = scroll, arrow-up-right = navigation, check, X = failed. The
+ * tool name itself is never rendered — only the icon and the plain
+ * summary reach the screen.
+ */
+export function timelineIconForStep(tool: string | undefined, state: string): IconName {
+  if (state === "failed") return "fail";
+  const name = (tool ?? "").toLowerCase();
+  if (name === "dom.click" || name === "dom.clickat" || name === "act") return "pointer";
+  if (
+    name === "dom.type" ||
+    name === "dom.fill" ||
+    name === "dom.press" ||
+    name === "dom.clear" ||
+    name === "dom.select" ||
+    name === "dom.setchecked" ||
+    name === "dom.setradio" ||
+    name === "forms.fill" ||
+    name === "form" ||
+    name.startsWith("dom.type")
+  ) return "keyboard";
+  if (name.startsWith("screenshot") || name.includes("capture")) return "camera";
+  if (
+    name === "tabs.navigate" ||
+    name === "tabs.create" ||
+    name.startsWith("page.navigate") ||
+    name === "tabs.go-back" ||
+    name === "tabs.go-forward" ||
+    name === "workflows.opensequence" ||
+    name === "workflows.restoresession"
+  ) return "nav-arrow";
+  if (name.includes("scroll")) return "mouse";
+  if (state === "done") return "check";
+  return "pointer";
 }
 
 /**
@@ -456,18 +420,4 @@ export function plainCapabilities(mode: PermissionMode, enabledGroups: Record<st
     else out.push(`Use ${plainGroupName(group).toLowerCase()}`);
   }
   return out;
-}
-
-/** The single next action on Home, by priority: sign in, finish setup, review requests, manage browsers. */
-export type HomeNextAction = "sign-in" | "setup" | "approvals" | "browsers";
-
-export function homeNextAction(input: {
-  signedIn: boolean;
-  setupRemaining: number;
-  pendingApprovals: number;
-}): HomeNextAction {
-  if (!input.signedIn) return "sign-in";
-  if (input.setupRemaining > 0) return "setup";
-  if (input.pendingApprovals > 0) return "approvals";
-  return "browsers";
 }

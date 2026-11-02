@@ -720,13 +720,25 @@ export class HostProtocolHandler {
   }
 
   private onApprovalRespond(id: string, approvalId: string, approved: boolean, reason?: string): void {
+    // The posted approval.resolved is a notification, never the source
+    // of truth: the approval.wait poller reads the broker record
+    // itself and posts its own resolved message from that. But when
+    // the broker rejects this response (already decided/expired), the
+    // old code still posted the REQUESTED value, telling the consumer
+    // an approval was granted that the broker never recorded. On a
+    // broker error, post the record's actual status when it is known;
+    // when the record is gone, fall back to denied (the same outcome
+    // the wait poller reports for a missing record) rather than
+    // claiming the requested value.
+    let resolved = approved;
     try {
       if (approved) this.deps.approvals.approve(approvalId, this.client.name);
       else this.deps.approvals.deny(approvalId, reason);
     } catch {
-      // Already decided/expired: still report the outcome so waiters can settle.
+      const record = this.deps.approvals.get(approvalId);
+      resolved = record?.status === "approved";
     }
-    this.deps.transport.post({ type: "approval.resolved", id, approvalId, approved });
+    this.deps.transport.post({ type: "approval.resolved", id, approvalId, approved: resolved });
   }
 
   private async onApprovalWait(id: string, approvalId: string, timeoutMs?: number): Promise<void> {

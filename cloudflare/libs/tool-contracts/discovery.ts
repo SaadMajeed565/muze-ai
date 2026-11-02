@@ -11,16 +11,29 @@
  * client cannot call before any scoring, so discovery never surfaces a
  * tool the client cannot call.
  *
- * Deprecated actions are never returned first: a deprecated unified
- * action is returned only on an exact name match (the tool name itself),
- * with a warning + use-instead name. Deprecated tools still work.
+ * Deprecated actions are never returned first on a fuzzy query: a
+ * deprecated unified action still surfaces (with a warning +
+ * use-instead name, so existing clients keep learning the replacement),
+ * but it is excluded from the first position — if score order would
+ * put deprecated matches first, the leading deprecated run moves just
+ * below the first non-deprecated result, and the rest of the score
+ * order is untouched (so a demotion never reshuffles the top 5 beyond
+ * that one move). The only way a deprecated match leads is an exact
+ * name match (the tool name itself), via the exact-name promotion
+ * below. This is the demotion reading of the header promise: the loop
+ * used to push every score > 0 and sort purely by score, so a
+ * deprecated action could rank first on a fuzzy query and the warning
+ * was its only deprecation effect. Edge case, documented: if every
+ * match for a fuzzy query is deprecated, the top result is necessarily
+ * deprecated — but it still carries its warning + use-instead, never a
+ * silent recommendation.
  *
  * Return: up to 20 results, grouped by category, full input schema for
  * the top 5 only, a schema pointer for the rest (the client fetches the
  * full schema from its session's ListTools, which includes discovered
  * tools — see session-aware ListTools in cloudflare/src/mcp.ts).
  */
-import { UNIFIED_ACTION_RISK } from "./action-risk.js";
+import { UNIFIED_ACTION_RISK, resolveUnifiedAction } from "./action-risk.js";
 import { deprecatedUnifiedAction, toolMetaFor, TASK_TYPE_RECOMMENDATIONS } from "./tool-meta.js";
 import type { ToolDescriptor } from "./tools.js";
 
@@ -107,10 +120,66 @@ function unifiedActionsFor(toolName: string): string[] {
   return UNIFIED_ACTION_RISK.filter((e) => e.unifiedTool === toolName).map((e) => e.action);
 }
 
-function actionRiskFor(toolName: string, action: string): { risk: ToolDescriptor["risk"]; approval: boolean } | null {
-  const entry = UNIFIED_ACTION_RISK.find((e) => e.unifiedTool === toolName && e.action === action);
+/**
+ * Per-action risk for a matched unified action, resolved with its
+ * dispatch domain where one is known (navigate category, data domain):
+ * a domain-specific entry wins, and the action-only entry is only the
+ * fallback when no domain-specific entry exists. Previously the lookup
+ * ignored the domain entirely, so e.g. navigate search always reported
+ * the action-only entry (navigation.search, reversible) even for a
+ * category=tab dispatch (tabs.search, read-only).
+ */
+function actionRiskFor(toolName: string, action: string, domain?: string): { risk: ToolDescriptor["risk"]; approval: boolean } | null {
+  const entry = (domain !== undefined ? resolveUnifiedAction(toolName, action, domain) : undefined)
+    ?? resolveUnifiedAction(toolName, action);
   if (!entry) return null;
   return { risk: entry.risk, approval: entry.requiresApproval === true || entry.requiresApproval === "granular" };
+}
+
+/**
+ * Whether a scored match is a deprecated unified action (or a deprecated
+ * tool), judged on the dispatch the query actually implies. Navigate:
+ * with an explicit tab/window term the category is known, so the
+ * category-specific deprecation applies; with no category term, a
+ * tab-branch action (handler/gateway tab list) is deprecated, except
+ * "search", which the handler and gateway route to the URL branch
+ * (navigation.search) without a category and which is therefore NOT a
+ * deprecated dispatch bare. Data: a data action is deprecated only in
+ * the devtools/clipboard domains, and each such action dispatches in
+ * exactly one of those domains, so checking both is exact.
+ */
+function matchedActionIsDeprecated(descriptor: ToolDescriptor, matchedAction: string | undefined, terms: string[]): boolean {
+  if (descriptor.deprecated) return true;
+  if (!matchedAction) return false;
+  if (descriptor.name === "navigate") {
+    if (terms.includes("tabs")) return deprecatedUnifiedAction("navigate", matchedAction, "tab") !== null;
+    if (terms.includes("windows")) return deprecatedUnifiedAction("navigate", matchedAction, "window") !== null;
+    if (matchedAction === "search") return false;
+    return deprecatedUnifiedAction("navigate", matchedAction) !== null;
+  }
+  if (descriptor.name === "data") {
+    return deprecatedUnifiedAction("data", matchedAction, "devtools") !== null
+      || deprecatedUnifiedAction("data", matchedAction, "clipboard") !== null;
+  }
+  return false;
+}
+
+/** Dispatch domain inferred from the query terms, for risk resolution. */
+function inferredRiskDomain(descriptorName: string, terms: string[]): string | undefined {
+  if (descriptorName === "navigate") {
+    // Terms are already synonym-normalised (tab -> tabs, window ->
+    // windows), so match the normalised forms.
+    if (terms.includes("tabs")) return "tab";
+    if (terms.includes("windows")) return "window";
+    if (terms.includes("url")) return "url";
+    return undefined;
+  }
+  if (descriptorName === "data") {
+    for (const domain of ["bookmarks", "history", "downloads", "clipboard", "files", "devtools"]) {
+      if (terms.includes(domain)) return domain;
+    }
+  }
+  return undefined;
 }
 
 function scoreDescriptor(descriptor: ToolDescriptor, terms: string[]): { score: number; matchedTerms: number; matchedAction?: string } {
@@ -165,8 +234,10 @@ function scoreDescriptor(descriptor: ToolDescriptor, terms: string[]): { score: 
 
 /**
  * Discover tools for a query. Exact-name queries return that tool (plus
- * its related tools) even if it is deprecated — deprecated tools are
- * never returned FIRST by a fuzzy query, only on exact name match.
+ * its related tools) even if it is deprecated — deprecated tools and
+ * deprecated unified actions are never returned FIRST by a fuzzy query
+ * (a leading deprecated run is moved just below the first
+ * non-deprecated result); only an exact name match lets one lead.
  */
 export function discoverTools(
   descriptors: ToolDescriptor[],
@@ -179,18 +250,20 @@ export function discoverTools(
   const filtered = options.allowed ? descriptors.filter(options.allowed) : [...descriptors];
   const totalAvailable = filtered.length;
 
-  const scored: Array<{ descriptor: ToolDescriptor; score: number; matchedTerms: number; matchedAction?: string }> = [];
+  const exactName = terms.length > 0 ? filtered.find((d) => d.name.toLowerCase() === terms.join(" ") || d.name.toLowerCase() === terms.join(".")) : undefined;
+  const scored: Array<{ descriptor: ToolDescriptor; score: number; matchedTerms: number; matchedAction?: string; deprecated: boolean }> = [];
   for (const descriptor of filtered) {
-    // Deprecated unified actions: the tool itself is not hidden, but a
-    // fuzzy query must not surface it first. Only an exact name match
-    // returns a deprecated tool at all (handled below via the exact path).
     const { score, matchedTerms, matchedAction } = scoreDescriptor(descriptor, terms);
+    // Demotion flag for the sort below: a deprecated match (judged on
+    // the dispatch the query implies, see matchedActionIsDeprecated)
+    // sorts below every non-deprecated result on a fuzzy query.
+    const deprecated = matchedActionIsDeprecated(descriptor, matchedAction, terms);
     if (terms.length === 0) {
-      scored.push({ descriptor, score: 1, matchedTerms: 0, matchedAction });
+      scored.push({ descriptor, score: 1, matchedTerms: 0, matchedAction, deprecated });
       continue;
     }
     if (score <= 0) continue;
-    scored.push({ descriptor, score, matchedTerms, matchedAction });
+    scored.push({ descriptor, score, matchedTerms, matchedAction, deprecated });
   }
 
   scored.sort((a, b) => {
@@ -198,8 +271,18 @@ export function discoverTools(
     if (b.matchedTerms !== a.matchedTerms) return b.matchedTerms - a.matchedTerms;
     return a.descriptor.name.localeCompare(b.descriptor.name);
   });
+  // Never-first enforcement (fuzzy queries only; the exact-name
+  // promotion below still lets an exact match lead): if score order
+  // put deprecated matches first, move that leading run just below the
+  // first non-deprecated result, preserving all other order.
+  if (scored.length > 0 && scored[0]!.deprecated) {
+    const firstLive = scored.findIndex((s) => !s.deprecated);
+    if (firstLive > 0) {
+      const leading = scored.splice(0, firstLive);
+      scored.splice(1, 0, ...leading);
+    }
+  }
 
-  const exactName = terms.length > 0 ? filtered.find((d) => d.name.toLowerCase() === terms.join(" ") || d.name.toLowerCase() === terms.join(".")) : undefined;
   // If the query is an exact tool name, that tool leads even if its fuzzy
   // score was low, and deprecated tools are reachable this way.
   if (exactName && scored[0]?.descriptor.name !== exactName.name) {
@@ -208,7 +291,7 @@ export function discoverTools(
       const [entry] = scored.splice(idx, 1);
       scored.unshift(entry!);
     } else if (idx < 0) {
-      scored.unshift({ descriptor: exactName, score: 1000, matchedTerms: terms.length });
+      scored.unshift({ descriptor: exactName, score: 1000, matchedTerms: terms.length, deprecated: exactName.deprecated === true });
     }
   }
 
@@ -221,7 +304,7 @@ export function discoverTools(
     let matchedRisk: ToolDescriptor["risk"] | undefined;
     let matchedApproval: boolean | undefined;
     if (matchedAction) {
-      const resolved = actionRiskFor(descriptor.name, matchedAction);
+      const resolved = actionRiskFor(descriptor.name, matchedAction, inferredRiskDomain(descriptor.name, terms));
       if (resolved) {
         matchedRisk = resolved.risk;
         matchedApproval = resolved.approval;
@@ -304,7 +387,10 @@ export function discoverTools(
   // Task-type recommendations are appended as suggestions only, after the
   // scored results, never replacing them or restricting the list.
   if (options.taskType) {
-    const rec = TASK_TYPE_RECOMMENDATIONS[options.taskType.toLowerCase()];
+    // Normalise the lookup (organise -> organize, as for query terms),
+    // so "organize" no longer silently yields no recommendation; the
+    // table also carries both spellings as keys.
+    const rec = TASK_TYPE_RECOMMENDATIONS[normalizeTerm(options.taskType.toLowerCase())];
     if (rec) {
       for (const name of rec.tools) {
         if (results.some((r) => r.name === name)) continue;

@@ -455,6 +455,19 @@ export class SessionDO implements DurableObject {
     const [client, server] = Object.values(pair);
     this.state.acceptWebSocket(server);
     server.serializeAttachment({ authorized: false, sessionId: routedSessionId } satisfies SocketAttachment);
+    // Close a superseded pending-auth socket before replacing it: the old
+    // code only cleared the reference and cancelled its timer, leaving the
+    // old socket open and unauthenticated. Its later close event is
+    // harmless — webSocketClose ignores a socket that is neither the
+    // current pending socket nor the active socket — so closing here
+    // cannot clobber the new pending socket assigned below.
+    if (this.pendingAuthSocket) {
+      try {
+        this.pendingAuthSocket.close(BRIDGE_AUTH_CLOSE_MISSING, "superseded by a new connection");
+      } catch {
+        // ignore: already closed
+      }
+    }
     this.clearPendingAuth();
     this.pendingAuthSocket = server;
     this.pendingAuthSessionId = routedSessionId;

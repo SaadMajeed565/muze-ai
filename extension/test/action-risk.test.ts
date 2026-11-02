@@ -87,6 +87,10 @@ describe("unified per-action risk table", () => {
     // added by the retest fixes (see retest-fixes-2026-10-28.md),
     // + navigate tab open and tab reload added by the navfix.
     expect(UNIFIED_ACTION_RISK.length).toBe(179);
+    // Section counts behind the action-risk.ts header comments.
+    expect(UNIFIED_ACTION_RISK.filter((e) => e.unifiedTool === "tabs").length).toBe(19);
+    expect(UNIFIED_ACTION_RISK.filter((e) => e.unifiedTool === "navigate" && e.domain === "tab").length).toBe(21);
+    expect(UNIFIED_ACTION_RISK.filter((e) => e.unifiedTool === "data").length).toBe(26);
   });
 
   it("has valid risk, sideEffect and requiresApproval on every entry", () => {
