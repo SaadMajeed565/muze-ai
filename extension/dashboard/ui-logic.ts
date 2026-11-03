@@ -362,19 +362,38 @@ export function taskProgress(doneCount: number, totalSteps: number, stepsDone: n
 
 /**
  * A task step's timeline icon from the reference's single monochrome
- * stroke set: pointer = click, keyboard = typing, camera = screenshot,
- * mouse = scroll, arrow-up-right = navigation, check, X = failed. The
- * tool name itself is never rendered — only the icon and the plain
- * summary reach the screen.
+ * stroke set: one icon per interaction family, not per tool — pointer =
+ * click / hover / move / focus, keyboard = typing, camera = screenshot,
+ * mouse = scroll, nav-arrow = navigation, drag, eye = read / observe,
+ * tab = tab & window management, send = submit, upload, folder = files
+ * & data, bookmark, history-rewind, download, clipboard, info = browser
+ * info, wrench = devtools, flow = workflows, clock = wait, checklist =
+ * task management, check = done with no family, X = failed. The tool
+ * name itself is never rendered — only the icon and the plain summary
+ * reach the screen. Branch order matters: failed overrides everything,
+ * family matches precede done → check, and pointer is only the fallback
+ * for genuinely unknown future tools.
  */
 export function timelineIconForStep(tool: string | undefined, state: string): IconName {
   if (state === "failed") return "fail";
   const name = (tool ?? "").toLowerCase();
-  if (name === "dom.click" || name === "dom.clickat" || name === "act") return "pointer";
+  // Pointer-device actions: click plus hover / move / focus, which have
+  // no more specific glyph.
+  if (
+    name === "dom.click" ||
+    name === "dom.clickat" ||
+    name === "act" ||
+    name === "dom.hover" ||
+    name === "dom.moveto" ||
+    name === "dom.focus"
+  ) return "pointer";
+  // Typing and field edits. dom.pressat belongs here (it used to fall
+  // through to pointer); dom.typeat is caught by the dom.type prefix.
   if (
     name === "dom.type" ||
     name === "dom.fill" ||
     name === "dom.press" ||
+    name === "dom.pressat" ||
     name === "dom.clear" ||
     name === "dom.select" ||
     name === "dom.setchecked" ||
@@ -383,18 +402,99 @@ export function timelineIconForStep(tool: string | undefined, state: string): Ic
     name === "form" ||
     name.startsWith("dom.type")
   ) return "keyboard";
+  // Screenshots. This branch precedes the browser.* branch below so
+  // browser.capturetab keeps the camera, not the info glyph.
   if (name.startsWith("screenshot") || name.includes("capture")) return "camera";
+  if (name.includes("scroll")) return "mouse";
+  // Navigation. navigation.* belongs here (it used to fall through to
+  // pointer); navigation.wait stays here and never reaches the clock
+  // branch below. The tabs.go-back / page.navigate checks are legacy
+  // names kept for old step records.
   if (
     name === "tabs.navigate" ||
     name === "tabs.create" ||
+    name === "tabs.reload" ||
+    name === "navigation.open" ||
+    name === "navigation.back" ||
+    name === "navigation.forward" ||
+    name === "navigation.reload" ||
+    name === "navigation.search" ||
+    name === "navigation.wait" ||
+    name === "navigate" ||
     name.startsWith("page.navigate") ||
     name === "tabs.go-back" ||
     name === "tabs.go-forward" ||
     name === "workflows.opensequence" ||
     name === "workflows.restoresession"
   ) return "nav-arrow";
-  if (name.includes("scroll")) return "mouse";
+  if (name === "dom.drag" || name === "dom.dragat") return "drag";
+  // Read / observe: page content reads, element inspection, and the
+  // unified observe action. Reuses the existing eye glyph.
+  if (
+    name === "dom.find" ||
+    name === "dom.read" ||
+    name === "dom.boundingbox" ||
+    name === "dom.visible" ||
+    name === "dom.shadow" ||
+    name === "page.read" ||
+    name === "page.metadata" ||
+    name === "page.outline" ||
+    name === "page.links" ||
+    name === "page.selectedtext" ||
+    name === "page.find" ||
+    name === "page.extract" ||
+    name === "page.tables" ||
+    name === "page.snapshot" ||
+    name === "page.accessibilitytree" ||
+    name === "page.networkidle" ||
+    name === "page.waitfor" ||
+    name === "page.dialogs" ||
+    name === "page.responddialog" ||
+    name === "observe" ||
+    name === "frames.list" ||
+    name === "forms.inspect" ||
+    name === "forms.preview"
+  ) return "eye";
+  // Tab and window management. Safe after the nav-arrow branch above,
+  // which already claimed tabs.navigate / tabs.create / tabs.reload.
+  // Reuses the existing tab glyph.
+  if (
+    name.startsWith("tabs.") ||
+    name.startsWith("windows.") ||
+    name === "tabs" ||
+    name === "windows"
+  ) return "tab";
+  if (name === "dom.submit" || name === "forms.submit" || name === "submit") return "send";
+  // Uploads reuse the existing upload glyph.
+  if (name === "forms.upload" || name === "forms.setfile") return "upload";
+  // Files and data reuse the existing folder glyph.
+  if (name.startsWith("files.") || name === "files" || name === "data") return "folder";
+  // Bookmarks reuse the existing bookmark glyph.
+  if (name.startsWith("bookmarks.")) return "bookmark";
+  // History gets its own rewind glyph, distinct from the plain clock
+  // used for waits.
+  if (name.startsWith("history.")) return "history-rewind";
+  // Downloads reuse the existing download glyph.
+  if (name.startsWith("downloads.")) return "download";
+  // Clipboard reuses the existing clipboard glyph.
+  if (name.startsWith("clipboard.") || name === "clipboard") return "clipboard";
+  // Browser info / diagnostics reuse the existing info glyph. The
+  // camera branch above already claimed browser.capturetab.
+  if (name.startsWith("browser.") || name === "browser") return "info";
+  if (name.startsWith("devtools.") || name === "devtools") return "wrench";
+  // Remaining workflows. openSequence / restoreSession were already
+  // claimed by the nav-arrow branch above.
+  if (name.startsWith("workflows.")) return "flow";
+  // Waits reuse the existing clock glyph. navigation.wait never reaches
+  // here (nav-arrow branch above); dom.waitfor and the unified wait do.
+  if (name === "dom.waitfor" || name === "wait") return "clock";
+  // Task management (rarely a timeline step, but complete).
+  if (name.startsWith("tasks.")) return "checklist";
+  // A done step with a family above already returned that family's icon;
+  // only a done step from a genuinely unknown tool lands here.
   if (state === "done") return "check";
+  // Ultimate fallback, for genuinely unknown future tools only: after
+  // the branches above, no known registry tool reaches this line.
   return "pointer";
 }
 

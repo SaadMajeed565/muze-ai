@@ -296,7 +296,44 @@ const PATHS: Partial<Record<IconName, preact.ComponentChildren>> = {
   /* Timeline stroke set (reference): pointer w/ rays = click, keyboard
    * = typing, camera = screenshot, mouse = scroll, arrow-up-right =
    * navigation, check, X = failed. All foreground colour, no state
-   * colour — the disc behind them is neutral grey. */
+   * colour — the disc behind them is neutral grey. Family glyphs added
+   * later follow the same construction: 24x24 viewBox, stroke-only
+   * paths, round caps/joins, foreground colour only, no fills. */
+  drag: (
+    <>
+      <rect x="3" y="3" width="8" height="8" rx="2" />
+      <path d="M10.5 12.5 18 20" />
+      <path d="M13.5 20H18v-4.5" />
+    </>
+  ),
+  send: (
+    <>
+      <path d="M22 2 11 13" />
+      <path d="M22 2 15 22l-4-9-9-4z" />
+    </>
+  ),
+  "history-rewind": (
+    <>
+      <path d="M3.6 12a8.4 8.4 0 1 0 2.5-6" />
+      <path d="M3.6 9.6V4h5.6" />
+    </>
+  ),
+  wrench: <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />,
+  flow: (
+    <>
+      <circle cx="5.5" cy="6" r="2.3" />
+      <circle cx="18.5" cy="12" r="2.3" />
+      <circle cx="5.5" cy="18" r="2.3" />
+      <path d="M7.8 7.1l8.2 3.7" />
+      <path d="M7.8 16.9l8.2-3.7" />
+    </>
+  ),
+  checklist: (
+    <>
+      <path d="M9.5 6h11M9.5 12h11M9.5 18h11" />
+      <path d="M3.5 6l1.2 1.2L7 5M3.5 12l1.2 1.2L7 11M3.5 18l1.2 1.2L7 17" />
+    </>
+  ),
   pointer: (
     <>
       <path d="m9 9 5 12 1.8-5.2L21 14Z" />

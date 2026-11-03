@@ -89,6 +89,97 @@ export function normalizeDashboardRequestType(type: unknown): string | null {
 }
 
 /**
+ * Dashboard routes that change state the user cares about, and therefore
+ * require a positively identified extension sender (see
+ * `isTrustedDashboardSender`). This is every route in `handleRequest`
+ * except the read-only set below: policy/kill-switch changes, approval
+ * decisions, bridge/gateway session changes, onboarding changes, file
+ * adds/removes, browser default/rename/disconnect/remove, MCP-client
+ * revocation, and task pause/resume/cancel/plan-approval. The legacy
+ * "uabb/*" spelling is normalised to "muze/*" before this check, so it
+ * is guarded identically.
+ */
+export const CONSEQUENTIAL_DASHBOARD_REQUEST_TYPES: ReadonlySet<string> = new Set([
+  "muze/policy/update",
+  "muze/policy/mode",
+  "muze/policy/tool",
+  "muze/policy/reset",
+  "muze/policy/group",
+  "muze/policy/readonly",
+  "muze/killswitch",
+  "muze/approval/respond",
+  "muze/approvals/cancel-for-client",
+  "muze/bridge/settings",
+  "muze/bridge/reconnect",
+  "muze/gateway/sign-in",
+  "muze/gateway/sign-in-email",
+  "muze/gateway/sign-up-email",
+  "muze/gateway/delete-account",
+  "muze/gateway/sign-out",
+  "muze/gateway/rotate",
+  "muze/onboarding/set",
+  "muze/files/attach",
+  "muze/files/remove",
+  "muze/browsers/set-default",
+  "muze/browsers/rename",
+  "muze/browsers/disconnect",
+  "muze/browsers/remove",
+  "muze/mcp-sessions/revoke",
+  "muze/tasks.pause",
+  "muze/tasks.resume",
+  "muze/tasks.cancel",
+  "muze/tasks.approvePlan",
+]);
+
+/**
+ * Dashboard routes that do not change user state and keep the previous
+ * behaviour (any sender, including an undefined sender.id, may read):
+ * state/audit snapshots, file and browser listings and file reads, the
+ * browsers-cache refresh (a re-read that only rewrites the derived
+ * cache), and task listings/reads. `muze/browsers/refresh` is deliberately
+ * here, not in the consequential set: it fetches the same account data
+ * `muze/browsers/list` serves and changes no account, policy or session
+ * state. `muze/bridge/reconnect`, by contrast, is consequential: it
+ * re-dials the gateway, so it is guarded even though it stores nothing.
+ */
+export const READ_ONLY_DASHBOARD_REQUEST_TYPES: ReadonlySet<string> = new Set([
+  "muze/state",
+  "muze/audit",
+  "muze/files/list",
+  "muze/files/get",
+  "muze/browsers/list",
+  "muze/browsers/refresh",
+  "muze/tasks.list",
+  "muze/tasks.get",
+]);
+
+export function isConsequentialDashboardRequestType(type: string): boolean {
+  return CONSEQUENTIAL_DASHBOARD_REQUEST_TYPES.has(type);
+}
+
+/**
+ * A sender is positively identified as this extension only when its id
+ * is defined AND equals the runtime id. This is deliberately fail-closed:
+ * an undefined sender.id, an undefined runtime id, and a foreign id all
+ * fail. In a real Chrome install `chrome.runtime.id` is always defined
+ * for extension contexts, so the dashboard (side panel and options page,
+ * both served from `dashboard/index.html` via `sendRequest`) always
+ * passes; only callers that cannot prove they are this extension fail.
+ */
+export function isTrustedDashboardSender(senderId: string | undefined, runtimeId: string | undefined): boolean {
+  return senderId !== undefined && runtimeId !== undefined && senderId === runtimeId;
+}
+
+/** Read-only routes keep current behaviour; consequential routes require a trusted sender. */
+export function isDashboardSenderAllowedForRequest(
+  type: string,
+  senderId: string | undefined,
+  runtimeId: string | undefined,
+): boolean {
+  return !isConsequentialDashboardRequestType(type) || isTrustedDashboardSender(senderId, runtimeId);
+}
+
+/**
  * MV3 service workers are suspended when idle, which tears down the gateway
  * WebSocket. These alarms wake the worker before that happens (30s matches the
  * worker idle timeout) so it can reconnect, keeping the bridge alive across
@@ -1254,16 +1345,24 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
   }
 }
 /**
- * Trust boundary (documented, not eliminated): Chrome extension messaging
+ * Trust boundary (narrowed, not eliminated): Chrome extension messaging
  * carries no per-page origin for extension pages — `sender.id` is the
  * extension's own id for the dashboard, content scripts and the offscreen
  * document alike. The check below therefore rejects messages that claim a
  * *different* extension id (the only forgery the sender field can express),
- * and web pages cannot send runtime messages to this extension at all
- * unless it is listed in `externally_connectable` (it is not). A script
- * already running inside extension context could still send these messages;
- * that is Chrome's extension trust model, not a check this listener can
- * strengthen. The message-type prefix alone is NOT treated as authentication.
+ * and additionally rejects consequential dashboard routes (policy,
+ * kill-switch, approvals, gateway session, files, browsers, revocation,
+ * task control — see `CONSEQUENTIAL_DASHBOARD_REQUEST_TYPES`) from any
+ * sender that cannot prove it is this extension, i.e. an undefined
+ * `sender.id`. Read-only routes keep the previous behaviour. Web pages
+ * cannot send runtime messages to this extension at all unless it is
+ * listed in `externally_connectable` (it is not). What this check still
+ * cannot do: a script already running inside extension context (a
+ * content script, the offscreen document, or code injected into the
+ * dashboard page itself) arrives with `sender.id` equal to the extension
+ * id, so it still passes — that is Chrome's extension trust model, not
+ * something a sender-id check can distinguish. The message-type prefix
+ * alone is NOT treated as authentication.
  */
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse: (response: DashboardResponse) => void) => {
   const request = message as { target?: string; type?: string };
@@ -1280,6 +1379,13 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse: (r
   if (senderId !== undefined && runtimeId !== undefined && senderId !== runtimeId) return false;
   const normalized = normalizeDashboardRequestType(request?.type);
   if (normalized === null) return false;
+  if (!isDashboardSenderAllowedForRequest(normalized, senderId, runtimeId)) {
+    // Explicit rejection (not a silent channel close): the caller learns
+    // the attempt was refused, and handleRequest never runs, so no state
+    // changes, no gateway call and no approval decision can follow.
+    sendResponse({ ok: false, error: "untrusted_sender" });
+    return false;
+  }
   handleRequest({ ...(request as DashboardRequest), type: normalized } as DashboardRequest)
     .then(sendResponse)
     .catch((error: unknown) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));

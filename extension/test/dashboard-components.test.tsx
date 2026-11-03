@@ -10,6 +10,8 @@ import { PermissionsSections } from "../dashboard/components/permissions-section
 import { TasksPage } from "../dashboard/pages/Tasks.js";
 import type { DashboardState } from "../src/messages.js";
 import { Switch } from "../dashboard/components/primitives.js";
+import { Icon } from "../dashboard/components/Icon.js";
+import type { IconName } from "../dashboard/logic.js";
 
 let root: HTMLElement | null = null;
 
@@ -250,5 +252,17 @@ describe("TasksPage activity only", () => {
     expect(container.textContent).not.toContain("Waiting for you");
     // Activity is no longer a separate tab; task steps live in task detail.
     expect(container.textContent).not.toContain("Activity");
+  });
+});
+
+describe("timeline family glyphs", () => {
+  it("renders a stroke path for every new family glyph (no empty svg)", () => {
+    // PATHS is partial, so a missing glyph would render an empty svg
+    // without failing the build — this is the runtime guard for that.
+    const names: IconName[] = ["drag", "send", "history-rewind", "wrench", "flow", "checklist"];
+    for (const name of names) {
+      const container = mount(<Icon name={name} size={16} />);
+      expect(container.querySelector("svg path, svg circle, svg rect")).not.toBeNull();
+    }
   });
 });

@@ -757,6 +757,15 @@ describe("gateway e2e", () => {
     expect(closed).toBe(4403);
   });
 
+  // No per-test timeout override here: the suite default (60s) applies.
+  // Measured in Miniflare, the server-side close fires at the 5s deadline
+  // (setTimeout and the DO alarm both fire at 5s, and the DO's own
+  // webSocketClose runs then), but the close frame only reaches the
+  // external client ~10s later (~15s after connect) for a hibernatable
+  // Durable Object socket — a plain-Worker timer close, by contrast,
+  // arrives on time. A 20s budget therefore left only ~5s of headroom
+  // over the nominal ~15s delivery, which parallel load eats. The
+  // assertion is unchanged: the socket must still close with 4401.
   test("bridge closes a socket that never authenticates within 5 seconds", async () => {
     const account = await createAccount();
     const socket = new WebSocket(
@@ -767,7 +776,7 @@ describe("gateway e2e", () => {
       socket.on("error", (error) => reject(error));
     });
     expect(closed).toBe(4401);
-  }, 20_000);
+  });
 
   test("a read:tools-only token can read but cannot call a reversible tool", async () => {
     const account = await createAccount();

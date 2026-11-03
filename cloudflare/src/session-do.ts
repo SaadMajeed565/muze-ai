@@ -843,7 +843,7 @@ export class SessionDO implements DurableObject {
         initialMode: record.mode,
         initialDiscovered: record.discovered,
         onSessionStateChange: (state) => {
-          void this.persistSessionState(headerSession, state).catch(() => undefined);
+          void this.persistSessionStateWithRetry(headerSession, state);
         },
       });
       this.registerSession(headerSession, transport, record.client?.id);
@@ -864,7 +864,7 @@ export class SessionDO implements DurableObject {
       return generated;
     }, scope, {
       onSessionStateChange: (state) => {
-        if (openSessionId) void this.persistSessionState(openSessionId, state).catch(() => undefined);
+        if (openSessionId) void this.persistSessionStateWithRetry(openSessionId, state);
       },
     });
     const response = await transport.handleRequest(request);
@@ -997,16 +997,41 @@ export class SessionDO implements DurableObject {
 
   /** Phase A: merge a mode/discovered update into the persisted session
    * record without touching params, client, or scope. Best-effort: a
-   * storage failure never breaks the tool call that produced the change. */
-  private async persistSessionState(sessionId: string, state: { mode: string; discovered: string[] }): Promise<void> {
+   * storage failure never breaks the tool call that produced the change.
+   * Returns false (instead of throwing) so callers can log and retry. */
+  private async persistSessionState(sessionId: string, state: { mode: string; discovered: string[] }): Promise<boolean> {
     try {
       const stored = await this.loadSessions();
       const record = stored[sessionId];
-      if (!record) return;
+      if (!record) return true;
       stored[sessionId] = { ...record, mode: state.mode, discovered: [...state.discovered] };
       await this.state.storage.put(MCP_SESSIONS_KEY, stored);
-    } catch {
-      // ignore: persistence is best-effort, never call-breaking
+      return true;
+    } catch (error) {
+      // Best-effort, never call-breaking: the caller logs and retries.
+      void error;
+      return false;
+    }
+  }
+
+  /** Best-effort persist with bounded retries. Fire-and-forget by design:
+   * callers never await it, so a storage outage can delay the persisted
+   * mode/discovered view but never blocks session replay or tool calls.
+   * Every failed attempt is logged; a failure is never silent. */
+  private async persistSessionStateWithRetry(sessionId: string, state: { mode: string; discovered: string[] }): Promise<void> {
+    const delaysMs = [100, 300];
+    try {
+      for (let attempt = 1; attempt <= delaysMs.length + 1; attempt++) {
+        if (await this.persistSessionState(sessionId, state)) return;
+        if (attempt <= delaysMs.length) {
+          console.log(`[bridge] session-state persist failed session=${sessionId} attempt=${attempt} retrying`);
+          await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt - 1]));
+        } else {
+          console.log(`[bridge] session-state persist failed session=${sessionId} attempt=${attempt} giving up`);
+        }
+      }
+    } catch (error) {
+      console.log(`[bridge] session-state persist error session=${sessionId} error=${error instanceof Error ? error.message : "unknown"}`);
     }
   }
 

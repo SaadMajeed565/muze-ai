@@ -2129,6 +2129,25 @@ export class TaskRunner {
       step.attempts += 1;
       task.status = "running";
       task.updatedAt = this.now();
+      // Live timeline: persist the step the moment it starts, so the
+      // task list (and the dashboard timeline) shows what the task is
+      // doing right now, not just finished steps. The checkpoint merge
+      // still protects a pause/cancel issued while the step runs: the
+      // stored status is never overwritten back to running, and the
+      // run loop reloads before the next step and stops on a stored
+      // pause. The merged status is deliberately NOT used as a stop
+      // signal here: a stored pause predating this step (notably the
+      // resolveUnknown re-execution path, where the task is paused by
+      // the verify failure itself) is stale, not a fresh pause — gating
+      // on it would make re-execution impossible.
+      await this.checkpoint(all, task, {
+        kind: "task.step-started",
+        taskId: task.id,
+        stepIndex: step.index,
+        tool: step.tool,
+        decision: "started",
+        outcome: "started",
+      });
 
       let result: StepExecutionResult;
       try {
@@ -2479,6 +2498,21 @@ export class TaskRunner {
     }
     task.status = "running";
     task.updatedAt = this.now();
+    // Live timeline: persist the batch the moment it starts, so the
+    // task list shows every in-flight step right away. As in the
+    // sequential path, the checkpoint merge still protects a
+    // pause/cancel issued while the batch runs (the stored status is
+    // never overwritten back to running), and the merged status is
+    // deliberately not used as a launch gate: a stored pause predating
+    // this batch is stale, not a fresh pause.
+    await this.checkpoint(all, task, {
+      kind: "task.step-started",
+      taskId: task.id,
+      stepIndex: batch[0].index,
+      tool: batch[0].tool,
+      decision: "started",
+      outcome: "started",
+    });
     const settled = await Promise.allSettled(
       batch.map(async (step) => {
         const input = step.input as Record<string, unknown>;

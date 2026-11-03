@@ -13,9 +13,11 @@
     "build": "npm run sync:contracts && npm --prefix cloudflare run build && npm --prefix extension run build",
     "package:extension": "npm run sync:contracts && npm run check:contracts && npm --prefix extension run build && node scripts/package-extension.mjs",
     "typecheck": "npm --prefix cloudflare run typecheck && npm --prefix extension run typecheck",
-    "test": "npm --prefix cloudflare test && npm --prefix extension test"
+    "test": "npm --prefix cloudflare test && npm --prefix extension test",
+    "format:check": "prettier --check \"extension/**/*.{ts,tsx}\" \"cloudflare/**/*.ts\" \"scripts/*.mjs\"",
+    "format": "prettier --write \"extension/**/*.{ts,tsx}\" \"cloudflare/**/*.ts\" \"scripts/*.mjs\""
   },
   "devDependencies": {
-    "playwright": "^1.64.1"
+    "prettier": "^3.9.10"
   }
 }

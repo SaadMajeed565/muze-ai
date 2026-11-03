@@ -154,6 +154,7 @@ export type BridgeEvent =
   | { kind: "client.disconnected"; client: ClientIdentity }
   | { kind: "approval.pending"; approval: ApprovalRequestInfo }
   | { kind: "policy.changed" }
+  | { kind: "browsers.changed" }
   | { kind: "audit" }
   | { kind: "kill-switch"; engaged: boolean }
   | {
