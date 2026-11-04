@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTestRuntime } from "../libs/testing/index.js";
 import { PROTOCOL_VERSION, TOOL_SCHEMAS, type BridgeHostMessage } from "../libs/tool-contracts/index.js";
+import type { ActivityEvent } from "../libs/activity.js";
 import { HostProtocolHandler, type BridgeTransport } from "../src/host-protocol.js";
 
 class FakeTransport implements BridgeTransport {
@@ -140,5 +141,98 @@ describe("HostProtocolHandler", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(transport.messages.filter((m) => m.type === "approval.resolved" && m.id === "w1")).toHaveLength(1);
     expect(transport.messages.find((m) => m.type === "approval.resolved" && m.id === "w1")).toMatchObject({ approved: false });
+  });
+
+  it("a client-less single call executes but emits no activity row (gateway housekeeping)", async () => {
+    // The gateway's own tab-count probe behind the dashboard browsers
+    // list arrives with no client: the socket message only carries
+    // client when the gateway call had one. It must still execute and
+    // return its result — but it must not plant a phantom "Checked
+    // tabs" row in the feed/history.
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    const transport = new FakeTransport();
+    const handler = new HostProtocolHandler({
+      registry: rt.registry,
+      executor: rt.executor,
+      policy: rt.policy,
+      approvals: rt.approvals,
+      transport,
+      getContext: () => rt.ctx,
+      server: { name: "test-host", version: "1.0.0" },
+      legacyTools: true,
+    });
+    await handler.handle({ type: "tool.call", id: "t-house", tool: "tabs.list", input: {} });
+    expect(transport.find("tool.result")).toMatchObject({ id: "t-house", dryRun: false });
+    expect(events).toHaveLength(0);
+  });
+
+  it("the same call with a client still emits its activity row (AI grounding read)", async () => {
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    const transport = new FakeTransport();
+    const handler = new HostProtocolHandler({
+      registry: rt.registry,
+      executor: rt.executor,
+      policy: rt.policy,
+      approvals: rt.approvals,
+      transport,
+      getContext: () => rt.ctx,
+      server: { name: "test-host", version: "1.0.0" },
+      legacyTools: true,
+    });
+    await handler.handle({ type: "tool.call", id: "t-ai", tool: "tabs.list", input: {}, client: { id: "c", name: "C", transport: "native" } });
+    expect(transport.find("tool.result")).toMatchObject({ id: "t-ai", dryRun: false });
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ tool: "tabs.list", state: "running", summary: "Checked tabs" });
+    expect(events[1]).toMatchObject({ tool: "tabs.list", state: "done", summary: "Checked tabs" });
+  });
+
+  it("a client-less batch executes but emits no activity rows", async () => {
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    const transport = new FakeTransport();
+    const handler = new HostProtocolHandler({
+      registry: rt.registry,
+      executor: rt.executor,
+      policy: rt.policy,
+      approvals: rt.approvals,
+      transport,
+      getContext: () => rt.ctx,
+      server: { name: "test-host", version: "1.0.0" },
+      legacyTools: true,
+    });
+    await handler.handle({
+      type: "tool.call.batch",
+      id: "b-house",
+      calls: [{ tool: "tabs.list", input: {} }],
+    });
+    const result = transport.find("tool.batch.result") as { results: { tool: string; ok: boolean }[] };
+    expect(result.results).toEqual([{ tool: "tabs.list", ok: true, result: expect.anything(), dryRun: false, durationMs: expect.anything() }]);
+    expect(events).toHaveLength(0);
+  });
+
+  it("a client-less action is still gated with TASK_REQUIRED (silence is not a bypass)", async () => {
+    // silentActivity suppresses only the row: a client-less bridge
+    // call is not extension-initiated, so the enforcement gate must
+    // still reject a direct action exactly as it does for a call with
+    // a client. This pins the difference from `internal`, which would
+    // have bypassed the gate.
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    const transport = new FakeTransport();
+    const handler = new HostProtocolHandler({
+      registry: rt.registry,
+      executor: rt.executor,
+      policy: rt.policy,
+      approvals: rt.approvals,
+      transport,
+      getContext: () => rt.ctx,
+      server: { name: "test-host", version: "1.0.0" },
+      legacyTools: true,
+    });
+    await handler.handle({ type: "tool.call", id: "t-gate", tool: "tabs.close", input: { tabId: 1 } });
+    expect(transport.find("tool.error")).toMatchObject({ id: "t-gate", error: { code: "TASK_REQUIRED" } });
+    expect(events).toHaveLength(0);
   });
 });

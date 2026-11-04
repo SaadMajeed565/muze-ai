@@ -806,6 +806,21 @@ export class HostProtocolHandler {
         approvalId: message.approvalId,
         dryRun: message.dryRun,
         signal: controller.signal,
+        // Gateway-internal housekeeping arrives with no client: the
+        // socket message only carries client when the gateway call had
+        // one, and every real MCP call passes a client. A client-less
+        // call is therefore never an AI client call — e.g. the
+        // gateway's own tab-count probe behind the dashboard browsers
+        // list — so its recording is suppressed with silentActivity:
+        // it still executes and returns its result under the full
+        // policy/approval/audit/rate-limit path, but emits no activity
+        // row. Without this, every dashboard browsers refresh plants a
+        // phantom "Checked tabs" row in the feed and history. NOTE: not
+        // `internal` — internal would also bypass the TASK_REQUIRED
+        // gate, and a client-less bridge call is not
+        // extension-initiated, so a client-less action must still be
+        // gated like any direct call.
+        ...(message.client === undefined ? { silentActivity: true } : {}),
       });
       this.deps.transport.post({
         type: "tool.result",
@@ -1053,6 +1068,11 @@ export class HostProtocolHandler {
             approvalId: call.approvalId,
             dryRun: call.dryRun,
             signal: controller.signal,
+            // Same gateway-internal rule as a single call: a client-less
+            // batch is housekeeping, not an AI client call, so its items
+            // execute and return but emit no activity rows. silentActivity
+            // (not internal) so the TASK_REQUIRED gate still applies.
+            ...(message.client === undefined ? { silentActivity: true } : {}),
           });
           results.push({
             tool: call.tool,

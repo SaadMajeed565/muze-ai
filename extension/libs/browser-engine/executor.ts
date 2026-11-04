@@ -52,6 +52,17 @@ export interface ExecuteOptions {
    */
   internal?: boolean;
   /**
+   * Gateway-housekeeping silence (e.g. the gateway's own tab-count
+   * probe, which arrives at the bridge with no client): skips
+   * live-activity emission ONLY, exactly like `internal`, but — unlike
+   * `internal` — it does NOT bypass the TASK_REQUIRED gate. A
+   * client-less bridge call is not extension-initiated, so it must
+   * still be gated like any direct call; only its recording is
+   * suppressed, because it is not AI work and must not plant a row
+   * in the feed/history.
+   */
+  silentActivity?: boolean;
+  /**
    * Owning task for task-step executions, set only by the service
    * worker's executeStep wiring from StepContext.taskId. Direct calls
    * never set it. Carried onto the activity event (running and
@@ -155,7 +166,7 @@ export class ToolExecutor {
     return eventId;
   }
 
-  /** Resolve a started row; a null id (no listener, or a nested/internal/status-silent call) is a no-op. */
+  /** Resolve a started row; a null id (no listener, or a nested/internal/silent/status-silent call) is a no-op. */
   private endActivity(id: string | null, tool: string, state: "done" | "failed", taskId?: string): void {
     if (id === null) return;
     this.emitActivity(tool, state, id, taskId);
@@ -378,7 +389,7 @@ export class ToolExecutor {
     // only the recording is skipped, so connection checks leave the
     // Tasks record clean.
     const activityId =
-      options.nested || options.internal || STATUS_SILENT_TOOLS.has(auditTool)
+      options.nested || options.internal || options.silentActivity || STATUS_SILENT_TOOLS.has(auditTool)
         ? null
         : this.emitActivity(auditTool, "running", null, options.taskId);
 
