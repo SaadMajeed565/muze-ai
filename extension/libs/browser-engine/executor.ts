@@ -26,6 +26,14 @@ export interface ExecuteOptions {
   /** Nested workflow invoke: skip a second rate-limit token, keep approvalId. */
   nested?: boolean;
   /**
+   * Internal housekeeping (e.g. the task runner's own pre/post-step
+   * observe calls): skips live-activity emission ONLY, following the
+   * nested precedent. Policy, approval, audit, and rate limiting all
+   * still run; the call simply never becomes a timeline row, so the
+   * feed shows AI-driven executions only.
+   */
+  internal?: boolean;
+  /**
    * Phase 1 canonicalisation (Tool Management Plan section 2.2), supplied
    * by the host protocol when `tool` is a unified tool that resolved to
    * one granular tool. `tool` still names the tool to execute (the
@@ -113,7 +121,7 @@ export class ToolExecutor {
     return eventId;
   }
 
-  /** Resolve a started row; a null id (no listener, or a nested call) is a no-op. */
+  /** Resolve a started row; a null id (no listener, or a nested/internal call) is a no-op. */
   private endActivity(id: string | null, tool: string, state: "done" | "failed"): void {
     if (id === null) return;
     this.emitActivity(tool, state, id);
@@ -278,9 +286,10 @@ export class ToolExecutor {
 
     // Live activity feed: execution truly begins here — validation,
     // authorization, approval, and rate limiting all passed. Nested
-    // invokes are internal sub-steps of the parent call and stay silent;
-    // dry runs return before this point and never emit.
-    const activityId = options.nested ? null : this.emitActivity(auditTool, "running");
+    // invokes are internal sub-steps of the parent call and stay silent,
+    // as do internal housekeeping calls (flagged internal); dry runs
+    // return before this point and never emit.
+    const activityId = options.nested || options.internal ? null : this.emitActivity(auditTool, "running");
 
     const runtime = this.buildRuntime(options.client);
 

@@ -405,6 +405,8 @@ function getTaskRunner(): TaskRunner {
         tool: "observe",
         input: { ...(tabId !== undefined ? { tabId } : {}), include: ["metadata", "a11y", "forms"], maxNodes: 200 },
         client: { id: "task-runner", name: "task-runner", transport: "native" },
+        // Internal housekeeping, not an AI action: never a timeline row.
+        internal: true,
         ctx: context,
         ...(signal ? { signal } : {}),
       });
@@ -429,6 +431,8 @@ function getTaskRunner(): TaskRunner {
         tool: "observe",
         input: { ...(tabId !== undefined ? { tabId } : {}), include: ["metadata", "a11y"], maxNodes: 200 },
         client: { id: "task-runner", name: "task-runner", transport: "native" },
+        // Internal housekeeping, not an AI action: never a timeline row.
+        internal: true,
         ctx: context,
         ...(signal ? { signal } : {}),
       });
@@ -463,6 +467,8 @@ function getTaskRunner(): TaskRunner {
           tool: "observe",
           input: { ...(tabId !== undefined ? { tabId } : {}), include: ["metadata", "a11y"], maxNodes: 200 },
           client: { id: "task-runner", name: "task-runner", transport: "native" },
+          // Internal housekeeping, not an AI action: never a timeline row.
+          internal: true,
           ctx: context,
           ...(signal ? { signal } : {}),
         });

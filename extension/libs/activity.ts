@@ -1,5 +1,7 @@
 /**
- * Live activity feed: one row per real tool execution, as it happens.
+ * Live activity feed: one row per real AI-driven tool execution, as it
+ * happens. Internal housekeeping (the task runner's own observe calls)
+ * stays silent: the feed shows AI actions only, never system activity.
  *
  * This is NOT the task plan. Tasks are the plan (what should be done);
  * this feed is what Muze is actually doing in the moment — every tool
@@ -89,6 +91,13 @@ const EXACT_VERBS: Record<string, string> = {
   "tabs.activate": "Switched tabs",
   "tabs.reload": "Reloaded the tab",
   "tabs.duplicate": "Duplicated a tab",
+  // Tab/window READS must never render as changes: listing or inspecting
+  // tabs changes nothing, so these get read verbs, not "Changed tabs".
+  "tabs.list": "Checked tabs",
+  "tabs.get": "Checked tabs",
+  "tabs.active": "Checked tabs",
+  "tabs.search": "Searched tabs",
+  "windows.list": "Checked windows",
   "windows.create": "Opened a window",
   "windows.close": "Closed a window",
   "forms.upload": "Uploaded a file",
@@ -138,7 +147,8 @@ export function activityVerb(tool: string): string {
   ) {
     return "Read the page";
   }
-  if (name.startsWith("tabs.") || name.startsWith("windows.")) return "Changed tabs";
+  if (name.startsWith("tabs.")) return "Changed tabs";
+  if (name.startsWith("windows.")) return "Changed windows";
   if (name === "dom.submit" || name === "forms.submit") return "Submitted";
   if (name === "forms.upload" || name === "forms.setfile") return "Uploaded a file";
   if (name === "files.list" || name === "files.stat") return "Opened files";

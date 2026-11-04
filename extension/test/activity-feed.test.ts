@@ -57,6 +57,19 @@ describe("activityVerb", () => {
     expect(activityVerb("tasks.create")).toBe("Managed a task");
     expect(activityVerb("some.futureTool")).toBe("Worked");
   });
+
+  it("tab reads never render as tab changes; mutations keep their verbs", () => {
+    expect(activityVerb("tabs.list")).toBe("Checked tabs");
+    expect(activityVerb("tabs.get")).toBe("Checked tabs");
+    expect(activityVerb("tabs.active")).toBe("Checked tabs");
+    expect(activityVerb("tabs.search")).toBe("Searched tabs");
+    expect(activityVerb("windows.list")).toBe("Checked windows");
+    expect(activityVerb("tabs.activate")).toBe("Switched tabs");
+    expect(activityVerb("tabs.create")).toBe("Opened a tab");
+    expect(activityVerb("tabs.move")).toBe("Changed tabs");
+    expect(activityVerb("tabs.pin")).toBe("Changed tabs");
+    expect(activityVerb("windows.update")).toBe("Changed windows");
+  });
 });
 
 describe("applyActivityEvent", () => {
@@ -199,6 +212,30 @@ describe("executor activity emission", () => {
     await rt.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt.ctx, dryRun: true });
     await rt.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt.ctx, nested: true });
     expect(events).toHaveLength(0);
+  });
+
+  it("internal executions emit nothing, so nothing persists either", async () => {
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    // Two internal tab reads: the shape of the reported pair. Neither
+    // may produce a row, live or stored (the worker only persists
+    // events it receives, so zero emissions means zero stored rows).
+    await rt.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt.ctx, internal: true });
+    await rt.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt.ctx, internal: true });
+    expect(events).toHaveLength(0);
+    let rows: ActivityRow[] = [];
+    for (const e of events) rows = applyActivityEvent(rows, e);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("the same tool from an AI client still emits, with a read verb", async () => {
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    await rt.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt.ctx });
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ tool: "tabs.list", state: "running", summary: "Checked tabs" });
+    expect(events[1]).toMatchObject({ tool: "tabs.list", state: "done", summary: "Checked tabs" });
+    expect(events[0].id).toBe(events[1].id);
   });
 
   it("a task step emits start + completion through the real executor", async () => {
