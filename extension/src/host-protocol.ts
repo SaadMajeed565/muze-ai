@@ -934,7 +934,8 @@ export class HostProtocolHandler {
         }
         case "tasks.appendSteps": {
           // Follow-up steps for an existing task: the runner validates
-          // the steps, rejects terminal tasks, and queues the rest
+          // the steps, rejects done/cancelled/partial tasks (a failed
+          // task reopens as paused for a retry), and queues the rest
           // behind unexecuted steps — no new task record is created.
           // No policy snapshot is needed: nothing executes here; the
           // appended steps face the per-step gates when the loop runs

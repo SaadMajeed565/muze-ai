@@ -316,7 +316,7 @@ export const tasksAppendSteps: ToolDefinition = {
   name: "tasks.appendSteps",
   title: "Append task steps",
   description:
-    "Append steps to an existing task's plan using the id tasks.create returned. Follow-up work for the same job goes here — never create a second task for work that continues an existing one. Appended steps queue behind unexecuted steps and run through the same executor, policy, and approval gates at execution time; appending never pre-approves them. Appending to a finished task (done, failed, cancelled, partial) is rejected.",
+    "Append steps to an existing task's plan using the id tasks.create returned. Follow-up work for the same job goes here — never create a second task for work that continues an existing one. Appended steps queue behind unexecuted steps and run through the same executor, policy, and approval gates at execution time; appending never pre-approves them. Appending to a failed task reopens it as paused — call tasks.resume to run the new steps. Appending to a done, cancelled, or partial task is rejected.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,

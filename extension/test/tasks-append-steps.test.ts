@@ -7,8 +7,10 @@
  * ordinary pending records — no pre-approval, no special flag — so
  * they run through the identical loop, with the same per-step
  * executor/policy/approval gates and the same taskId attribution into
- * activity/history, as created steps. Terminal tasks reject; a
- * paused/waiting task keeps appended steps waiting with the rest.
+ * activity/history, as created steps. A failed task reopens as paused
+ * on append (resume runs the retry steps in the same record); done,
+ * cancelled, and partial tasks reject; a paused/waiting task keeps
+ * appended steps waiting with the rest.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -171,7 +173,7 @@ describe("tasks.appendSteps", () => {
     expect(executed).toEqual(["forms.submit", "forms.submit", "observe"]);
   });
 
-  it("rejects appends to a terminal task and leaves the plan unchanged", async () => {
+  it("rejects appends to a done task and leaves the plan unchanged", async () => {
     const runner = makeRunner(async () => ({ outputSummary: "ok" }));
     const created = await runner.createTask(
       { goal: "read once", clientId: CLIENT, browserSessionId: SESSION, steps: [OBSERVE], start: true },
@@ -182,6 +184,97 @@ describe("tasks.appendSteps", () => {
     const after = await runner.getTask(created.id, CLIENT);
     expect(after.steps).toHaveLength(1);
     expect(after.steps.filter((s) => s.state === "done")).toHaveLength(1);
+  });
+
+  it("appending to a failed task reopens it as paused; resume runs the retry steps in the same task", async () => {
+    let failNext = true;
+    const executed: string[] = [];
+    const runner = makeRunner(async (tool) => {
+      executed.push(tool);
+      if (failNext) {
+        failNext = false;
+        // A non-retryable code is what turns a step error into a
+        // failed task; a plain uncoded error pauses as unknown.
+        throw Object.assign(new Error("tool not found"), { code: "TOOL_NOT_FOUND" });
+      }
+      return { outputSummary: "ok" };
+    });
+    const failed = await runner.createTask(
+      { goal: "read once", clientId: CLIENT, browserSessionId: SESSION, steps: [OBSERVE], start: true },
+      snapshotFor("unrestricted"),
+    );
+    expect(failed.status).toBe("failed");
+    expect(failed.steps[0].state).toBe("failed");
+    expect(failed.completedAt).not.toBeNull();
+    expect(failed.finalReport).not.toBeNull();
+    // The retry appends to the SAME task instead of becoming a second
+    // task: the append reopens it as paused and clears the stale
+    // completion markers, while the failed step stays failed.
+    const revived = await runner.appendSteps(failed.id, CLIENT, [CLICK]);
+    expect(revived.id).toBe(failed.id);
+    expect(revived.status).toBe("paused");
+    expect(revived.completedAt).toBeNull();
+    expect(revived.finalReport).toBeNull();
+    expect(revived.steps).toHaveLength(2);
+    expect(revived.steps[0].state).toBe("failed");
+    expect(revived.steps[1]).toMatchObject({ tool: "dom.click", state: "pending" });
+    expect((await runner.listTasks(CLIENT)).length).toBe(1);
+    // Resume runs the retry step in the same record. The task ends
+    // partial, honestly: the original step is still failed (failed
+    // steps are never re-run), while the retry step reaches done.
+    const resumed = await runner.resumeTask(failed.id, CLIENT, snapshotFor("unrestricted"));
+    expect(resumed.id).toBe(failed.id);
+    expect(resumed.steps[1].state).toBe("done");
+    expect(resumed.status).toBe("partial");
+    expect(executed).toEqual(["observe", "dom.click"]);
+  });
+
+  it("still rejects appends to cancelled and partial tasks and leaves the plan unchanged", async () => {
+    const runner = makeRunner(async () => ({ outputSummary: "ok" }));
+    const created = await runner.createTask(
+      { goal: "read once", clientId: CLIENT, browserSessionId: SESSION, steps: [OBSERVE], start: false },
+      snapshotFor("unrestricted"),
+    );
+    await runner.cancelTask(created.id, CLIENT);
+    expect((await runner.getTask(created.id, CLIENT)).status).toBe("cancelled");
+    await expect(runner.appendSteps(created.id, CLIENT, [CLICK])).rejects.toThrow(/is cancelled and cannot accept new steps/);
+    expect((await runner.getTask(created.id, CLIENT)).steps).toHaveLength(1);
+
+    // Partial: first step done, second fails with a non-retryable code.
+    let calls = 0;
+    const runner2 = makeRunner(async () => {
+      calls += 1;
+      if (calls === 2) throw Object.assign(new Error("second step blew up"), { code: "TOOL_NOT_FOUND" });
+      return { outputSummary: "ok" };
+    });
+    const partial = await runner2.createTask(
+      { goal: "two steps", clientId: CLIENT, browserSessionId: SESSION, steps: [OBSERVE, CLICK], start: true },
+      snapshotFor("unrestricted"),
+    );
+    expect(partial.status).toBe("partial");
+    await expect(runner2.appendSteps(partial.id, CLIENT, [OBSERVE])).rejects.toThrow(/is partial and cannot accept new steps/);
+    expect((await runner2.getTask(partial.id, CLIENT)).steps).toHaveLength(2);
+  });
+
+  it("a failed-task append still enforces caps and client ownership", async () => {
+    let failNext = true;
+    const runner = makeRunner(async () => {
+      if (failNext) {
+        failNext = false;
+        throw Object.assign(new Error("boom"), { code: "TOOL_NOT_FOUND" });
+      }
+      return { outputSummary: "ok" };
+    });
+    const failed = await runner.createTask(
+      { goal: "bounded fail", clientId: CLIENT, browserSessionId: SESSION, steps: [OBSERVE], planBounds: { maxSteps: 1 }, start: true },
+      snapshotFor("unrestricted"),
+    );
+    expect(failed.status).toBe("failed");
+    await expect(runner.appendSteps(failed.id, CLIENT, [CLICK])).rejects.toThrow(/plan bounds maxSteps/);
+    await expect(runner.appendSteps(failed.id, "client-b", [CLICK])).rejects.toThrow(/belongs to a different client/);
+    const after = await runner.getTask(failed.id, CLIENT);
+    expect(after.status).toBe("failed");
+    expect(after.steps).toHaveLength(1);
   });
 
   it("rejects malformed steps and leaves the plan unchanged", async () => {

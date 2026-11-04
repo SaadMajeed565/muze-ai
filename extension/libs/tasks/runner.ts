@@ -828,12 +828,16 @@ export class TaskRunner {
    * attribution into activity/history, same bounds handling — because
    * the run loop reloads the record before every step and picks the
    * next pending one, and step checkpoints merge (never wipe) steps
-   * appended while a step was executing. Status is never changed here: a
-   * running task picks the steps up on its next reload, a paused or
-   * waiting_approval task keeps them waiting with the rest, and a
-   * created task keeps them for its first run. Terminal tasks reject;
-   * the plan cap (MAX_STEPS_PER_TASK) and the task's own planBounds
-   * maxSteps, when set, reject an append that would overflow them.
+   * appended while a step was executing. Status is never changed here,
+   * except for one revival: appending to a FAILED task reopens it as
+   * paused, so the existing resume path runs the new steps — append
+   * itself never starts execution, matching the invariant for paused
+   * tasks. The revival clears the stale completion markers
+   * (completedAt, finalReport) so the task presents as paused and
+   * resumable, not completed; prior steps keep their recorded states.
+   * Done, cancelled, and partial tasks still reject; the plan cap
+   * (MAX_STEPS_PER_TASK) and the task's own planBounds maxSteps, when
+   * set, reject an append that would overflow them.
    */
   async appendSteps(id: string, clientId: string, rawSteps: CreateStepInput[]): Promise<TaskView> {
     if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
@@ -842,7 +846,12 @@ export class TaskRunner {
     const all = await this.loadAll();
     const task = this.findOrThrow(all, id);
     this.assertClient(task, clientId);
-    if (isTerminal(task.status)) {
+    // Failed-task revival: a failed task is the one terminal state a
+    // retry can continue — the AI appends retry steps here instead of
+    // creating a second task for the same job. Done, cancelled, and
+    // partial tasks still reject below.
+    const reviving = task.status === "failed";
+    if (isTerminal(task.status) && !reviving) {
       throw new Error(`task append rejected: task ${id} is ${task.status} and cannot accept new steps`);
     }
     if (task.steps.length + rawSteps.length > MAX_STEPS_PER_TASK) {
@@ -865,6 +874,18 @@ export class TaskRunner {
         const url = (step.input as Record<string, unknown>).url;
         task.pinnedTabs.push({ tabId, url: typeof url === "string" ? url : null });
       }
+    }
+    if (reviving) {
+      // Reopen the failed task as paused: the resume path (which
+      // refuses terminal tasks) can now run the new steps, while the
+      // append itself starts nothing. Clear the stale completion
+      // markers so the record reads as paused/resumable, not finished;
+      // the failed steps themselves stay failed.
+      task.status = "paused";
+      task.pauseReason = null;
+      task.resumeAfterMs = null;
+      task.completedAt = null;
+      task.finalReport = null;
     }
     task.updatedAt = this.now();
     this.refreshSummary(task);
