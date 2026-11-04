@@ -1,4 +1,5 @@
 import { ToolErrorException, deprecatedUnifiedAction, toToolError, toolRequiresApproval, type ClientIdentity, type ToolDefinition } from "../tool-contracts/index.js";
+import { activityVerb, type ActivityEvent, type ActivityState } from "../activity.js";
 import { validateNavigableUrl, type ApprovalBroker, type AuditLog, type PolicyEngine, type PolicyTarget, type RateLimiter } from "../security/index.js";
 import type { BrowserContext } from "./context.js";
 import type { RuntimeSnapshot, ToolRegistry } from "./registry.js";
@@ -53,6 +54,13 @@ export interface ExecutorDeps {
   rateLimiter: RateLimiter;
   /** Extra runtime fields contributed by the host (bridge status, clients). */
   runtime?: Partial<RuntimeSnapshot> | (() => Partial<RuntimeSnapshot>);
+  /**
+   * Live activity feed sink. Called once when an execution truly begins
+   * and once when it resolves (done/failed), for top-level calls only.
+   * Best-effort: the executor never fails a call for a broken listener.
+   * Absent in tests that do not observe activity.
+   */
+  onActivity?: (event: ActivityEvent) => void;
 }
 
 export class TimeoutError extends Error {
@@ -85,6 +93,31 @@ export class ToolExecutor {
   }>();
 
   constructor(private readonly deps: ExecutorDeps) {}
+
+  /** Per-instance activity ids: unique within one executor's lifetime. */
+  private activityCounter = 0;
+
+  /**
+   * Live activity emission. Best-effort by contract: a broken listener
+   * must never break execution, and an absent listener is a no-op.
+   * Returns the event id so a later completion resolves the same row.
+   */
+  private emitActivity(tool: string, state: ActivityState, id: string | null = null): string | null {
+    if (typeof this.deps.onActivity !== "function") return null;
+    const eventId = id ?? `act_${(this.activityCounter += 1)}`;
+    try {
+      this.deps.onActivity({ kind: "activity", id: eventId, tool, summary: activityVerb(tool), state, at: Date.now() });
+    } catch {
+      // Observability only; never fail the call for it.
+    }
+    return eventId;
+  }
+
+  /** Resolve a started row; a null id (no listener, or a nested call) is a no-op. */
+  private endActivity(id: string | null, tool: string, state: "done" | "failed"): void {
+    if (id === null) return;
+    this.emitActivity(tool, state, id);
+  }
 
   /**
    * Policy version key for the runtime cache. Prefer PolicyEngine.getVersion()
@@ -243,6 +276,12 @@ export class ToolExecutor {
     const timeoutMs = options.timeoutMs ?? this.deps.policy.getConfig().defaultTimeoutMs;
     this.deps.audit.record({ kind: "tool.call", tool: auditTool, client: options.client, risk: tool.risk, decision: "allowed", details: withCalledAs(undefined) });
 
+    // Live activity feed: execution truly begins here — validation,
+    // authorization, approval, and rate limiting all passed. Nested
+    // invokes are internal sub-steps of the parent call and stay silent;
+    // dry runs return before this point and never emit.
+    const activityId = options.nested ? null : this.emitActivity(auditTool, "running");
+
     const runtime = this.buildRuntime(options.client);
 
     const controller = new AbortController();
@@ -315,6 +354,7 @@ export class ToolExecutor {
         durationMs,
         details: withCalledAs({ code: toolError.code }),
       });
+      this.endActivity(activityId, auditTool, "failed");
       throw ToolErrorException.is(error) ? error : new ToolErrorException(toolError.code, toolError.message);
     } finally {
       if (timer) clearTimeout(timer);
@@ -324,6 +364,7 @@ export class ToolExecutor {
     // 8. Validate output and bound size.
     const outputCheck = tool.output.safeParse(raw);
     if (!outputCheck.success) {
+      this.endActivity(activityId, auditTool, "failed");
       throw new ToolErrorException("INTERNAL", `Tool ${tool.name} produced output that failed its schema`, {
         details: { issues: outputCheck.error.issues.map((i) => i.path.join(".")) },
       });
@@ -356,6 +397,7 @@ export class ToolExecutor {
       details: withCalledAs(undefined),
     });
 
+    this.endActivity(activityId, auditTool, "done");
     return { result: bounded, dryRun: false, durationMs };
   }
 

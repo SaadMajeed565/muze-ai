@@ -5,7 +5,8 @@ import type { BrowsersDashboard, DashboardState } from "../../src/messages.js";
 import type { ApprovalRequestInfo } from "../../libs/tool-contracts/index.js";
 import type { TabId } from "../logic.js";
 import { sendRequest } from "../logic.js";
-import { dedupeAppsByName, plainStep, plainStepState, resolveAppName, timelineIconForStep } from "../ui-logic.js";
+import { dedupeAppsByName, plainStepState, resolveAppName, timelineIconForStep } from "../ui-logic.js";
+import { applyActivityEvent, type ActivityEvent, type ActivityRow } from "../../libs/activity.js";
 import { currentBrowser, tabCountText } from "../browsers-logic.js";
 import { FAVICON_CACHE_KEY, domainOf, prefetchFaviconForTab } from "../../src/favicon-cache.js";
 import { Icon } from "../components/Icon.js";
@@ -27,8 +28,8 @@ const TASKS_POLL_MS = 5000;
 const TIP_KEY = "muze-tip-dismissed";
 
 /**
- * Home in the reference order: tip, browser card (running task
- * timeline, nothing else), approval cards, Browsers section, then the
+ * Home in the reference order: tip, browser card (live activity
+ * feed, nothing else), approval cards, Browsers section, then the
  * apps section — attach-app empty state when no AI app is connected.
  * The browser card is a native disclosure, collapsed by default; its
  * title is the running task's intent, falling back to the browser name.
@@ -43,6 +44,10 @@ export function HomePage({
   const { snapshot, gateway } = state;
   const [browsersData, setBrowsersData] = useState<BrowsersDashboard | null>(null);
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
+  // Live activity feed: real tool executions as they happen (direct calls
+  // and task steps alike). Live-only: events arriving while the panel is
+  // closed are not replayed, because activity is not persisted.
+  const [activity, setActivity] = useState<ActivityRow[]>([]);
   const [addAppOpen, setAddAppOpen] = useState(false);
   const [favicon, setFavicon] = useState<string | null>(null);
   const [showLatest, setShowLatest] = useState(false);
@@ -213,9 +218,28 @@ export function HomePage({
     }
   };
 
+  // Live activity feed: every tool execution in this browser arrives as a
+  // muze/event with kind "activity" (direct calls and task steps alike,
+  // in time order). The 5s tasks poll still feeds the card header; the
+  // feed itself is event-driven.
+  useEffect(() => {
+    const onMessage = typeof chrome === "undefined" ? undefined : chrome?.runtime?.onMessage;
+    if (!onMessage?.addListener) return undefined;
+    const listener = (message: { type?: string; event?: ActivityEvent }) => {
+      if (message.type !== "muze/event" && message.type !== "uabb/event") return;
+      if (message.event?.kind !== "activity") return;
+      setActivity((rows) => applyActivityEvent(rows, message.event as ActivityEvent));
+    };
+    onMessage.addListener(listener);
+    return () => {
+      if (onMessage.removeListener) onMessage.removeListener(listener);
+    };
+  }, []);
+
+  // Scroll to the latest row whenever a new activity row arrives.
   useEffect(() => {
     if (cardRef.current?.open) scrollToLatest(false);
-  }, [tasks]);
+  }, [activity]);
 
   const dismissTip = (): void => {
     setTipDismissed(true);
@@ -263,28 +287,23 @@ export function HomePage({
           </span>
         </summary>
         <div style={{ position: "relative" }}>
-          {runningTask ? (
-            runningTask.steps.length === 0 ? (
-              <div class="muted mt12" style={{ fontSize: "13px" }}>Steps will appear here as the task runs.</div>
-            ) : (
+          {activity.length === 0 ? (
+            <div class="muted mt12" style={{ fontSize: "13px" }}>Actions will appear here as Muze works</div>
+          ) : (
             <div id="browserTimeline" class="tl mt12" ref={timelineRef} onScroll={onTimelineScroll}>
-              {[...runningTask.steps].sort((a, b) => a.index - b.index).map((step) => {
-                const plain = plainStep(step);
-                const stateWord = step.state === "done" ? "" : plainStepState(step.state);
+              {activity.map((row) => {
+                const stateWord = row.state === "done" ? "" : plainStepState(row.state);
                 return (
-                  <div class="step" key={step.index}>
+                  <div class="step" key={row.id}>
                     <span class="node">
-                      <Icon name={timelineIconForStep(step.tool, step.state)} size={16} />
+                      <Icon name={timelineIconForStep(row.tool, row.state)} size={16} />
                     </span>
-                    <div class="verb">{plain.summary}</div>
+                    <div class="verb">{row.summary}</div>
                     {stateWord ? <div class="tmeta">{stateWord}</div> : null}
                   </div>
                 );
               })}
             </div>
-            )
-          ) : (
-            <div class="muted mt12" style={{ fontSize: "13px" }}>Nothing running right now</div>
           )}
           {showLatest ? (
             <button type="button" id="toLatestBtn" onClick={() => scrollToLatest(true)}>

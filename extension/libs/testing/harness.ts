@@ -2,6 +2,7 @@ import { AuditLog, ApprovalBroker, PolicyEngine, RateLimiter, type PolicyConfig 
 import { ToolExecutor, createToolRegistry, type RuntimeSnapshot } from "../browser-engine/index.js";
 import type { ClientIdentity } from "../tool-contracts/index.js";
 import { MockBrowserContext, type MockContextOptions } from "./mock-context.js";
+import type { ActivityEvent } from "../activity.js";
 
 export const TEST_CLIENT: ClientIdentity = { id: "client_test", name: "Test Client", transport: "native", version: "1.0.0" };
 
@@ -12,6 +13,8 @@ export interface TestRuntimeOptions {
   rateLimit?: { capacity: number; refillPerSecond: number };
   now?: () => number;
   approvalTtlMs?: number;
+  /** Optional live-activity sink, forwarded to the executor. */
+  onActivity?: (event: ActivityEvent) => void;
 }
 
 export interface TestRuntime {
@@ -43,6 +46,6 @@ export function createTestRuntime(options: TestRuntimeOptions = {}): TestRuntime
     now: options.now,
   });
   const ctx = new MockBrowserContext(options.context);
-  const executor = new ToolExecutor({ registry, policy, approvals, audit, rateLimiter, runtime: options.runtime });
+  const executor = new ToolExecutor({ registry, policy, approvals, audit, rateLimiter, runtime: options.runtime, onActivity: options.onActivity });
   return { registry, policy, approvals, audit, rateLimiter, executor, ctx, client: TEST_CLIENT };
 }

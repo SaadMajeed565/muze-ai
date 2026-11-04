@@ -1520,8 +1520,17 @@ export class TaskRunner {
       // Phase 1: a plan with bounds but no stored approval does not
       // execute consequential steps until tasks.approvePlan succeeds.
       // Read-only/reversible-only plans may run: they need no approval
-      // under the current policy in the first place.
-      if (task.planBounds && !task.planApproval && task.steps.some((s) => this.isConsequential(s.tool))) {
+      // under the current policy in the first place. The Unrestricted
+      // policy mode is the exception: its promise is "every tool runs
+      // with no confirmation step", so the plan gate is skipped and
+      // the plan runs. The snapshot carries mode, not approvalMode
+      // (PolicySnapshot has no approvalMode field), so the gate keys
+      // on mode; Restricted keeps gating — its mode is "restricted"
+      // even though its approvalMode is also "never", because
+      // Restricted allows nothing consequential at all. A missing
+      // snapshot fails closed to gating.
+      const noPlanApprovalGate = current !== null && current.mode === "unrestricted";
+      if (!noPlanApprovalGate && task.planBounds && !task.planApproval && task.steps.some((s) => this.isConsequential(s.tool))) {
         task.status = "waiting_approval";
         task.pauseReason = "plan-approval-required";
         task.updatedAt = this.now();

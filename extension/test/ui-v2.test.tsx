@@ -278,7 +278,7 @@ describe("HomePage (reference)", () => {
     expect(text).toContain("Laptop Chrome");
     expect(text).toContain("Online");
     expect(text).toContain("3 tabs");
-    expect(text).toContain("Nothing running right now");
+    expect(text).toContain("Actions will appear here as Muze works");
     expect(text).not.toContain("Upgrade");
     // The kill switch lives in Me > Permissions and safety, not on Home.
     expect(Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Pause")).toBeUndefined();

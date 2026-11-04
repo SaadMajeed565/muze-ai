@@ -214,6 +214,11 @@ const executor = new ToolExecutor({
     bridgeStatus: manager?.isConnected() ? "connected" : "disconnected",
     connectedClients: manager?.clientCount() ?? 0,
   }),
+  onActivity: (event) => {
+    // Dashboard-only: activity never goes to gateway clients, so it is
+    // sent straight to extension pages, not through broadcastEvent.
+    chrome.runtime.sendMessage({ type: "muze/event", event }).catch(() => undefined);
+  },
 });
 
 /**

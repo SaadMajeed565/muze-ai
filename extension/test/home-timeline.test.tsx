@@ -45,6 +45,13 @@ function taskFixture(overrides: Record<string, unknown>): Record<string, unknown
   };
 }
 
+/** Captured chrome.runtime.onMessage listeners, so tests can deliver activity events. */
+const messageListeners: Array<(message: unknown) => void> = [];
+
+function emitActivity(event: { kind: "activity"; id: string; tool: string; summary: string; state: string; at: number }): void {
+  for (const fn of [...messageListeners]) fn({ type: "muze/event", event });
+}
+
 function stubTasks(tasks: Record<string, unknown>[]): void {
   vi.stubGlobal("chrome", {
     runtime: {
@@ -55,18 +62,66 @@ function stubTasks(tasks: Record<string, unknown>[]): void {
         }
         return { ok: false, error: "unknown" };
       },
+      onMessage: {
+        addListener: (fn: (message: unknown) => void) => {
+          messageListeners.push(fn);
+        },
+        removeListener: (fn: (message: unknown) => void) => {
+          const index = messageListeners.indexOf(fn);
+          if (index >= 0) messageListeners.splice(index, 1);
+        },
+      },
     },
   });
 }
 
-describe("HomePage browser-card timeline", () => {
+function home(): HTMLElement {
+  return mount(<HomePage state={state} busy={false} approvals={[]} onNavigate={() => {}} onRespond={() => {}} />);
+}
+
+describe("HomePage live activity feed", () => {
   afterEach(() => {
     if (root) render(null, root);
     root = null;
+    messageListeners.length = 0;
     vi.unstubAllGlobals();
   });
 
-  it("renders a running task's steps in the Home card timeline", async () => {
+  it("appends live activity rows in order and resolves running rows on completion", async () => {
+    stubTasks([]);
+    const container = home();
+    await flush();
+    emitActivity({ kind: "activity", id: "act_1", tool: "dom.click", summary: "Clicked", state: "running", at: 1 });
+    emitActivity({ kind: "activity", id: "act_2", tool: "screenshots.viewport", summary: "Took a screenshot", state: "running", at: 2 });
+    await flush();
+    const timeline = container.querySelector("#browserTimeline");
+    expect(timeline).toBeTruthy();
+    expect(timeline!.querySelectorAll(".step").length).toBe(2);
+    expect(timeline!.textContent).toContain("Clicked");
+    expect(timeline!.textContent).toContain("Took a screenshot");
+    expect(timeline!.querySelectorAll(".tmeta").length).toBe(2);
+    emitActivity({ kind: "activity", id: "act_1", tool: "dom.click", summary: "Clicked", state: "done", at: 3 });
+    await flush();
+    expect(timeline!.querySelectorAll(".step").length).toBe(2);
+    expect(timeline!.querySelectorAll(".tmeta").length).toBe(1);
+    expect(timeline!.querySelectorAll(".tmeta")[0].textContent).toBe("In progress");
+  });
+
+  it("caps the feed at 50 rows, keeping the most recent", async () => {
+    stubTasks([]);
+    const container = home();
+    await flush();
+    for (let i = 0; i < 55; i++) {
+      emitActivity({ kind: "activity", id: `act_${i}`, tool: "tabs.list", summary: `Action ${i}`, state: "running", at: i });
+    }
+    await flush();
+    const verbs = [...container.querySelectorAll("#browserTimeline .step .verb")].map((el) => el.textContent);
+    expect(verbs.length).toBe(50);
+    expect(verbs[0]).toBe("Action 5");
+    expect(verbs[verbs.length - 1]).toBe("Action 54");
+  });
+
+  it("plan steps no longer render in the Home card timeline", async () => {
     stubTasks([
       taskFixture({
         steps: [
@@ -75,21 +130,23 @@ describe("HomePage browser-card timeline", () => {
         ],
       }),
     ]);
-    const container = mount(<HomePage state={state} busy={false} approvals={[]} onNavigate={() => {}} onRespond={() => {}} />);
+    const container = home();
     await flush();
-    const timeline = container.querySelector("#browserTimeline");
-    expect(timeline).toBeTruthy();
-    expect(timeline!.querySelectorAll(".step").length).toBe(2);
-    expect(timeline!.textContent).toContain("Opened pricing page");
-    expect(timeline!.textContent).toContain("Clicked Features");
+    // The header still surfaces the running task's goal.
+    expect(container.textContent).toContain("Summarize pricing page");
+    // But the card body is the activity feed, not the plan.
+    expect(container.querySelector("#browserTimeline")).toBeNull();
+    expect(container.textContent).toContain("Actions will appear here as Muze works");
+    expect(container.textContent).not.toContain("Opened pricing page");
+    expect(container.textContent).not.toContain("Clicked Features");
   });
 
-  it("shows an honest empty state for a running task with no steps", async () => {
-    stubTasks([taskFixture({ steps: [] })]);
-    const container = mount(<HomePage state={state} busy={false} approvals={[]} onNavigate={() => {}} onRespond={() => {}} />);
+  it("shows the activity empty state when nothing has happened", async () => {
+    stubTasks([]);
+    const container = home();
     await flush();
     expect(container.querySelector("#browserTimeline")).toBeNull();
-    expect(container.textContent).toContain("Steps will appear here as the task runs.");
+    expect(container.textContent).toContain("Actions will appear here as Muze works");
   });
 
   it("does not surface paused tasks in the Home card (running/created only)", async () => {
@@ -101,9 +158,23 @@ describe("HomePage browser-card timeline", () => {
         ],
       }),
     ]);
-    const container = mount(<HomePage state={state} busy={false} approvals={[]} onNavigate={() => {}} onRespond={() => {}} />);
+    const container = home();
     await flush();
     expect(container.querySelector("#browserTimeline")).toBeNull();
-    expect(container.textContent).toContain("Nothing running right now");
+    expect(container.textContent).toContain("This browser");
+    expect(container.textContent).toContain("Actions will appear here as Muze works");
+  });
+
+  it("a failed activity row shows the failed state word", async () => {
+    stubTasks([]);
+    const container = home();
+    await flush();
+    emitActivity({ kind: "activity", id: "act_1", tool: "dom.click", summary: "Clicked", state: "failed", at: 1 });
+    await flush();
+    const timeline = container.querySelector("#browserTimeline");
+    expect(timeline).toBeTruthy();
+    expect(timeline!.querySelectorAll(".step").length).toBe(1);
+    expect(timeline!.textContent).toContain("Clicked");
+    expect(timeline!.querySelectorAll(".tmeta")[0].textContent).toBe("Didn't finish");
   });
 });
