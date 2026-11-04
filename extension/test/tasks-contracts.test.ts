@@ -235,6 +235,19 @@ describe("tasks.* contracts", () => {
     expect(byName.get("tasks.create")?.risk).toBe("reversible");
     expect(TasksCreateInputSchema.shape.goal).toBeDefined();
   });
+
+  it("requires the AI to call tasks.create for each task so it lands in the Tasks list", () => {
+    const byName = new Map(taskTools.map((t) => [t.name, t]));
+    const description = byName.get("tasks.create")?.description ?? "";
+    // The drill-down rule: task-like work must go through tasks.create,
+    // not direct calls only — pinned alongside the title guidance.
+    expect(description).toContain("Every task you undertake must be created with tasks.create");
+    expect(description).toContain("Tasks list");
+    expect(description).toContain("direct tool calls");
+    // Both rules live in the same description.
+    expect(description).toContain("rephrase");
+    expect(description).toContain("verbatim");
+  });
 });
 
 describe("tasks.* host dispatch", () => {

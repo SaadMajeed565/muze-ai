@@ -34,6 +34,14 @@ export interface ExecuteOptions {
    */
   internal?: boolean;
   /**
+   * Owning task for task-step executions, set only by the service
+   * worker's executeStep wiring from StepContext.taskId. Direct calls
+   * never set it. Carried onto the activity event (running and
+   * completion alike) so the day history can attribute the row to its
+   * task; it never affects policy, approval, or execution.
+   */
+  taskId?: string;
+  /**
    * Phase 1 canonicalisation (Tool Management Plan section 2.2), supplied
    * by the host protocol when `tool` is a unified tool that resolved to
    * one granular tool. `tool` still names the tool to execute (the
@@ -110,11 +118,19 @@ export class ToolExecutor {
    * must never break execution, and an absent listener is a no-op.
    * Returns the event id so a later completion resolves the same row.
    */
-  private emitActivity(tool: string, state: ActivityState, id: string | null = null): string | null {
+  private emitActivity(tool: string, state: ActivityState, id: string | null = null, taskId?: string): string | null {
     if (typeof this.deps.onActivity !== "function") return null;
     const eventId = id ?? `act_${(this.activityCounter += 1)}`;
     try {
-      this.deps.onActivity({ kind: "activity", id: eventId, tool, summary: activityVerb(tool), state, at: Date.now() });
+      this.deps.onActivity({
+        kind: "activity",
+        id: eventId,
+        tool,
+        summary: activityVerb(tool),
+        state,
+        at: Date.now(),
+        ...(taskId !== undefined ? { taskId } : {}),
+      });
     } catch {
       // Observability only; never fail the call for it.
     }
@@ -122,9 +138,9 @@ export class ToolExecutor {
   }
 
   /** Resolve a started row; a null id (no listener, or a nested/internal call) is a no-op. */
-  private endActivity(id: string | null, tool: string, state: "done" | "failed"): void {
+  private endActivity(id: string | null, tool: string, state: "done" | "failed", taskId?: string): void {
     if (id === null) return;
-    this.emitActivity(tool, state, id);
+    this.emitActivity(tool, state, id, taskId);
   }
 
   /**
@@ -289,7 +305,7 @@ export class ToolExecutor {
     // invokes are internal sub-steps of the parent call and stay silent,
     // as do internal housekeeping calls (flagged internal); dry runs
     // return before this point and never emit.
-    const activityId = options.nested || options.internal ? null : this.emitActivity(auditTool, "running");
+    const activityId = options.nested || options.internal ? null : this.emitActivity(auditTool, "running", null, options.taskId);
 
     const runtime = this.buildRuntime(options.client);
 
@@ -363,7 +379,7 @@ export class ToolExecutor {
         durationMs,
         details: withCalledAs({ code: toolError.code }),
       });
-      this.endActivity(activityId, auditTool, "failed");
+      this.endActivity(activityId, auditTool, "failed", options.taskId);
       throw ToolErrorException.is(error) ? error : new ToolErrorException(toolError.code, toolError.message);
     } finally {
       if (timer) clearTimeout(timer);
@@ -373,7 +389,7 @@ export class ToolExecutor {
     // 8. Validate output and bound size.
     const outputCheck = tool.output.safeParse(raw);
     if (!outputCheck.success) {
-      this.endActivity(activityId, auditTool, "failed");
+      this.endActivity(activityId, auditTool, "failed", options.taskId);
       throw new ToolErrorException("INTERNAL", `Tool ${tool.name} produced output that failed its schema`, {
         details: { issues: outputCheck.error.issues.map((i) => i.path.join(".")) },
       });
@@ -406,7 +422,7 @@ export class ToolExecutor {
       details: withCalledAs(undefined),
     });
 
-    this.endActivity(activityId, auditTool, "done");
+    this.endActivity(activityId, auditTool, "done", options.taskId);
     return { result: bounded, dryRun: false, durationMs };
   }
 

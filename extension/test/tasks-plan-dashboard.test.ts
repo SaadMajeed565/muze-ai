@@ -161,14 +161,23 @@ describe("TasksPage Phase 2 rendering", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows current step, failed list, browser session, and the final report on expand", async () => {
+  it("day detail lists goals and status; task detail keeps the final report but shows executed steps, not plan steps", async () => {
     const container = mount();
     await flush();
     await flush();
-    // List view shows goals and status, never tool tokens or step reasons.
-    expect(container.textContent).toContain("Click the form");
+    // Drill-down list: one day row (date + earliest task title), not
+    // the task rows — so only the day's first goal is on the list.
     expect(container.textContent).toContain("Organise tabs");
+    expect(container.textContent).not.toContain("Click the form");
     expect(container.textContent).not.toContain("dom.click");
+
+    const day = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Jan 1, 1970")) ?? null;
+    expect(day).not.toBeNull();
+    await act(() => {
+      day!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(container.textContent).toContain("Click the form");
 
     const title = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Organise tabs")) ?? null;
     expect(title).not.toBeNull();
@@ -185,9 +194,15 @@ describe("TasksPage Phase 2 rendering", () => {
     expect(container.textContent).not.toContain("dom.click");
   });
 
-  it("shows the outside-bounds reason in task detail", async () => {
+  it("task detail no longer surfaces plan-step outside-bounds reasons (executed steps only)", async () => {
     const container = mount();
     await flush();
+    await flush();
+    const day = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Jan 1, 1970")) ?? null;
+    expect(day).not.toBeNull();
+    await act(() => {
+      day!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
     const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Click the form")) ?? null;
     expect(row).not.toBeNull();
@@ -195,13 +210,23 @@ describe("TasksPage Phase 2 rendering", () => {
       row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(container.textContent).toContain("domain other.com is not in the approved domains");
+    // The reason lives on a plan step that never executed, so the
+    // executed-steps timeline does not show it (the sanitiser still
+    // carries it — see the handler test above).
+    expect(container.textContent).not.toContain("domain other.com is not in the approved domains");
     expect(container.textContent).not.toContain("dom.click");
+    expect(container.textContent).toContain("No steps recorded yet.");
   });
 
   it("sends muze/tasks.approvePlan after confirming", async () => {
     const container = mount();
     await flush();
+    await flush();
+    const day = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Jan 1, 1970")) ?? null;
+    expect(day).not.toBeNull();
+    await act(() => {
+      day!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
     const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Click the form")) ?? null;
     expect(row).not.toBeNull();

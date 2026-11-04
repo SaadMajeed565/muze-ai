@@ -59,7 +59,7 @@ function isActivityRow(value: unknown): value is ActivityRow {
   );
 }
 
-function isActivityRowArray(value: unknown): value is ActivityRow[] {
+export function isActivityRowArray(value: unknown): value is ActivityRow[] {
   return Array.isArray(value) && value.every(isActivityRow);
 }
 

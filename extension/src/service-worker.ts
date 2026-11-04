@@ -1,6 +1,7 @@
 import { REGISTRY_VERSION, UNIFIED_TOOL_NAMES, type BridgeEvent, type ToolDescriptor } from "../libs/tool-contracts/index.js";
 import { AuditLog, ApprovalBroker, PolicyEngine, RateLimiter } from "../libs/security/index.js";
 import { chromeLocalActivityBackend, createActivityStore } from "../libs/activity-store.js";
+import { chromeLocalActivityHistoryBackend, createActivityHistoryStore } from "../libs/activity-history.js";
 import { ChromeWorkingTabGroup, ToolExecutor, createToolRegistry } from "../libs/browser-engine/index.js";
 import { BridgeManager } from "./bridge-manager.js";
 import {
@@ -153,6 +154,7 @@ export const READ_ONLY_DASHBOARD_REQUEST_TYPES: ReadonlySet<string> = new Set([
   "muze/tasks.list",
   "muze/tasks.get",
   "muze/activity.list",
+  "muze/activity.history",
 ]);
 
 export function isConsequentialDashboardRequestType(type: string): boolean {
@@ -213,6 +215,15 @@ let gatewayAuthToken = "";
  */
 const activityStore = createActivityStore(chromeLocalActivityBackend());
 
+/**
+ * Day history for the Tasks page (chrome.storage.local, key
+ * "muze.activityHistory"). Same single-owner rule as the feed: the
+ * dashboard reads it only through the `muze/activity.history` route.
+ * Retention is 30 days (see libs/activity-history.ts); the feed's
+ * last-25 cap is unaffected.
+ */
+const activityHistoryStore = createActivityHistoryStore(chromeLocalActivityHistoryBackend());
+
 const executor = new ToolExecutor({
   registry,
   policy,
@@ -226,8 +237,11 @@ const executor = new ToolExecutor({
   onActivity: (event) => {
     // Persist first (service worker owns the stored feed; the dashboard
     // seeds from it on mount), then forward live. Both best-effort:
-    // neither may fail the tool call that produced the event.
+    // neither may fail the tool call that produced the event. The day
+    // history records the same event (same exclusions: internal,
+    // nested, dry-run, and blocked executions never reach this sink).
     void activityStore.record(event).catch(() => undefined);
+    void activityHistoryStore.record(event).catch(() => undefined);
     // Dashboard-only: activity never goes to gateway clients, so it is
     // sent straight to extension pages, not through broadcastEvent.
     chrome.runtime.sendMessage({ type: "muze/event", event }).catch(() => undefined);
@@ -329,6 +343,12 @@ function getTaskRunner(): TaskRunner {
         ctx: context,
         timeoutMs: ctx.timeoutMs,
         signal: ctx.signal,
+        // Task attribution for the activity timeline only: this step's
+        // executions carry the running task's id so task detail can
+        // show exactly this task's executed steps. Direct calls never
+        // pass taskId, so they stay standalone actions. This changes
+        // no policy, approval, or execution behavior.
+        taskId: ctx.taskId,
         // Plan approval is internal only: runner verified an active,
         // in-bounds plan approval (broker/dashboard/elicitation) before
         // setting this. It is never derived from MCP tool input, and
@@ -1370,6 +1390,13 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
       // muze/event rows; it never touches storage directly.
       const activity = await activityStore.list();
       return { ok: true, activity };
+    }
+    case "muze/activity.history": {
+      // Read-only snapshot of the day history (last 30 days). The Tasks
+      // page seeds from this on mount, then appends live muze/event
+      // activity rows; it never touches storage directly.
+      const activityHistory = await activityHistoryStore.list();
+      return { ok: true, activityHistory };
     }
     default:
       return { ok: false, error: "unknown_message" };

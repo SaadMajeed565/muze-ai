@@ -248,7 +248,7 @@ export const tasksCreate: ToolDefinition = {
   name: "tasks.create",
   title: "Create task",
   description:
-    "Create a durable multi-step task in the extension and, by default, start running it. Creating the task is reversible (it can be paused or cancelled); consequential steps inside the task still go through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves its steps. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title.",
+    "Create a durable multi-step task in the extension and, by default, start running it. Creating the task is reversible (it can be paused or cancelled); consequential steps inside the task still go through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves its steps. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title. Every task you undertake must be created with tasks.create so it appears in the user's Tasks list — if the work is a task, call tasks.create for it rather than doing it only through direct tool calls.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,

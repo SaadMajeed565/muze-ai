@@ -215,6 +215,7 @@ describe("handleTaskDashboardRequest", () => {
 describe("TasksPage", () => {
   let root: HTMLElement | null = null;
   let sendMessage: ReturnType<typeof vi.fn>;
+  let historyFixtures: Record<string, unknown>[];
 
   function mount(): HTMLElement {
     root = document.createElement("div");
@@ -233,7 +234,12 @@ describe("TasksPage", () => {
   }
 
   beforeEach(() => {
+    historyFixtures = [
+      { id: "h1", tool: "tabs.list", summary: "Checked tabs", state: "done", at: 1500, taskId: "task_1" },
+      { id: "h2", tool: "dom.click", summary: "Clicked", state: "done", at: 1600, taskId: "task_1" },
+    ];
     sendMessage = vi.fn(async (message: { type: string; taskId?: string }) => {
+      if (message.type === "muze/activity.history") return { ok: true, activityHistory: historyFixtures };
       const { port } = fakePort();
       // The page talks to the service worker; emulate the handler here
       // with the same fake port the handler tests use.
@@ -256,13 +262,25 @@ describe("TasksPage", () => {
     vi.restoreAllMocks();
   });
 
-  it("lists the running task first, then newest first, with step X of Y progress and expands to steps", async () => {
+  it("day list shows one row per day; day detail lists the running task first, then newest first, and task detail shows executed steps", async () => {
     const container = mount();
     await flush();
     await flush();
 
-    expect(container.textContent).toContain("Fill the test form");
+    // Both fixtures fall on Jan 1, 1970, so the list shows one day row:
+    // the date plus the earliest task's title — not the task rows.
+    expect(container.textContent).toContain("Jan 1, 1970");
     expect(container.textContent).toContain("Research 10 pages and organise tabs");
+    expect(container.textContent).not.toContain("Fill the test form");
+
+    const day = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Jan 1, 1970")) ?? null;
+    expect(day).not.toBeNull();
+    await act(() => {
+      day!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(container.textContent).toContain("Fill the test form");
     // Reference order: the running task sorts first, then newest first —
     // so the running createdAt:1000 task renders before the paused
     // createdAt:3000 one.
@@ -283,15 +301,24 @@ describe("TasksPage", () => {
       title!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(container.textContent).toContain("3 tabs listed");
+    // Task detail shows executed steps from the history, not plan
+    // steps: tool-name summaries only, never plan input/output text.
+    expect(container.textContent).toContain("Checked tabs");
     expect(container.textContent).not.toContain("tabs.list");
     expect(container.textContent).toContain("Step 1 of 2");
-    expect(container.textContent).toContain("read first page");
+    expect(container.textContent).not.toContain("3 tabs listed");
+    expect(container.textContent).not.toContain("read first page");
   });
 
   it("shows the pause reason in task detail", async () => {
     const container = mount();
     await flush();
+    await flush();
+    const day = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Jan 1, 1970")) ?? null;
+    expect(day).not.toBeNull();
+    await act(() => {
+      day!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
     const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Fill the test form")) ?? null;
     expect(row).not.toBeNull();
@@ -314,6 +341,12 @@ describe("TasksPage", () => {
   it("sends pause on Pause and confirms before Cancel", async () => {
     const container = mount();
     await flush();
+    await flush();
+    const day = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("Jan 1, 1970")) ?? null;
+    expect(day).not.toBeNull();
+    await act(() => {
+      day!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
     const row = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Research 10 pages and organise tabs")) ?? null;
     expect(row).not.toBeNull();
@@ -453,7 +486,11 @@ describe("Phase D TasksPage push reload", () => {
     await flush();
     await flush();
     expect(listeners.length).toBe(1);
-    expect(root.textContent).toContain("Fill the test form");
+    // Drill-down list: one day row (date + earliest task title), not
+    // the task rows themselves.
+    expect(root.textContent).toContain("Jan 1, 1970");
+    expect(root.textContent).toContain("Research 10 pages and organise tabs");
+    expect(root.textContent).not.toContain("Fill the test form");
 
     const baseline = sendMessage.mock.calls.length;
     listeners[0]!({ type: "muze/event" });

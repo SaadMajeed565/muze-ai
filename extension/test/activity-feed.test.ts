@@ -278,3 +278,47 @@ describe("executor activity emission", () => {
     expect(events[0].id).toBe(events[1].id);
   });
 });
+
+describe("task attribution", () => {
+  it("a task-step execution carries taskId on start and completion; a direct call carries none", async () => {
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({
+      policy: { mode: "unrestricted" },
+      onActivity: (e) => events.push(e),
+    });
+    await rt.executor.execute({
+      tool: "tabs.list",
+      input: {},
+      client: readClient,
+      ctx: rt.ctx,
+      taskId: "task_abc",
+    });
+    expect(events).toHaveLength(2);
+    expect(events[0].id).toBe(events[1].id);
+    expect(events[0].taskId).toBe("task_abc");
+    expect(events[1].taskId).toBe("task_abc");
+
+    const direct: ActivityEvent[] = [];
+    const rt2 = createTestRuntime({
+      policy: { mode: "unrestricted" },
+      onActivity: (e) => direct.push(e),
+    });
+    await rt2.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt2.ctx });
+    expect(direct).toHaveLength(2);
+    expect("taskId" in direct[0]).toBe(false);
+    expect("taskId" in direct[1]).toBe(false);
+  });
+
+  it("applyActivityEvent keeps taskId when a start resolves, and mergeActivitySeed keeps it on seeded rows", () => {
+    const start: ActivityEvent = { kind: "activity", id: "a1", tool: "dom.click", summary: "Clicked", state: "running", at: 10, taskId: "task_9" };
+    const done: ActivityEvent = { ...start, state: "done", at: 20 };
+    const rows = applyActivityEvent(applyActivityEvent([], start), done);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].taskId).toBe("task_9");
+    expect(rows[0].state).toBe("done");
+    const seeded = mergeActivitySeed([], [rows[0]]);
+    expect(seeded[0].taskId).toBe("task_9");
+    const direct = applyActivityEvent([], { kind: "activity", id: "a2", tool: "dom.click", summary: "Clicked", state: "done", at: 30 });
+    expect("taskId" in direct[0]).toBe(false);
+  });
+});

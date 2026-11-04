@@ -99,6 +99,7 @@ export type DashboardRequest =
   | { type: "muze/tasks.cancel"; taskId: string }
   | { type: "muze/tasks.approvePlan"; taskId: string; bounds?: unknown }
   | { type: "muze/activity.list" }
+  | { type: "muze/activity.history" }
   | { type: "muze/browsers/list" }
   | { type: "muze/browsers/refresh" }
   | { type: "muze/browsers/set-default"; sessionId: string }
@@ -159,6 +160,8 @@ export interface DashboardResponse {
   task?: TaskView;
   /** Persisted live-activity rows, present ONLY in response to "muze/activity.list". Tool-name-only summaries, never inputs/outputs. */
   activity?: ActivityRow[];
+  /** Day history rows (last 30 days), present ONLY in response to "muze/activity.history". Same tool-name-only summaries. */
+  activityHistory?: ActivityRow[];
   /** Present ONLY in response to "muze/browsers/list". */
   browsers?: BrowsersDashboard;
   /**

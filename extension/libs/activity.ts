@@ -24,6 +24,13 @@ export interface ActivityRow {
   summary: string;
   state: ActivityState;
   at: number;
+  /**
+   * Owning task for executions that ran as a task step, set only by the
+   * service worker's executeStep wiring (which carries StepContext.taskId).
+   * Direct tool calls carry no taskId — they are standalone actions.
+   * Absent on rows recorded before task attribution landed.
+   */
+  taskId?: string;
 }
 
 export interface ActivityEvent extends ActivityRow {
@@ -203,6 +210,7 @@ export function applyActivityEvent(
     summary: event.summary,
     state: event.state,
     at: event.at,
+    ...(event.taskId !== undefined ? { taskId: event.taskId } : {}),
   };
   const index = rows.findIndex((r) => r.id === row.id);
   const next = index >= 0 ? rows.map((r, i) => (i === index ? row : r)) : [...rows, row];

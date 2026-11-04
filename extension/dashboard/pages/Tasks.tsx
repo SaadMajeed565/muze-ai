@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { sanitizeTaskView, type TaskStatus, type TaskView } from "../../src/task-dashboard.js";
+import type { ActivityEvent, ActivityRow } from "../../libs/activity.js";
 import type { BrowsersDashboard } from "../../src/messages.js";
 import { sendRequest } from "../logic.js";
 import {
+  dayRowPreview,
+  groupTasksAndActionsByDay,
   plainFinalSummary,
   plainPauseReason,
-  plainStep,
+  plainStepState,
   resolveAppName,
   stripToolTokens,
+  taskExecutedSteps,
   taskProgress,
   taskStatusWord,
   timelineIconForStep,
@@ -68,8 +72,12 @@ export interface TasksPageProps {
  * chips (no Running chip — at most one task runs, it sorts first and
  * Home's card surfaces it), borderless rows with the progress bar
  * inside, honest progress text (fixed plans "Step X of N", unknown
- * totals never invented), and a vertical timeline in task detail,
- * newest first. Failed is a real status, red throughout.
+ * totals never invented). Drill-down: the list shows one row per day
+ * (date + that day's first task title, or first action summary for
+ * action-only days); a day opens its tasks plus its standalone
+ * actions; a task opens its executed steps, chronological
+ * oldest-first, from the day history. Failed is a real status, red
+ * throughout.
  */
 export function TasksPage({
   busy = false,
@@ -77,9 +85,11 @@ export function TasksPage({
   onSelectTask,
 }: TasksPageProps): preact.JSX.Element {
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
+  const [history, setHistory] = useState<ActivityRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [localSelected, setLocalSelected] = useState<string | null>(null);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [browsers, setBrowsers] = useState<BrowsersDashboard | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "failed">("all");
@@ -101,14 +111,58 @@ export function TasksPage({
     }
   }, []);
 
+  const loadHistory = useCallback(async (): Promise<void> => {
+    const response = await sendRequest({ type: "muze/activity.history" });
+    const wire = response as unknown as { activityHistory?: unknown };
+    if (response.ok && Array.isArray(wire.activityHistory)) {
+      setHistory(
+        (wire.activityHistory as ActivityRow[]).filter(
+          (row) =>
+            row &&
+            typeof row.id === "string" &&
+            typeof row.tool === "string" &&
+            typeof row.summary === "string" &&
+            (row.state === "running" || row.state === "done" || row.state === "failed") &&
+            typeof row.at === "number",
+        ),
+      );
+    } else {
+      // History is additive: a missing or failed fetch must never block
+      // the task list or its empty state; the next event or
+      // visibility-show retries it.
+      setHistory([]);
+    }
+  }, []);
+
   useEffect(() => {
     void load();
+    void loadHistory();
     let cancelled = false;
     void sendRequest({ type: "muze/browsers/list" }).then((response) => {
       if (!cancelled && response.ok && response.browsers) setBrowsers(response.browsers);
     });
-    const onEvent = (message: { type?: string }): void => {
-      if (message?.type === "muze/event" || message?.type === "uabb/event") void load();
+    const onEvent = (message: { type?: string; event?: ActivityEvent }): void => {
+      if (message?.type === "muze/event" || message?.type === "uabb/event") {
+        void load();
+        // Live-append activity rows (like Home) instead of refetching
+        // the whole history on every action.
+        if (message.event?.kind === "activity") {
+          const event = message.event;
+          setHistory((rows) => {
+            if (rows === null) return rows;
+            const row: ActivityRow = {
+              id: event.id,
+              tool: event.tool,
+              summary: event.summary,
+              state: event.state,
+              at: event.at,
+              ...(event.taskId !== undefined ? { taskId: event.taskId } : {}),
+            };
+            const index = rows.findIndex((r) => r.id === row.id);
+            return index >= 0 ? rows.map((r, i) => (i === index ? row : r)) : [...rows, row];
+          });
+        }
+      }
     };
     const onMessage = typeof chrome === "undefined" ? undefined : chrome?.runtime?.onMessage;
     if (onMessage?.addListener) onMessage.addListener(onEvent);
@@ -125,6 +179,7 @@ export function TasksPage({
     const onVisibility = (): void => {
       if (document.visibilityState === "visible") {
         void load();
+        void loadHistory();
         restart();
       } else {
         clearInterval(timer);
@@ -138,7 +193,7 @@ export function TasksPage({
       document.removeEventListener("visibilitychange", onVisibility);
       if (onMessage?.removeListener) onMessage.removeListener(onEvent);
     };
-  }, [load]);
+  }, [load, loadHistory]);
 
   const act = async (task: TaskView, action: "pause" | "resume" | "cancel" | "approvePlan"): Promise<void> => {
     if (action === "cancel") {
@@ -197,14 +252,66 @@ export function TasksPage({
     return [...result].sort((a, b) => Number(isRunning(b.status)) - Number(isRunning(a.status)) || b.createdAt - a.createdAt);
   }, [tasks, query, statusFilter]);
 
+  // Standalone actions only: rows attributed to a task (taskId set)
+  // belong to that task's detail, never to a day's standalone list,
+  // so a task's steps are never duplicated across the drill-down.
+  // A task's steps executed on a later day still belong to the task
+  // (its creation day's section does not gain them); they surface in
+  // the task's own detail, not as that later day's content.
+  const standaloneHistory = useMemo(() => (history ?? []).filter((row) => !row.taskId), [history]);
+
+  // Date sections: tasks first in their list order, then that day's
+  // standalone action rows newest first. The search filters tasks
+  // only (it says "tasks and steps"); the chip filters both tasks
+  // and actions. A day row appears when its section holds a matching
+  // task or a matching standalone action.
+  const sections = useMemo(
+    () => groupTasksAndActionsByDay(filtered, standaloneHistory, statusFilter),
+    [filtered, standaloneHistory, statusFilter],
+  );
+
+  const daySection = selectedDay ? (sections.find((section) => section.key === selectedDay) ?? null) : null;
+
   const selected = tasks?.find((task) => task.id === selectedId) ?? null;
+
+  const renderTaskRow = (task: TaskView): preact.JSX.Element => {
+    const progress = taskProgress(task.doneSteps.length, task.totalSteps, task.doneSteps.length);
+    return (
+      <button type="button" class="row" key={task.id} onClick={() => select(task.id)} style={{ display: "block", borderBottom: "none" }}>
+        <span class="between">
+          <span>
+            <span class="name">{task.goal || "Task"}</span>
+            <br />
+            <span class="meta">
+              {appName(task)} · {progress.text}
+            </span>
+          </span>
+          <span class={"status " + statusClass(task.status)}>{taskStatusWord(task.status)}</span>
+        </span>
+        <div class="progress" style={{ margin: "10px 0 2px" }}>
+          <i class={progress.indeterminate ? "indet" : ""} style={{ width: `${progress.percent}%` }} />
+        </div>
+      </button>
+    );
+  };
+
+  const actionTime = (at: number): string => {
+    try {
+      return new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    } catch {
+      return "";
+    }
+  };
 
   if (selected) {
     const taskBusy = busy || busyId === selected.id;
     const pause = plainPauseReason(selected.pauseReason);
     const name = browserName(selected.browserSessionId);
     const progress = taskProgress(selected.doneSteps.length, selected.totalSteps, selected.doneSteps.length);
-    const steps = [...selected.steps].sort((a, b) => b.index - a.index).map(plainStep);
+    // Executed steps only, from the day history, chronological
+    // oldest-first. A plan step that never executed has no history
+    // row and never appears here; only taken steps show.
+    const executed = taskExecutedSteps(history ?? [], selected.id);
     return (
       <div class="ui-page detail-page">
         <div class="card">
@@ -244,22 +351,26 @@ export function TasksPage({
         {pause && (selected.status === "paused" || selected.status === "waiting_approval") ? <p class="detail-note">{pause}</p> : null}
 
         <h2 class="sec">Activity · vertical timeline</h2>
-        {steps.length === 0 ? (
-          <EmptyLine text="No steps recorded yet." />
+        {executed.length === 0 ? (
+          <div>
+            <EmptyLine text="No steps recorded yet." />
+            {selected.steps.some((step) => step.state === "done") ? (
+              <p class="detail-note">Steps taken before this update don't appear here.</p>
+            ) : null}
+          </div>
         ) : (
           <div class="tl">
-            {steps.map((step) => {
-              const raw = selected.steps.find((item) => item.index === step.number - 1);
-              return (
-                <div class="step" key={step.number}>
-                  <span class="node">
-                    <Icon name={timelineIconForStep(raw?.tool, raw?.state ?? "")} size={16} />
-                  </span>
-                  <div class="verb">{step.summary}</div>
-                  <div class="tmeta">{raw?.outsideBoundsReason || step.state}</div>
+            {executed.map((row) => (
+              <div class="step" key={row.id}>
+                <span class="node">
+                  <Icon name={timelineIconForStep(row.tool, row.state)} size={16} />
+                </span>
+                <div class="verb">{row.summary}</div>
+                <div class="tmeta">
+                  {row.state === "done" ? actionTime(row.at) : `${plainStepState(row.state)} · ${actionTime(row.at)}`}
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
         )}
 
@@ -299,6 +410,38 @@ export function TasksPage({
     );
   }
 
+  // Day detail: that day's tasks (current order) plus its standalone
+  // actions newest first. Task-attributed rows never appear here —
+  // they belong to their task's detail. Back returns to the day list;
+  // the AppBar back from a task's detail returns here, because the
+  // selected day survives task selection.
+  if (daySection) {
+    return (
+      <div class="ui-page detail-page">
+        <Button variant="ghost" size="sm" icon="arrow-left" onClick={() => setSelectedDay(null)}>
+          Back
+        </Button>
+        <h2 class="sec">{daySection.label}</h2>
+        {daySection.tasks.map((task) => renderTaskRow(task))}
+        {daySection.actions.length > 0 ? (
+          <div class="tl">
+            {daySection.actions.map((row) => (
+              <div class="step" key={row.id}>
+                <span class="node">
+                  <Icon name={timelineIconForStep(row.tool, row.state)} size={16} />
+                </span>
+                <div class="verb">{row.summary}</div>
+                <div class="tmeta">
+                  {row.state === "done" ? actionTime(row.at) : `${plainStepState(row.state)} · ${actionTime(row.at)}`}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <Page title="Tasks" subtitle="What your AI app is doing, newest first.">
       <div class="page-controls">
@@ -325,34 +468,29 @@ export function TasksPage({
 
       {error ? <ErrorState message={error} onRetry={() => void load()} /> : null}
 
-      {tasks === null ? (
+      {tasks === null || (tasks.length === 0 && history === null) ? (
         <SectionSkeleton />
-      ) : tasks.length === 0 ? (
+      ) : tasks.length === 0 && standaloneHistory.length === 0 ? (
         <EmptyLine text="No tasks yet." />
-      ) : filtered.length === 0 ? (
+      ) : sections.length === 0 ? (
         <EmptyLine text="No tasks match your search." />
       ) : (
         <div>
-          {filtered.map((task) => {
-            const progress = taskProgress(task.doneSteps.length, task.totalSteps, task.doneSteps.length);
-            return (
-              <button type="button" class="row" key={task.id} onClick={() => select(task.id)} style={{ display: "block", borderBottom: "none" }}>
-                <span class="between">
-                  <span>
-                    <span class="name">{task.goal || "Task"}</span>
-                    <br />
-                    <span class="meta">
-                      {appName(task)} · {progress.text}
-                    </span>
-                  </span>
-                  <span class={"status " + statusClass(task.status)}>{taskStatusWord(task.status)}</span>
-                </span>
-                <div class="progress" style={{ margin: "10px 0 2px" }}>
-                  <i class={progress.indeterminate ? "indet" : ""} style={{ width: `${progress.percent}%` }} />
-                </div>
-              </button>
-            );
-          })}
+          {sections.map((section) => (
+            <button
+              type="button"
+              class="row"
+              key={section.key}
+              onClick={() => setSelectedDay(section.key)}
+              style={{ display: "block", borderBottom: "none" }}
+            >
+              <span>
+                <span class="name">{section.label}</span>
+                <br />
+                <span class="meta">{dayRowPreview(section.tasks, section.actions)}</span>
+              </span>
+            </button>
+          ))}
         </div>
       )}
     </Page>
