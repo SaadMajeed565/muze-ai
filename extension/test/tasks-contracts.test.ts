@@ -221,6 +221,20 @@ describe("tasks.* contracts", () => {
     expect(byName.get("tasks.approvePlan")?.requiresApproval).toBe(false);
     for (const tool of taskTools) expect(tool.category).toBe("workflows");
   });
+
+  it("requires tasks.create titles to be concise AI rephrasings, never the user's prompt verbatim", () => {
+    const byName = new Map(taskTools.map((t) => [t.name, t]));
+    const description = byName.get("tasks.create")?.description ?? "";
+    // The displayed task title is the goal field; the client writes it,
+    // so the rule lives in this description. Pin the guidance itself:
+    // a rephrase requirement, a verbatim ban, and one good example.
+    expect(description).toContain("rephrase");
+    expect(description).toContain("verbatim");
+    expect(description).toContain("Screenshot the Muze AI repo");
+    // Description text only: no parameter or behavior change.
+    expect(byName.get("tasks.create")?.risk).toBe("reversible");
+    expect(TasksCreateInputSchema.shape.goal).toBeDefined();
+  });
 });
 
 describe("tasks.* host dispatch", () => {
