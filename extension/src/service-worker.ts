@@ -332,7 +332,7 @@ function getTaskRunner(): TaskRunner {
   taskRunner = new TaskRunner({
     store,
     // Automatic working tabs: a task's tabs join the "Muze AI" group
-    // while it runs, and are ungrouped (left open) when it ends.
+    // while it runs, and stay grouped when it ends.
     workingGroup: new ChromeWorkingTabGroup(context),
     executeStep: async (tool, input, ctx) => {
       const result = await executor.execute({

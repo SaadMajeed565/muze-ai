@@ -184,8 +184,9 @@ export interface RunnerDeps {
    * touches is moved into the working group, and finish() is called
    * exactly once when the task reaches a terminal status (done,
    * failed, partial, cancelled) — never on pause or waiting-approval,
-   * so a resumed task keeps its group. finish() ungroups the tabs
-   * and leaves them open; it never closes a tab.
+   * so a resumed task keeps its group. finish() only clears the
+   * task's tracking; the tabs stay in the group, and it never
+   * closes a tab.
    */
   workingGroup?: WorkingTabGroupLike;
   executeCompensation?: (step: TaskStep) => Promise<void>;
@@ -1268,7 +1269,7 @@ export class TaskRunner {
       decision: "cancelled",
       outcome: "success",
     });
-    // Cancelled is terminal: ungroup, keep tabs open.
+    // Cancelled is terminal: finish tracking, tabs stay grouped.
     await this.finishWorkingGroup(id);
     return toTaskView(saved);
   }
@@ -1370,7 +1371,7 @@ export class TaskRunner {
       this.refreshSummary(task);
       this.setFinalReport(task);
       // Done outside the run loop (for example via resolveUnknown):
-      // ungroup, keep tabs open.
+      // finish tracking, tabs stay grouped.
       await this.finishWorkingGroup(task.id);
     } else if (task.status !== "done") {
       task.status = "paused";
@@ -1440,9 +1441,9 @@ export class TaskRunner {
   /**
    * Run loop entry point. The inner loop returns every outcome
    * (paused, waiting, done, failed, partial, cancelled); only a
-   * terminal outcome ungroups the task's working tabs, and the
-   * tabs are always left open. A paused or waiting task keeps its
-   * group, so a resume continues visibly in the same group.
+   * terminal outcome finishes the task's working-group tracking,
+   * and the tabs always stay grouped. A paused or waiting task
+   * keeps its group, so a resume continues visibly in the same group.
    */
   async runTask(id: string, clientId: string, browserSessionId?: string): Promise<TaskView> {
     const view = await this.runTaskInner(id, clientId, browserSessionId);

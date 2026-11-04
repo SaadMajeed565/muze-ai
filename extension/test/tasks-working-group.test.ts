@@ -1,7 +1,7 @@
 /**
  * TaskRunner + working-group integration: a task's tabs are
- * grouped while it runs and ungrouped (left open) when it ends,
- * but NOT when it merely pauses.
+ * grouped while it runs and stay grouped when it ends,
+ * but tracking is NOT finished when it merely pauses.
  */
 import { describe, expect, it } from "vitest";
 import { TaskRunner, createMemoryTaskStore, type PolicySnapshot } from "../libs/tasks/index.js";
@@ -40,7 +40,7 @@ function makeRunner(group: RecordingGroup) {
 }
 
 describe("TaskRunner working group", () => {
-  it("ungroups on done and keeps the group on pause", async () => {
+  it("finishes tracking on done and keeps the group on pause", async () => {
     const group = new RecordingGroup();
     const runner = makeRunner(group);
     const done = await runner.createTask(
@@ -98,7 +98,7 @@ describe("TaskRunner working group", () => {
     }
   });
 
-  it("ungroups on cancel", async () => {
+  it("finishes tracking on cancel", async () => {
     const group = new RecordingGroup();
     const runner = makeRunner(group);
     const created = await runner.createTask(

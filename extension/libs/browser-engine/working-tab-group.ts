@@ -4,23 +4,25 @@ import type { BrowserContext } from "./context.js";
  * The visible "Muze is working" tab group, in the style of Claude's
  * working tabs.
  *
- * Behaviour, as the user chose it:
+ * Behaviour, as the user chose it (2026-11-04, reversing the
+ * 2026-10-28 "ungroup when done" choice):
  * - Tabs a task touches are moved into a group titled "Muze AI".
- * - When the task ends (done, failed, partial, or cancelled) the tabs
- *   are ungrouped again and left OPEN. The group is never used to
- *   close anything.
- * - A tab that already belonged to another group is restored to that
- *   group, not just left ungrouped. A tab with no group is ungrouped.
+ * - When the task ends (done, failed, partial, or cancelled) the
+ *   tabs STAY in the "Muze AI" group. Nothing is ungrouped and
+ *   nothing is restored: a tab that already belonged to another
+ *   group stays in the "Muze AI" group after the task ends. The
+ *   group is never used to close anything.
  *
  * Grouping is best-effort and never fails a task step: a tab that was
  * closed, or a grouping call that throws, is skipped, and finish()
- * still tries every other tracked tab. A service-worker restart loses
+ * still clears the tracking. A service-worker restart loses
  * the in-memory tracking, which is safe: the tabs simply stay in
  * whatever group they were in, and the next task run re-tracks the
  * tabs it touches.
  *
  * One instance is shared across tasks, so tracking is keyed by
- * task id: finishing one task must never ungroup another task's tabs.
+ * task id: finishing one task only clears its own tracking and
+ * never touches another task's tabs.
  */
 export const WORKING_TAB_GROUP_TITLE = "Muze AI";
 export const WORKING_TAB_GROUP_COLOR = "purple";
@@ -31,7 +33,7 @@ export interface WorkingTabGroup {
   trackedTabIds(taskId: string): number[];
 }
 
-type TabGroupContext = Pick<BrowserContext, "getTab" | "groupTabs" | "ungroupTabs">;
+type TabGroupContext = Pick<BrowserContext, "getTab" | "groupTabs">;
 
 interface TrackedTask {
   groupId: number | null;
@@ -65,7 +67,8 @@ export class ChromeWorkingTabGroup implements WorkingTabGroup {
       return;
     }
     // Already in this task's Muze group (for example after a resume):
-    // there is no earlier group to restore, so record "no group".
+    // record "no group" — the original is no longer used, since
+    // finish() keeps every tab grouped and restores nothing.
     if (tracked.groupId !== null && originalGroupId === tracked.groupId) {
       tracked.tabs.set(tabId, -1);
       return;
@@ -86,21 +89,10 @@ export class ChromeWorkingTabGroup implements WorkingTabGroup {
   }
 
   async finish(taskId: string): Promise<void> {
-    const tracked = this.tasks.get(taskId);
-    if (!tracked) return;
+    // The group persists after the task ends (user choice 2026-11-04):
+    // finishing only clears this task's tracking. Tabs stay in the
+    // "Muze AI" group, exactly as they were — nothing is ungrouped,
+    // nothing is restored to an earlier group, nothing is closed.
     this.tasks.delete(taskId);
-    for (const [tabId, originalGroupId] of tracked.tabs) {
-      try {
-        if (originalGroupId >= 0 && originalGroupId !== tracked.groupId) {
-          await this.ctx.groupTabs([tabId], { groupId: originalGroupId });
-        } else {
-          await this.ctx.ungroupTabs([tabId]);
-        }
-      } catch {
-        // Tab closed since tracking, or its group is gone: the tab
-        // itself is untouched, which is the only promise that matters.
-        continue;
-      }
-    }
   }
 }
