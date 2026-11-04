@@ -26,19 +26,37 @@ function disconnectedBridge(): GatewayBridge {
 }
 
 describe("tasks prominence in initialize + ListTools", () => {
-  test("initialize instructions lead with the IMPORTANT must-create rule", () => {
-    expect(MCP_INSTRUCTIONS.startsWith("IMPORTANT: Every task you undertake must be created with tasks.create")).toBe(true);
+  test("initialize instructions weave tasks.create into the workflow, with no top banner", () => {
+    // The banner is gone: the rule lives inside the workflow sections,
+    // not as a standalone paragraph the client can skim past.
+    expect(MCP_INSTRUCTIONS.startsWith("You are an expert agentic browser operator")).toBe(true);
+    expect(MCP_INSTRUCTIONS).not.toContain("IMPORTANT: Every task you undertake must be created with tasks.create");
+    // Core agentic loop: task creation is step 1 of how work runs.
+    expect(MCP_INSTRUCTIONS).toContain("Brief and create the task");
+    expect(MCP_INSTRUCTIONS).toContain("call `tasks.create`");
+    // Execution discipline: no bare multi-step direct calls.
+    expect(MCP_INSTRUCTIONS).toContain("Multi-step work never runs as bare direct calls");
+    expect(MCP_INSTRUCTIONS).toContain("Never chain observe → act → navigate → act directly");
+    // Direct-vs-task: direct is ONLY a single read-only observation;
+    // the old "1-3 steps" allowance is gone entirely.
+    expect(MCP_INSTRUCTIONS).toContain("Decide direct vs task");
+    expect(MCP_INSTRUCTIONS).toContain("single read-only observation");
+    expect(MCP_INSTRUCTIONS).not.toContain("1-3 steps");
+    expect(MCP_INSTRUCTIONS).not.toContain("Decide direct vs plan");
+    // The brief becomes the task's plan.
+    expect(MCP_INSTRUCTIONS).toContain("The brief becomes the task's plan");
+    // Assembled instructions carry the same weave, still starting with
+    // the agent line rather than a banner.
     const assembled = buildLayeredInstructions({
       mode: "act",
       visibleDescriptors: filterDescriptorsByMode(SEARCH_DESCRIPTORS, "act"),
       environment: { browserConnected: false, clientType: "unknown", scopePresent: true, discoveredCount: 0 },
       discovered: [],
     });
-    // Layer 1 is first in the assembly, so the rule is the first thing
-    // the client reads at session start.
-    expect(assembled.startsWith("IMPORTANT: Every task you undertake must be created with tasks.create")).toBe(true);
-    expect(assembled).toContain("Tasks list");
-    expect(assembled).toContain("direct tool calls");
+    expect(assembled.startsWith("You are an expert agentic browser operator")).toBe(true);
+    expect(assembled).not.toContain("IMPORTANT: Every task you undertake must be created with tasks.create");
+    expect(assembled).toContain("Brief and create the task");
+    expect(assembled).toContain("Decide direct vs task");
   });
 
   test("orderToolsTasksFirst puts tasks.* first with tasks.create first, set unchanged", () => {

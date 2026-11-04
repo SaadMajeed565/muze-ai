@@ -236,25 +236,26 @@ describe("tasks.* contracts", () => {
     expect(TasksCreateInputSchema.shape.goal).toBeDefined();
   });
 
-  it("requires the AI to call tasks.create for each task so it lands in the Tasks list", () => {
+  it("describes tasks.create as a durable task whose steps still go through approval gates", () => {
     const byName = new Map(taskTools.map((t) => [t.name, t]));
     const description = byName.get("tasks.create")?.description ?? "";
-    // The drill-down rule: task-like work must go through tasks.create,
-    // not direct calls only — pinned alongside the title guidance.
-    expect(description).toContain("Every task you undertake must be created with tasks.create");
-    expect(description).toContain("Tasks list");
-    expect(description).toContain("direct tool calls");
-    // Both rules live in the same description.
+    // The must-create banner is gone from the description: the rule now
+    // lives woven into the session instructions, not as a lead sentence.
+    expect(description.startsWith("IMPORTANT")).toBe(false);
+    expect(description.startsWith("Create a durable multi-step task")).toBe(true);
+    expect(description).toContain("start running it");
+    expect(description).toContain("reversible");
+    expect(description).toContain("never pre-approves");
+    // Title guidance intact alongside it.
     expect(description).toContain("rephrase");
     expect(description).toContain("verbatim");
   });
 
-  it("leads the tasks.create description with an IMPORTANT must-create marker", () => {
+  it("keeps the concise rephrased-title rule with its good/bad example, without a banner lead", () => {
     const byName = new Map(taskTools.map((t) => [t.name, t]));
     const description = byName.get("tasks.create")?.description ?? "";
-    // Prominence: the must-create rule is the first thing the client
-    // reads, marked IMPORTANT — title guidance still intact below it.
-    expect(description.startsWith("IMPORTANT: Every task you undertake must be created with tasks.create")).toBe(true);
+    // No banner lead: the description opens on the task itself.
+    expect(description.startsWith("IMPORTANT: Every task you undertake must be created with tasks.create")).toBe(false);
     expect(description).toContain("rephrase");
     expect(description).toContain("verbatim");
     expect(description).toContain("Screenshot the Muze AI repo");
