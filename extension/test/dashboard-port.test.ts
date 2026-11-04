@@ -250,7 +250,8 @@ describe("timeline family icons", () => {
       // Waits.
       "dom.waitFor": "clock", wait: "clock",
       // Task management.
-      "tasks.create": "checklist", "tasks.get": "checklist",
+      "tasks.create": "checklist", "tasks.appendSteps": "checklist",
+      "tasks.get": "checklist",
       "tasks.list": "checklist", "tasks.pause": "checklist",
       "tasks.resume": "checklist", "tasks.cancel": "checklist",
       "tasks.approvePlan": "checklist",

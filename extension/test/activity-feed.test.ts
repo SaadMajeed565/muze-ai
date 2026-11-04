@@ -227,6 +227,28 @@ describe("executor activity emission", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("status tools execute and return normally but emit nothing", async () => {
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    // browser.info / browser.capabilities answer "is Muze alive /
+    // which browser is this" — a connection check, not work — so they
+    // leave no feed/history row. The calls themselves still succeed;
+    // only the recording is suppressed.
+    const info = await rt.executor.execute({ tool: "browser.info", input: {}, client: readClient, ctx: rt.ctx });
+    expect(info.result).toBeDefined();
+    const caps = await rt.executor.execute({ tool: "browser.capabilities", input: {}, client: readClient, ctx: rt.ctx });
+    expect(caps.result).toBeDefined();
+    expect(events).toHaveLength(0);
+  });
+
+  it("grounding reads still emit after the status suppression (no over-suppression)", async () => {
+    const events: ActivityEvent[] = [];
+    const rt = createTestRuntime({ onActivity: (e) => events.push(e) });
+    await rt.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt.ctx });
+    await rt.executor.execute({ tool: "observe", input: {}, client: readClient, ctx: rt.ctx });
+    expect(events.map((e) => e.tool)).toEqual(["tabs.list", "tabs.list", "observe", "observe"]);
+  });
+
   it("the same tool from an AI client still emits, with a read verb", async () => {
     const events: ActivityEvent[] = [];
     const rt = createTestRuntime({ onActivity: (e) => events.push(e) });

@@ -62,7 +62,7 @@ try {
   const META_ONLY = new Set(["tools.batch", "tools.discover"]);
   const extraMeta = Object.keys(meta).filter((n) => !tools.some((t) => t.name === n) && !META_ONLY.has(n));
   const deprecatedActions = actions.filter((a) => a.deprecated);
-  const core = ["observe", "act", "navigate", "form", "data", "tools.batch", "tools.discover", "tasks.create", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel", "tasks.approvePlan"];
+  const core = ["observe", "act", "navigate", "form", "data", "tools.batch", "tools.discover", "tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel", "tasks.approvePlan"];
   const deprecatedInCore = core.filter((n) => tools.find((t) => t.name === n)?.deprecated);
 
   const lines = [];

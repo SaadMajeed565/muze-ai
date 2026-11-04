@@ -241,6 +241,14 @@ export const TasksApprovePlanInputSchema = z
   .strict();
 export type TasksApprovePlanInput = z.infer<typeof TasksApprovePlanInputSchema>;
 
+export const TasksAppendStepsInputSchema = z
+  .object({
+    taskId: z.string().min(1).max(256).describe("Id returned by tasks.create for the task to extend"),
+    steps: z.array(TaskStepInputSchema).min(1).max(100).describe("Steps to append to the task's plan, same shape as tasks.create steps"),
+  })
+  .strict();
+export type TasksAppendStepsInput = z.infer<typeof TasksAppendStepsInputSchema>;
+
 export const TasksListOutputSchema = z.object({ tasks: z.array(TaskViewSchema) }).strict();
 export type TasksListOutput = z.infer<typeof TasksListOutputSchema>;
 
@@ -248,7 +256,7 @@ export const tasksCreate: ToolDefinition = {
   name: "tasks.create",
   title: "Create task",
   description:
-    "Create a durable multi-step task in the extension and, by default, start running it. Creating the task is reversible (it can be paused or cancelled); consequential steps inside the task still go through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves its steps. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title.",
+    "Create a durable multi-step task in the extension and, by default, start running it. Creating the task is reversible (it can be paused or cancelled); consequential steps inside the task still go through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves its steps. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title. tasks.create returns the task id; reuse it with tasks.appendSteps to add follow-up steps to the same task instead of creating a second task for the same job.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,
@@ -325,6 +333,18 @@ export const tasksApprovePlan: ToolDefinition = {
   output: TaskViewSchema,
 };
 
-export const taskTools: ToolDefinition[] = [tasksCreate, tasksGet, tasksList, tasksPause, tasksResume, tasksCancel, tasksApprovePlan];
+export const tasksAppendSteps: ToolDefinition = {
+  name: "tasks.appendSteps",
+  title: "Append task steps",
+  description:
+    "Append steps to an existing task's plan using the id tasks.create returned. Follow-up work for the same job goes here — never create a second task for work that continues an existing one. Appended steps queue behind unexecuted steps and run through the same executor, policy, and approval gates at execution time; appending never pre-approves them. Appending to a finished task (done, failed, cancelled, partial) is rejected.",
+  category: "workflows",
+  risk: "reversible",
+  requiresApproval: false,
+  input: TasksAppendStepsInputSchema,
+  output: TaskViewSchema,
+};
+
+export const taskTools: ToolDefinition[] = [tasksCreate, tasksAppendSteps, tasksGet, tasksList, tasksPause, tasksResume, tasksCancel, tasksApprovePlan];
 
 export const TASK_TOOL_NAMES: string[] = taskTools.map((t) => t.name);

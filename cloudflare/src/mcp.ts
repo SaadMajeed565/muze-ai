@@ -45,6 +45,7 @@ export const CORE_TOOL_NAMES = new Set<string>([
   // discovering them, and the core-set filter would otherwise hide them
   // from the default ListTools response.
   "tasks.create",
+  "tasks.appendSteps",
   "tasks.get",
   "tasks.list",
   "tasks.pause",
@@ -71,7 +72,7 @@ export const MCP_INSTRUCTIONS =
   "You are an expert agentic browser operator controlling the user's Chrome browser via Muze AI.\n\n" +
   "## CORE AGENTIC LOOP: Observe → Reason → Act → Verify\n" +
   "1. Brief and create the task: Before your first action, build your own short brief from the goal and what you actually observe — restate the goal in your own words and state what observable page state will prove it done — then call `tasks.create` with a concise action-first title (your rephrased goal, never the user's prompt verbatim) and the brief's steps as the plan. The task is the record of the work; it starts running by default.\n" +
-  "2. Ground: Always observe before acting. Call `observe` to inspect the page text, accessibility tree, form fields, and interactive element refs.\n" +
+  "2. Ground: Always observe before acting. Call `observe` to inspect the page text, accessibility tree, form fields, and interactive element refs. To check the Muze connection itself, call `browsers.list` — never probe with `tabs.list` or `observe`; connection probes are not work and do not belong in the record.\n" +
   "3. Interact: Call `act` with step(s) using the stable element `ref` (e.g. 'r1a2b') obtained from `observe`.\n" +
   "4. Settle: If an action triggers navigation or async data loading, synchronize with `navigate({ category: 'sync', for: 'network_idle' })`.\n" +
   "5. Verify and report: Re-observe the page to confirm the expected change succeeded, verify each consequential step the same way, and report progress against the task, from the task result — not as loose actions.\n\n" +
@@ -89,7 +90,7 @@ export const MCP_INSTRUCTIONS =
   "This initialize text teaches how to work, never what a specific task's steps are. Do not copy a prewritten procedure for a site or a task: interfaces change, and a copied procedure is a guess about a page you have not observed. For each new task, build your own short brief from the goal and what you actually observe, before your first action.\n" +
   "- Restate the goal in your own words, and state what observable page state will prove it done. Define that success signal yourself from the page you observe, not from a label or message you were given in advance.\n" +
   "- Gather context first: the current tab and URL, what is open (dialog, form, menu), and what inputs or files the goal actually supplies, each identified by id + name + size or by id + URL, never by similarity alone.\n" +
-  "- Decide direct vs task: direct is ONLY for a single read-only observation — one call, no state change, no follow-up action. Everything else is a task: any user request phrased as something to DO, any job needing 2 or more tool actions, anything with a consequential step. Create it with `tasks.create` first — concise action-first title, the brief's steps as the plan — then let it run. Direct action calls are rejected by the system with TASK_REQUIRED — a rejection is not a failure of the page, it is the system telling you to create the task.\n" +
+  "- Decide direct vs task: direct is ONLY for a single read-only observation — one call, no state change, no follow-up action. Everything else is a task: any user request phrased as something to DO, any job needing 2 or more tool actions, anything with a consequential step. Create it with `tasks.create` first — concise action-first title, the brief's steps as the plan — then let it run. When you have follow-up work for a task you already created, append it with `tasks.appendSteps` using the id `tasks.create` returned — never create a second task for the same job. Direct action calls are rejected by the system with TASK_REQUIRED — a rejection is not a failure of the page, it is the system telling you to create the task.\n" +
   "- The brief becomes the task's plan: the brief's goal becomes the task's title (rephrased, action-first, never the prompt verbatim) and the brief's steps become the task's steps.\n" +
   "- Choose tools by capability, not by name: discover tools for the capability the step needs, read the full schema of only the tools the plan actually uses, and ignore the rest.\n" +
   "- Work the fallback ladder per step, re-observe on any failure or unexpected state, and re-derive the brief when the page changes, a new dialog appears, or two candidates match.\n" +
@@ -143,7 +144,7 @@ function isCoreTool(name: string): boolean {
  *
  * Phase 0 task tools fall out of this same risk mapping, with no
  * special case: tasks.get/tasks.list are read-only, so read:tools and
- * call:tools may call them; tasks.create/pause/resume/cancel are
+ * call:tools may call them; tasks.create/appendSteps/pause/resume/cancel are
  * reversible, so only call:tools may call them and a read-only scope is
  * denied. The check runs before anything is forwarded to the bridge.
  *

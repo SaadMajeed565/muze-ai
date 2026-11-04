@@ -112,4 +112,32 @@ describe("gateway-native browsers tools", () => {
     })) as { isError?: boolean };
     expect(batched.isError).toBe(true);
   });
+
+  test("browsers.list/select never reach the bridge, so they can never become activity rows", async () => {
+    // Gateway-native by construction: the SessionDO-supplied handler
+    // answers them, and the bridge — the only path to the extension
+    // executor, hence to the activity feed/history — is never called.
+    // A connection check through browsers.list therefore leaves the
+    // Tasks record clean without any suppression logic.
+    const bridgeCalls: string[] = [];
+    const spyingBridge: GatewayBridge = {
+      ...fakeBridge,
+      callTool: async (call) => {
+        bridgeCalls.push(call.tool);
+        return { result: {}, dryRun: false, durationMs: 0 };
+      },
+    };
+    const server = createGatewayMcpServer(spyingBridge, { id: "oc_test", name: "test", transport: "remote" }, undefined, "read:tools call:tools", { browsers: handler });
+    const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      await client.callTool({ name: "browsers.list", arguments: {} });
+      await client.callTool({ name: "browsers.select", arguments: { sessionId: "browser-b" } });
+      expect(bridgeCalls).toEqual([]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
 });

@@ -29,6 +29,7 @@ import {
 // stays decoupled from the runner class and test fakes stay possible.
 import type {
   ApprovePlanInput,
+  CreateStepInput,
   CreateTaskInput,
   DryRunPreview as RunnerDryRunPreview,
   PolicySnapshot,
@@ -63,6 +64,8 @@ import { resolveUnifiedAction, type ActionRiskEntry } from "../libs/tool-contrac
  */
 export interface TaskRunnerPort {
   createTask(input: CreateTaskInput, policySnapshot: PolicySnapshot): Promise<RunnerTaskView>;
+  /** Append steps to an existing task's plan (tasks.appendSteps). */
+  appendSteps(id: string, clientId: string, steps: CreateStepInput[]): Promise<RunnerTaskView>;
   getTask(id: string, clientId: string): Promise<RunnerTaskView>;
   listTasks(clientId: string, browserSessionId?: string): Promise<RunnerTaskView[]>;
   runTask(id: string, clientId: string, browserSessionId?: string): Promise<RunnerTaskView>;
@@ -915,6 +918,21 @@ export class HostProtocolHandler {
           }
           const created = await runner.createTask(createInput, policySnapshot());
           view = toContractTaskView(created);
+          break;
+        }
+        case "tasks.appendSteps": {
+          // Follow-up steps for an existing task: the runner validates
+          // the steps, rejects terminal tasks, and queues the rest
+          // behind unexecuted steps — no new task record is created.
+          // No policy snapshot is needed: nothing executes here; the
+          // appended steps face the per-step gates when the loop runs
+          // them, exactly like created steps.
+          const appended = await runner.appendSteps(
+            String(input.taskId),
+            clientId,
+            (input.steps as CreateStepInput[]) ?? [],
+          );
+          view = toContractTaskView(appended);
           break;
         }
         case "tasks.approvePlan": {

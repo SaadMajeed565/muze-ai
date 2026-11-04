@@ -17,8 +17,8 @@ AI client -> Worker /mcp (OAuth) -> Session Durable Object
 
 The registry is the single source of truth. Tool counts are derived from it at runtime and in tests — never hardcode a count in UI copy.
 
-- 138 tools in 0.5.0: 118 granular tools plus 13 unified tools plus 7 task tools (`tasks.create`, `tasks.get`, `tasks.list`, `tasks.pause`, `tasks.resume`, `tasks.cancel`, `tasks.approvePlan`). Tool counts are generated from the registry by `node scripts/tool-inventory.mjs` (`TOOL-INVENTORY.md`) — never hardcode a count in UI copy.
-- The MCP surface by default shows 5 master tools (observe, act, navigate, form, data) plus batch and discover, plus the 7 task tools in the core set. Other tools are discoverable through `tools.discover`, or shown in full when `MCP_SHOW_ALL_TOOLS` is set.
+- 139 tools in 0.5.0: 118 granular tools plus 13 unified tools plus 8 task tools (`tasks.create`, `tasks.appendSteps`, `tasks.get`, `tasks.list`, `tasks.pause`, `tasks.resume`, `tasks.cancel`, `tasks.approvePlan`). Tool counts are generated from the registry by `node scripts/tool-inventory.mjs` (`TOOL-INVENTORY.md`) — never hardcode a count in UI copy.
+- The MCP surface by default shows 5 master tools (observe, act, navigate, form, data) plus batch and discover, plus the 8 task tools in the core set. Other tools are discoverable through `tools.discover`, or shown in full when `MCP_SHOW_ALL_TOOLS` is set.
 - Risk tiers: read-only, reversible, sensitive-read, consequential, restricted. No tool currently uses the restricted tier; the tier exists as a deny-by-default gate.
 - Batch calls on the extension side are limited to read-only tools.
 

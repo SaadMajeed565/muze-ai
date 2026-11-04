@@ -614,6 +614,7 @@ describe("Phase 1: host dispatch for approvePlan and dry-run", () => {
         seen.approvePlan = opts;
         return runnerView as never;
       },
+      appendSteps: async () => runnerView as never,
       previewTask: async (input) => {
         seen.preview = input;
         return { goal: input.goal, totalSteps: input.steps.length, totalBudgetMs: 60_000, domains: [], steps: [], approvalsNeeded: [], errors: [], valid: true };

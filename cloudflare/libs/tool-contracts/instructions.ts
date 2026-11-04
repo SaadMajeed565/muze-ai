@@ -30,7 +30,7 @@ function riskGroups(toolName: string): Record<string, string[]> {
  */
 export function generateToolSelectionInstructions(descriptors: ToolDescriptor[]): string {
   const byName = new Map(descriptors.map((d) => [d.name, d]));
-  const core = ["observe", "act", "navigate", "form", "data", "tools.batch", "tools.discover", "tasks.create", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
+  const core = ["observe", "act", "navigate", "form", "data", "tools.batch", "tools.discover", "tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
   const corePresent = core.filter((name) => byName.has(name));
   const lines: string[] = [];
   lines.push("## GENERATED TOOL SELECTION (from the registry; this section is generated, not hand-written)");

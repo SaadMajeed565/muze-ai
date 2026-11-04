@@ -165,4 +165,34 @@ describe("per-action scope resolution (Tool Management Phase 1, section B)", () 
       await close();
     }
   });
+
+  test("read:tools may not append steps, while call:tools forwards the append to the bridge", async () => {
+    // tasks.appendSteps is a reversible mutation, like tasks.create:
+    // the scope check runs before anything is forwarded, so a
+    // read-only client is denied and the bridge never sees the call.
+    const read = await makeClient("read:tools");
+    try {
+      const denied = await read.callText("tasks.appendSteps", {
+        taskId: "task_1",
+        steps: [{ tool: "observe", input: { include: ["text"] } }],
+      });
+      expect(denied.isError).toBe(true);
+      expect(denied.text).toContain("PERMISSION_DENIED");
+      expect(denied.text).toContain("tasks.appendSteps");
+      expect(read.seen.toolCalls).toEqual([]);
+    } finally {
+      await read.close();
+    }
+    const call = await makeClient("call:tools");
+    try {
+      const forwarded = await call.callText("tasks.appendSteps", {
+        taskId: "task_1",
+        steps: [{ tool: "observe", input: { include: ["text"] } }],
+      });
+      expect(forwarded.isError).toBeFalsy();
+      expect(call.seen.toolCalls).toEqual(["tasks.appendSteps"]);
+    } finally {
+      await call.close();
+    }
+  });
 });

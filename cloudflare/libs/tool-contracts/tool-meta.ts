@@ -189,6 +189,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
 
   // ---- tasks (granular, stay granular) ----
   "tasks.create": m(["task", "create", "multi-step", "workflow"], { related: ["tasks.list", "tasks.get"] }),
+  "tasks.appendSteps": m(["task", "append", "follow-up", "workflow"], { related: ["tasks.create", "tasks.list"], requires: ["tasks.list"] }),
   "tasks.get": m(["task", "get", "read", "status"], { related: ["tasks.list"] }),
   "tasks.list": m(["list", "task", "read", "status"], { related: ["tasks.get"] }),
   "tasks.pause": m(["task", "pause", "stop-task"], { requires: ["tasks.list"] }),

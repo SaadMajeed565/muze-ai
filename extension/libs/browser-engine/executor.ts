@@ -4,6 +4,24 @@ import { validateNavigableUrl, type ApprovalBroker, type AuditLog, type PolicyEn
 import type { BrowserContext } from "./context.js";
 import type { RuntimeSnapshot, ToolRegistry } from "./registry.js";
 
+/**
+ * Status tools never become activity rows. A status call answers "is
+ * Muze alive / which browser is this" — it is not work the user wants
+ * in the Tasks record — so the executor suppresses its feed/history
+ * emission by tool name, the same way `internal` suppresses by caller.
+ * The call still executes and returns normally; only the recording is
+ * skipped. Deliberately narrow: browsers.list/select are gateway-native
+ * and never reach this executor at all (they are non-recorded by
+ * construction, pinned by test), and tabs.list/observe/page reads are
+ * genuine grounding reads that MUST still record — suppressing them
+ * would hide real AI work. browser.permissions is not in the registry
+ * (no such tool exists) and needs no entry.
+ */
+export const STATUS_SILENT_TOOLS: ReadonlySet<string> = new Set([
+  "browser.info",
+  "browser.capabilities",
+]);
+
 export interface ExecuteOptions {
   tool: string;
   input: unknown;
@@ -137,7 +155,7 @@ export class ToolExecutor {
     return eventId;
   }
 
-  /** Resolve a started row; a null id (no listener, or a nested/internal call) is a no-op. */
+  /** Resolve a started row; a null id (no listener, or a nested/internal/status-silent call) is a no-op. */
   private endActivity(id: string | null, tool: string, state: "done" | "failed", taskId?: string): void {
     if (id === null) return;
     this.emitActivity(tool, state, id, taskId);
@@ -355,7 +373,14 @@ export class ToolExecutor {
     // invokes are internal sub-steps of the parent call and stay silent,
     // as do internal housekeeping calls (flagged internal); dry runs
     // return before this point and never emit.
-    const activityId = options.nested || options.internal ? null : this.emitActivity(auditTool, "running", null, options.taskId);
+    // Status tools never become activity rows (see
+    // STATUS_SILENT_TOOLS): the call executes and returns normally,
+    // only the recording is skipped, so connection checks leave the
+    // Tasks record clean.
+    const activityId =
+      options.nested || options.internal || STATUS_SILENT_TOOLS.has(auditTool)
+        ? null
+        : this.emitActivity(auditTool, "running", null, options.taskId);
 
     const runtime = this.buildRuntime(options.client);
 

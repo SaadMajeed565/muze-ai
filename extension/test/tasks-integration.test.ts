@@ -425,7 +425,8 @@ describe("integration: host dispatch + dashboard wiring", () => {
 
   it("registry includes tasks.* with stub handlers that fail cleanly on direct executor calls", () => {
     const registry = createToolRegistry();
-    expect(registry.names().filter((n) => n.startsWith("tasks."))).toHaveLength(7);
+    expect(registry.names().filter((n) => n.startsWith("tasks."))).toHaveLength(8);
     expect(registry.get("tasks.create")).toBeDefined();
+    expect(registry.get("tasks.appendSteps")).toBeDefined();
   });
 });

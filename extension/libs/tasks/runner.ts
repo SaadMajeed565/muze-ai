@@ -569,6 +569,20 @@ export class TaskRunner {
         resultSummary: fresh.status === "cancelled" ? fresh.resultSummary : working.resultSummary,
       };
     }
+    // Steps appended while this step was executing (tasks.appendSteps
+    // only ever pushes at the end, with sequential indices) must
+    // survive this checkpoint: the working copy predates them, and a
+    // wholesale save would wipe the append. Carry the fresh tail over
+    // when the prefix matches by index; otherwise fall back to the
+    // working copy. The result summary is left to the next caller-side
+    // refresh — recomputing here would drop the caller's extra lines
+    // (e.g. a failure note) baked into working.resultSummary.
+    if (fresh && fresh.steps.length > toSave.steps.length) {
+      const prefixMatches = toSave.steps.every((s, i) => fresh.steps[i]?.index === s.index);
+      if (prefixMatches) {
+        toSave = { ...toSave, steps: [...toSave.steps, ...fresh.steps.slice(toSave.steps.length)] };
+      }
+    }
     const next = freshAll.some((t) => t.id === toSave.id)
       ? freshAll.map((t) => (t.id === toSave.id ? toSave : t))
       : [...freshAll, toSave];
@@ -723,72 +737,7 @@ export class TaskRunner {
 
     const now = this.now();
     const id = this.generateId();
-    const steps: TaskStep[] = [];
-    for (let index = 0; index < input.steps.length; index += 1) {
-      const raw = input.steps[index] as CreateStepInput;
-      if (!raw || typeof raw.tool !== "string" || raw.tool.trim() === "") {
-        throw new Error(`task creation rejected: step ${index} must have a non-empty tool name`);
-      }
-      if (!raw.input || typeof raw.input !== "object" || Array.isArray(raw.input)) {
-        throw new Error(`task creation rejected: step ${index} input must be an object`);
-      }
-      const timeoutMs = raw.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
-      if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_STEP_TIMEOUT_MS) {
-        throw new Error(
-          `task creation rejected: step ${index} timeoutMs must be between 1 and ${MAX_STEP_TIMEOUT_MS}, got ${String(raw.timeoutMs)}`,
-        );
-      }
-      let compensation: TaskStep["compensation"] = { kind: "none", description: "" };
-      if (raw.compensation !== undefined) {
-        if (!COMPENSATION_KINDS.includes(raw.compensation.kind)) {
-          throw new Error(`task creation rejected: step ${index} compensation kind must be one of ${COMPENSATION_KINDS.join(", ")}`);
-        }
-        compensation = {
-          kind: raw.compensation.kind,
-          description: typeof raw.compensation.description === "string" ? raw.compensation.description : "",
-        };
-      }
-      // Phase B: verify conditions are generic only; a malformed one
-      // is a creation error, never silently dropped.
-      let verify: VerifyCondition | null = null;
-      if (raw.verify !== undefined && raw.verify !== null) {
-        const condition = raw.verify as VerifyCondition;
-        if (condition.kind !== "url-equals" && condition.kind !== "url-contains" && condition.kind !== "element-present") {
-          throw new Error(`task creation rejected: step ${index} verify kind must be url-equals, url-contains, or element-present`);
-        }
-        if (condition.kind !== "element-present" && (typeof condition.value !== "string" || condition.value === "")) {
-          throw new Error(`task creation rejected: step ${index} verify ${condition.kind} requires a non-empty value`);
-        }
-        if (condition.value !== undefined && typeof condition.value !== "string") {
-          throw new Error(`task creation rejected: step ${index} verify value must be a string`);
-        }
-        verify = { kind: condition.kind, ...(condition.value !== undefined ? { value: condition.value } : {}) };
-      }
-      const canonical = canonicalizeInput(raw.input);
-      steps.push({
-        index,
-        tool: raw.tool,
-        input: canonical,
-        inputSummary: summarizeInput(raw.tool, canonical),
-        idempotencyKey: await this.computeIdempotencyKey(id, index, canonical),
-        state: "pending",
-        attempts: 0,
-        lastError: null,
-        outputSummary: "",
-        startedAt: null,
-        finishedAt: null,
-        timeoutMs,
-        compensation,
-        independent: raw.independent === true,
-        parallelGroup: typeof raw.parallelGroup === "number" ? raw.parallelGroup : null,
-        observationSummary: "",
-        outsideBoundsReason: null,
-        verify,
-        preStepSnapshot: null,
-        verifySummary: "",
-        verifyOutcome: null,
-      });
-    }
+    const steps = await this.buildStepRecords(id, input.steps, 0, "task creation rejected");
 
     // Pinned tabs: unique tabIds from step inputs, with the recorded url
     // from the first step that mentions that tab.
@@ -854,6 +803,150 @@ export class TaskRunner {
       outcome: "success",
     });
     if (input.start === true) return this.runTask(id, clientId);
+    return toTaskView(saved);
+  }
+
+  /**
+   * Validate raw step inputs and build stored step records, shared by
+   * createTask and appendSteps so appended steps are validated and
+   * shaped exactly like created ones. Indices start at startIndex and
+   * idempotency keys bind task id + final index, so appended steps
+   * never collide with existing ones. Throws with errorPrefix on the
+   * first malformed step; nothing is persisted by this helper.
+   */
+  private async buildStepRecords(
+    taskId: string,
+    rawSteps: CreateStepInput[],
+    startIndex: number,
+    errorPrefix: string,
+  ): Promise<TaskStep[]> {
+    const steps: TaskStep[] = [];
+    for (let offset = 0; offset < rawSteps.length; offset += 1) {
+      const index = startIndex + offset;
+      const raw = rawSteps[offset] as CreateStepInput;
+      if (!raw || typeof raw.tool !== "string" || raw.tool.trim() === "") {
+        throw new Error(`${errorPrefix}: step ${index} must have a non-empty tool name`);
+      }
+      if (!raw.input || typeof raw.input !== "object" || Array.isArray(raw.input)) {
+        throw new Error(`${errorPrefix}: step ${index} input must be an object`);
+      }
+      const timeoutMs = raw.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+      if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_STEP_TIMEOUT_MS) {
+        throw new Error(
+          `${errorPrefix}: step ${index} timeoutMs must be between 1 and ${MAX_STEP_TIMEOUT_MS}, got ${String(raw.timeoutMs)}`,
+        );
+      }
+      let compensation: TaskStep["compensation"] = { kind: "none", description: "" };
+      if (raw.compensation !== undefined) {
+        if (!COMPENSATION_KINDS.includes(raw.compensation.kind)) {
+          throw new Error(`${errorPrefix}: step ${index} compensation kind must be one of ${COMPENSATION_KINDS.join(", ")}`);
+        }
+        compensation = {
+          kind: raw.compensation.kind,
+          description: typeof raw.compensation.description === "string" ? raw.compensation.description : "",
+        };
+      }
+      // Phase B: verify conditions are generic only; a malformed one
+      // is a creation error, never silently dropped.
+      let verify: VerifyCondition | null = null;
+      if (raw.verify !== undefined && raw.verify !== null) {
+        const condition = raw.verify as VerifyCondition;
+        if (condition.kind !== "url-equals" && condition.kind !== "url-contains" && condition.kind !== "element-present") {
+          throw new Error(`${errorPrefix}: step ${index} verify kind must be url-equals, url-contains, or element-present`);
+        }
+        if (condition.kind !== "element-present" && (typeof condition.value !== "string" || condition.value === "")) {
+          throw new Error(`${errorPrefix}: step ${index} verify ${condition.kind} requires a non-empty value`);
+        }
+        if (condition.value !== undefined && typeof condition.value !== "string") {
+          throw new Error(`${errorPrefix}: step ${index} verify value must be a string`);
+        }
+        verify = { kind: condition.kind, ...(condition.value !== undefined ? { value: condition.value } : {}) };
+      }
+      const canonical = canonicalizeInput(raw.input);
+      steps.push({
+        index,
+        tool: raw.tool,
+        input: canonical,
+        inputSummary: summarizeInput(raw.tool, canonical),
+        idempotencyKey: await this.computeIdempotencyKey(taskId, index, canonical),
+        state: "pending",
+        attempts: 0,
+        lastError: null,
+        outputSummary: "",
+        startedAt: null,
+        finishedAt: null,
+        timeoutMs,
+        compensation,
+        independent: raw.independent === true,
+        parallelGroup: typeof raw.parallelGroup === "number" ? raw.parallelGroup : null,
+        observationSummary: "",
+        outsideBoundsReason: null,
+        verify,
+        preStepSnapshot: null,
+        verifySummary: "",
+        verifyOutcome: null,
+      });
+    }
+    return steps;
+  }
+
+  /**
+   * Append steps to an existing task's plan (tasks.appendSteps): the
+   * follow-up path for a job that already has a task, so the AI never
+   * needs a second task for the same job. Appended steps queue behind
+   * unexecuted steps as pending records and run through the identical
+   * loop — same per-step executor/policy/approval gates, same taskId
+   * attribution into activity/history, same bounds handling — because
+   * the run loop reloads the record before every step and picks the
+   * next pending one, and step checkpoints merge (never wipe) steps
+   * appended while a step was executing. Status is never changed here: a
+   * running task picks the steps up on its next reload, a paused or
+   * waiting_approval task keeps them waiting with the rest, and a
+   * created task keeps them for its first run. Terminal tasks reject;
+   * the plan cap (MAX_STEPS_PER_TASK) and the task's own planBounds
+   * maxSteps, when set, reject an append that would overflow them.
+   */
+  async appendSteps(id: string, clientId: string, rawSteps: CreateStepInput[]): Promise<TaskView> {
+    if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+      throw new Error("task append rejected: steps must be a non-empty array");
+    }
+    const all = await this.loadAll();
+    const task = this.findOrThrow(all, id);
+    this.assertClient(task, clientId);
+    if (isTerminal(task.status)) {
+      throw new Error(`task append rejected: task ${id} is ${task.status} and cannot accept new steps`);
+    }
+    if (task.steps.length + rawSteps.length > MAX_STEPS_PER_TASK) {
+      throw new Error(
+        `task append rejected: ${task.steps.length + rawSteps.length} steps would exceed the maximum of ${MAX_STEPS_PER_TASK}`,
+      );
+    }
+    if (task.planBounds?.maxSteps !== undefined && task.steps.length + rawSteps.length > task.planBounds.maxSteps) {
+      throw new Error(
+        `task append rejected: plan bounds maxSteps (${task.planBounds.maxSteps}) is smaller than the plan length (${task.steps.length + rawSteps.length})`,
+      );
+    }
+    const built = await this.buildStepRecords(id, rawSteps, task.steps.length, "task append rejected");
+    task.steps.push(...built);
+    // Pinned tabs: same rule as creation — a new tabId mentioned by an
+    // appended step joins the pinned set with its first recorded url.
+    for (const step of built) {
+      const tabId = (step.input as Record<string, unknown>).tabId;
+      if (typeof tabId === "number" && Number.isInteger(tabId) && !task.pinnedTabs.some((t) => t.tabId === tabId)) {
+        const url = (step.input as Record<string, unknown>).url;
+        task.pinnedTabs.push({ tabId, url: typeof url === "string" ? url : null });
+      }
+    }
+    task.updatedAt = this.now();
+    this.refreshSummary(task);
+    const saved = await this.persistOnly(all, task, {
+      kind: "task.steps-appended",
+      taskId: id,
+      stepIndex: -1,
+      tool: "",
+      decision: "appended",
+      outcome: "success",
+    });
     return toTaskView(saved);
   }
 
