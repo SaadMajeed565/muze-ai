@@ -5,7 +5,7 @@ import type { BrowsersDashboard } from "../../src/messages.js";
 import { sendRequest } from "../logic.js";
 import {
   dayRowPreview,
-  groupTasksAndActionsByDay,
+  groupTasksByDay,
   plainFinalSummary,
   plainPauseReason,
   plainStepState,
@@ -69,9 +69,9 @@ export interface TasksPageProps {
  * Home's card surfaces it), borderless rows with the progress bar
  * inside, honest progress text (fixed plans "Step X of N", unknown
  * totals never invented). Drill-down: the list shows one row per day
- * (date + that day's first task title, or first action summary for
- * action-only days); a day opens its tasks plus its standalone
- * actions; a task opens its executed steps, chronological
+ * (date + that day's first task title); a day opens its tasks only —
+ * standalone interaction rows never appear here, and a day with no
+ * tasks produces no row; a task opens its executed steps, chronological
  * oldest-first, from the day history. Failed is a real status, red
  * throughout.
  */
@@ -240,23 +240,11 @@ export function TasksPage({
     return [...result].sort((a, b) => Number(isRunning(b.status)) - Number(isRunning(a.status)) || b.createdAt - a.createdAt);
   }, [tasks, query, statusFilter]);
 
-  // Standalone actions only: rows attributed to a task (taskId set)
-  // belong to that task's detail, never to a day's standalone list,
-  // so a task's steps are never duplicated across the drill-down.
-  // A task's steps executed on a later day still belong to the task
-  // (its creation day's section does not gain them); they surface in
-  // the task's own detail, not as that later day's content.
-  const standaloneHistory = useMemo(() => (history ?? []).filter((row) => !row.taskId), [history]);
-
-  // Date sections: tasks first in their list order, then that day's
-  // standalone action rows newest first. The search filters tasks
-  // only (it says "tasks and steps"); the chip filters both tasks
-  // and actions. A day row appears when its section holds a matching
-  // task or a matching standalone action.
-  const sections = useMemo(
-    () => groupTasksAndActionsByDay(filtered, standaloneHistory, statusFilter),
-    [filtered, standaloneHistory, statusFilter],
-  );
+  // Date sections: tasks only. The history still feeds each task's
+  // own detail (taskExecutedSteps, taskId-filtered); standalone rows
+  // never reach a day section, so search and chips filter tasks only
+  // and a day with no tasks produces no row.
+  const sections = useMemo(() => groupTasksByDay(filtered), [filtered]);
 
   const daySection = selectedDay ? (sections.find((section) => section.key === selectedDay) ?? null) : null;
 
@@ -393,11 +381,11 @@ export function TasksPage({
     );
   }
 
-  // Day detail: that day's tasks (current order) plus its standalone
-  // actions newest first. Task-attributed rows never appear here —
-  // they belong to their task's detail. Back returns to the day list;
-  // the AppBar back from a task's detail returns here, because the
-  // selected day survives task selection.
+  // Day detail: that day's tasks (current order) only. Standalone
+  // rows never appear here; task-attributed rows belong to their
+  // task's detail. Back returns to the day list; the AppBar back from
+  // a task's detail returns here, because the selected day survives
+  // task selection.
   if (daySection) {
     return (
       <div class="ui-page detail-page">
@@ -406,21 +394,6 @@ export function TasksPage({
         </Button>
         <h2 class="sec">{daySection.label}</h2>
         {daySection.tasks.map((task) => renderTaskRow(task))}
-        {daySection.actions.length > 0 ? (
-          <div class="tl">
-            {daySection.actions.map((row) => (
-              <div class="step" key={row.id}>
-                <span class="node">
-                  <Icon name={timelineIconForStep(row.tool, row.state)} size={16} />
-                </span>
-                <div class="verb">{row.summary}</div>
-                <div class="tmeta">
-                  {row.state === "done" ? actionTime(row.at) : `${plainStepState(row.state)} · ${actionTime(row.at)}`}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
       </div>
     );
   }
@@ -453,7 +426,7 @@ export function TasksPage({
 
       {tasks === null || (tasks.length === 0 && history === null) ? (
         <SectionSkeleton />
-      ) : tasks.length === 0 && standaloneHistory.length === 0 ? (
+      ) : tasks.length === 0 ? (
         <EmptyLine text="No tasks yet." />
       ) : sections.length === 0 ? (
         <EmptyLine text="No tasks match your search." />
@@ -470,7 +443,7 @@ export function TasksPage({
               <span>
                 <span class="name">{section.label}</span>
                 <br />
-                <span class="meta">{dayRowPreview(section.tasks, section.actions)}</span>
+                <span class="meta">{dayRowPreview(section.tasks)}</span>
               </span>
             </button>
           ))}

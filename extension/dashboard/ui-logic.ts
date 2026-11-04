@@ -523,27 +523,25 @@ export function plainCapabilities(mode: PermissionMode, enabledGroups: Record<st
 }
 
 /**
- * Tasks page date sections: planned tasks AND that day's individual AI
- * actions, grouped by LOCAL calendar date (the dashboard runs in the
- * user's browser, so local dates — never UTC — decide the section).
- * Actions are history entries next to tasks, never task records: the
- * task model is unchanged, and a date with actions but no tasks still
- * renders its section (that is the point — direct-work days appear).
+ * Tasks page date sections: tasks ONLY, grouped by LOCAL calendar date
+ * (the dashboard runs in the user's browser, so local dates — never
+ * UTC — decide the section). Standalone interaction rows (reads,
+ * probes, direct calls) are recorded in the stores and shown in the
+ * live Home feed, but they never appear here: a date's task list
+ * shows tasks, and a day with no tasks produces no section at all.
  *
- * Ordering: sections newest first; within a section, task rows first
- * (running first, then newest first — the list's existing order), then
- * that day's action rows newest first. The status chip filters tasks
- * as before and actions by state (done → Completed, failed → Failed,
- * All shows both, running shows under All only).
+ * Ordering: sections newest first; within a section, task rows keep
+ * the list's order (running first, then newest first). Task filtering
+ * (search, status chip) happens in the page before grouping, so this
+ * helper only groups what it is given.
  */
 
-export interface DaySection<Task, Action> {
+export interface DaySection<Task> {
   /** Local date key, zero-padded "YYYY-MM-DD" (lexicographic = newest first). */
   key: string;
   /** "Today", "Yesterday", or "Nov 2, 2026" (en-US, like shortDate). */
   label: string;
   tasks: Task[];
-  actions: Action[];
 }
 
 function pad2(value: number): string {
@@ -580,43 +578,28 @@ function isRunningStatus(status: string): boolean {
 }
 
 /**
- * Group tasks and actions into date sections. Tasks keep their list
- * order within a section (running first, then newest first); actions
- * are newest first and follow the status chip by state. Sections with
- * neither a task nor an action never occur by construction.
+ * Group tasks into date sections. Tasks keep their list order within
+ * a section (running first, then newest first). A day with no tasks
+ * never produces a section: standalone rows alone do not create one.
  */
-export function groupTasksAndActionsByDay<
-  Task extends { createdAt: number; status: string },
-  Action extends { at: number; state: string },
->(
+export function groupTasksByDay<Task extends { createdAt: number; status: string }>(
   tasks: Task[],
-  actions: Action[],
-  statusFilter: "all" | "completed" | "failed",
   now: number = Date.now(),
-): DaySection<Task, Action>[] {
-  const byKey = new Map<string, { tasks: Task[]; actions: Action[] }>();
-  const bucket = (key: string): { tasks: Task[]; actions: Action[] } => {
-    let found = byKey.get(key);
-    if (!found) {
-      found = { tasks: [], actions: [] };
-      byKey.set(key, found);
-    }
-    return found;
-  };
-  for (const task of tasks) bucket(dayKeyForTimestamp(task.createdAt)).tasks.push(task);
-  for (const action of actions) {
-    if (statusFilter === "completed" && action.state !== "done") continue;
-    if (statusFilter === "failed" && action.state !== "failed") continue;
-    bucket(dayKeyForTimestamp(action.at)).actions.push(action);
+): DaySection<Task>[] {
+  const byKey = new Map<string, Task[]>();
+  for (const task of tasks) {
+    const key = dayKeyForTimestamp(task.createdAt);
+    const found = byKey.get(key);
+    if (found) found.push(task);
+    else byKey.set(key, [task]);
   }
-  const sections: DaySection<Task, Action>[] = [];
+  const sections: DaySection<Task>[] = [];
   for (const key of [...byKey.keys()].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))) {
-    const entry = byKey.get(key) as { tasks: Task[]; actions: Action[] };
-    entry.tasks.sort(
+    const entry = byKey.get(key) as Task[];
+    entry.sort(
       (a, b) => Number(isRunningStatus(b.status)) - Number(isRunningStatus(a.status)) || b.createdAt - a.createdAt,
     );
-    entry.actions.sort((a, b) => b.at - a.at);
-    sections.push({ key, label: dayLabelForKey(key, now), tasks: entry.tasks, actions: entry.actions });
+    sections.push({ key, label: dayLabelForKey(key, now), tasks: entry });
   }
   return sections;
 }
@@ -624,23 +607,14 @@ export function groupTasksAndActionsByDay<
 /**
  * Day-list row preview: the earliest-created task's title of that day.
  * "First" means earliest createdAt (not the display order, which sorts
- * running first). A day with no tasks falls back to its earliest
- * standalone action's summary; a day with neither returns "".
+ * running first). A day with no tasks returns "".
  */
-export function dayRowPreview<
-  Task extends { createdAt: number; goal: string },
-  Action extends { at: number; summary: string },
->(tasks: Task[], actions: Action[]): string {
+export function dayRowPreview<Task extends { createdAt: number; goal: string }>(tasks: Task[]): string {
   let earliestTask: Task | null = null;
   for (const task of tasks) {
     if (!earliestTask || task.createdAt < earliestTask.createdAt) earliestTask = task;
   }
-  if (earliestTask) return earliestTask.goal || "Task";
-  let earliestAction: Action | null = null;
-  for (const action of actions) {
-    if (!earliestAction || action.at < earliestAction.at) earliestAction = action;
-  }
-  return earliestAction ? earliestAction.summary : "";
+  return earliestTask ? earliestTask.goal || "Task" : "";
 }
 
 /**

@@ -68,20 +68,11 @@ describe("dayRowPreview", () => {
       { createdAt: 1000, goal: "Early task" },
       { createdAt: 2000, goal: "Middle task" },
     ];
-    expect(dayRowPreview(tasks, [])).toBe("Early task");
+    expect(dayRowPreview(tasks)).toBe("Early task");
   });
 
-  it("falls back to the earliest action summary on an action-only day, and empty when neither", () => {
-    expect(
-      dayRowPreview(
-        [],
-        [
-          { at: 3000, summary: "Later action" },
-          { at: 1000, summary: "First action" },
-        ],
-      ),
-    ).toBe("First action");
-    expect(dayRowPreview([], [])).toBe("");
+  it("returns empty when there are no tasks", () => {
+    expect(dayRowPreview([])).toBe("");
   });
 });
 
@@ -182,7 +173,7 @@ describe("TasksPage drill-down", () => {
     vi.restoreAllMocks();
   });
 
-  it("day list shows one row per day: date + earliest task title, action-only day shows first action summary", async () => {
+  it("day list shows one row per day: date + earliest task title, no action-only day", async () => {
     const container = mount();
     await flush();
     await flush();
@@ -190,15 +181,16 @@ describe("TasksPage drill-down", () => {
     expect(text).toContain("Today");
     expect(text).toContain("Early task");
     expect(text).toContain("Yesterday");
-    expect(text).toContain(oldDateLabel(3));
-    expect(text).toContain("Old direct");
+    // The action-only older date produces no day row at all.
+    expect(text).not.toContain(oldDateLabel(3));
+    expect(text).not.toContain("Old direct");
     // Task titles other than the day's first are NOT on the list view.
     expect(text).not.toContain("Late task");
     // Standalone action summaries are NOT on the list view either.
     expect(text).not.toContain("Standalone click");
   });
 
-  it("day detail lists that day's tasks plus standalone actions only — no task-attributed rows, no other day", async () => {
+  it("day detail lists that day's tasks only — no standalone rows, no task-attributed rows, no other day", async () => {
     const container = mount();
     await flush();
     await flush();
@@ -207,8 +199,8 @@ describe("TasksPage drill-down", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Early task");
     expect(text).toContain("Late task");
-    expect(text).toContain("Standalone click");
-    // Task-attributed rows are not duplicated into the standalone list.
+    expect(text).not.toContain("Standalone click");
+    // Task-attributed rows are not duplicated into the day detail.
     expect(text).not.toContain("First taken");
     expect(text).not.toContain("Second taken");
     // No other day's content leaks in.
@@ -287,14 +279,10 @@ describe("TasksPage drill-down", () => {
     expect(container.textContent).toContain("All (1)");
     clickChip("Failed");
     await flush();
-    // The day still appears (it holds a failed action), and its detail
-    // shows only the failed action.
-    clickRow("Today");
-    await flush();
-    const text = container.textContent ?? "";
-    expect(text).toContain("Failed action");
-    expect(text).not.toContain("Done action");
-    expect(text).not.toContain("Only task");
+    // The done task is filtered out, and standalone rows cannot keep
+    // the day alive: no day row, no detail to open.
+    expect(container.textContent).toContain("No tasks match your search.");
+    expect(container.textContent).not.toContain("Failed action");
   });
 
   it("a day with only filtered-out content disappears under the chip", async () => {
@@ -308,10 +296,10 @@ describe("TasksPage drill-down", () => {
     expect(container.textContent).toContain("No tasks match your search.");
   });
 
-  it("search filters tasks only: a day with standalone actions stays visible under a non-matching query", async () => {
-    // Other days carry no standalone actions here, so the narrowing
-    // assertions are about tasks; the last query pins the documented
-    // reading that standalone actions ignore the query.
+  it("search filters tasks only: a day with standalone actions disappears under a non-matching query", async () => {
+    // Standalone rows no longer keep a day visible: only matching
+    // tasks do. The default fixtures carry a standalone row today,
+    // plus tasks today and yesterday.
     historyFixtures = [actionRow("a-standalone", "Standalone click", "done", atLocal(0, 14))];
     const container = mount();
     await flush();
@@ -325,8 +313,7 @@ describe("TasksPage drill-down", () => {
     setQuery("zzz-no-match");
     await flush();
     text = container.textContent ?? "";
-    // Standalone actions ignore the query, so their day stays visible.
-    expect(text).toContain("Today");
-    expect(text).not.toContain("Yesterday");
+    expect(text).toContain("No tasks match your search.");
+    expect(text).not.toContain("Standalone click");
   });
 });

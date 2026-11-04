@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   dayKeyForTimestamp,
   dayLabelForKey,
-  groupTasksAndActionsByDay,
+  groupTasksByDay,
 } from "../dashboard/ui-logic.js";
 import { TasksPage } from "../dashboard/pages/Tasks.js";
 import { ConfirmProvider } from "../dashboard/components/feedback.js";
@@ -24,9 +24,8 @@ function oldDateLabel(daysAgo: number): string {
 }
 
 type MiniTask = { id: string; createdAt: number; status: string };
-type MiniAction = { id: string; at: number; state: string };
 
-describe("groupTasksAndActionsByDay", () => {
+describe("groupTasksByDay", () => {
   it("labels today, yesterday, and older dates (local calendar dates)", () => {
     const now = new Date(2026, 10, 3, 12).getTime(); // Nov 3, 2026, noon local
     expect(dayLabelForKey(dayKeyForTimestamp(now), now)).toBe("Today");
@@ -34,44 +33,23 @@ describe("groupTasksAndActionsByDay", () => {
     expect(dayLabelForKey(dayKeyForTimestamp(new Date(2026, 9, 30, 12).getTime()), now)).toBe("Oct 30, 2026");
   });
 
-  it("orders sections newest first, tasks before actions within a date", () => {
+  it("orders sections newest first, tasks running-first then newest", () => {
     const today = atLocal(0);
     const tasks: MiniTask[] = [
       { id: "done-new", createdAt: today + 2000, status: "done" },
       { id: "running-old", createdAt: today + 1000, status: "running" },
+      { id: "old-day", createdAt: atLocal(2), status: "done" },
     ];
-    const actions: MiniAction[] = [
-      { id: "act-old", at: today + 500, state: "done" },
-      { id: "act-new", at: today + 3000, state: "done" },
-    ];
-    const sections = groupTasksAndActionsByDay(tasks, actions, "all", today);
-    expect(sections).toHaveLength(1);
+    const sections = groupTasksByDay(tasks, today);
+    expect(sections).toHaveLength(2);
     expect(sections[0].label).toBe("Today");
-    // Running first even though older, then newest first; actions newest first.
+    // Running first even though older, then newest first.
     expect(sections[0].tasks.map((t) => t.id)).toEqual(["running-old", "done-new"]);
-    expect(sections[0].actions.map((a) => a.id)).toEqual(["act-new", "act-old"]);
-  });
-
-  it("renders a section for a date with actions but no tasks", () => {
-    const sections = groupTasksAndActionsByDay([], [{ id: "a1", at: atLocal(2), state: "done" }], "all");
-    expect(sections).toHaveLength(1);
-    expect(sections[0].tasks).toHaveLength(0);
-    expect(sections[0].actions.map((a) => a.id)).toEqual(["a1"]);
-  });
-
-  it("filters actions by chip state (tasks untouched by this helper's chip)", () => {
-    const actions: MiniAction[] = [
-      { id: "done", at: atLocal(0), state: "done" },
-      { id: "failed", at: atLocal(0), state: "failed" },
-      { id: "running", at: atLocal(0), state: "running" },
-    ];
-    expect(groupTasksAndActionsByDay([], actions, "all")[0].actions.map((a) => a.id)).toEqual(["done", "failed", "running"]);
-    expect(groupTasksAndActionsByDay([], actions, "completed")[0].actions.map((a) => a.id)).toEqual(["done"]);
-    expect(groupTasksAndActionsByDay([], actions, "failed")[0].actions.map((a) => a.id)).toEqual(["failed"]);
+    expect(sections[1].tasks.map((t) => t.id)).toEqual(["old-day"]);
   });
 
   it("returns no sections for empty inputs", () => {
-    expect(groupTasksAndActionsByDay([], [], "all")).toEqual([]);
+    expect(groupTasksByDay([])).toEqual([]);
   });
 });
 
@@ -175,7 +153,7 @@ describe("TasksPage date sections", () => {
     vi.restoreAllMocks();
   });
 
-  it("day list shows one row per day, newest first; day detail holds tasks before actions", async () => {
+  it("day list shows one row per day, newest first; day detail holds tasks only", async () => {
     taskFixtures = [
       rawTask({ id: "t-today", goal: "Today planned task", createdAt: atLocal(0, 9) }),
       rawTask({ id: "t-yesterday", goal: "Yesterday planned task", status: "done", createdAt: atLocal(1, 9) }),
@@ -190,25 +168,24 @@ describe("TasksPage date sections", () => {
     const listText = container.textContent ?? "";
     expect(listText).toContain("Today");
     expect(listText).toContain("Yesterday");
-    expect(listText).toContain(oldDateLabel(3));
+    // The action-only older date produces no day row, and standalone
+    // summaries never appear on the list.
+    expect(listText).not.toContain(oldDateLabel(3));
+    expect(listText).not.toContain("Scrolled");
+    expect(listText).not.toContain("Clicked");
     // Day rows newest first.
     expect(listText.indexOf("Today")).toBeLessThan(listText.indexOf("Yesterday"));
-    expect(listText.indexOf("Yesterday")).toBeLessThan(listText.indexOf(oldDateLabel(3)));
-    // The action-only older date renders even though it has no task,
-    // with its first action summary as the preview.
-    expect(listText).toContain("Scrolled");
-    // Actions live in the day detail, not on the list.
-    expect(listText).not.toContain("Clicked");
 
     clickRow("Today");
     await flush();
     const dayText = container.textContent ?? "";
-    // Task rows come before that day's action rows.
-    expect(dayText.indexOf("Today planned task")).toBeLessThan(dayText.indexOf("Clicked"));
+    expect(dayText).toContain("Today planned task");
+    expect(dayText).not.toContain("Clicked");
+    expect(dayText).not.toContain("Scrolled");
   });
 
-  it("orders actions newest first within a date", async () => {
-    taskFixtures = [];
+  it("a day with tasks plus standalone rows renders tasks only", async () => {
+    taskFixtures = [rawTask({ id: "t1", goal: "Only task", createdAt: atLocal(0, 9) })];
     historyFixtures = [
       actionRow("a-old", "Older action", "done", atLocal(0, 10)),
       actionRow("a-new", "Newer action", "done", atLocal(0, 15)),
@@ -216,14 +193,26 @@ describe("TasksPage date sections", () => {
     const container = mount();
     await flush();
     await flush();
-    expect(container.textContent).toContain("Today");
     clickRow("Today");
     await flush();
     const text = container.textContent ?? "";
-    expect(text.indexOf("Newer action")).toBeLessThan(text.indexOf("Older action"));
+    expect(text).toContain("Only task");
+    expect(text).not.toContain("Older action");
+    expect(text).not.toContain("Newer action");
   });
 
-  it("applies the chip to actions by state and keeps counts task-only", async () => {
+  it("a day with only standalone rows produces no day section", async () => {
+    taskFixtures = [];
+    historyFixtures = [actionRow("a1", "Clicked", "done", atLocal(0, 14))];
+    const container = mount();
+    await flush();
+    await flush();
+    const text = container.textContent ?? "";
+    expect(text).toContain("No tasks yet.");
+    expect(text).not.toContain("Clicked");
+  });
+
+  it("chips filter tasks and counts stay task-only", async () => {
     taskFixtures = [rawTask({ id: "t1", goal: "Only task", createdAt: atLocal(0, 9) })];
     historyFixtures = [
       actionRow("a-done", "Done action", "done", atLocal(0, 14)),
@@ -240,7 +229,8 @@ describe("TasksPage date sections", () => {
     await flush();
     clickRow("Today");
     await flush();
-    expect(container.textContent).toContain("Done action");
+    expect(container.textContent).toContain("Only task");
+    expect(container.textContent).not.toContain("Done action");
     expect(container.textContent).not.toContain("Failed action");
     expect(container.textContent).not.toContain("Running action");
 
@@ -248,20 +238,19 @@ describe("TasksPage date sections", () => {
     await flush();
     clickChip("Failed");
     await flush();
-    clickRow("Today");
-    await flush();
-    expect(container.textContent).toContain("Failed action");
-    expect(container.textContent).not.toContain("Done action");
-    expect(container.textContent).not.toContain("Running action");
+    // The done task is filtered out, and standalone rows cannot keep
+    // the day alive: no day row, no detail to open.
+    expect(container.textContent).toContain("No tasks match your search.");
   });
 
-  it("shows 'No tasks yet' only when both tasks and history are empty", async () => {
+  it("shows 'No tasks yet' when tasks are empty even with history rows", async () => {
     taskFixtures = [];
-    historyFixtures = [];
+    historyFixtures = [actionRow("a1", "Clicked", "done", atLocal(0, 14))];
     const container = mount();
     await flush();
     await flush();
     expect(container.textContent).toContain("No tasks yet.");
+    expect(container.textContent).not.toContain("Clicked");
   });
 
   it("never creates a task record for history actions", async () => {
@@ -270,7 +259,8 @@ describe("TasksPage date sections", () => {
     const container = mount();
     await flush();
     await flush();
-    expect(container.textContent).toContain("Clicked");
+    expect(container.textContent).toContain("No tasks yet.");
+    expect(container.textContent).not.toContain("Clicked");
     expect(sendMessage.mock.calls.some((call) => String((call[0] as { type?: string }).type ?? "").includes("create"))).toBe(false);
   });
 });
