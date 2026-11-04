@@ -158,13 +158,13 @@ describe("dashboard route classification (guard helpers)", () => {
     const helpers = guardHelpers as NonNullable<typeof guardHelpers>;
     const consequential = helpers.CONSEQUENTIAL_DASHBOARD_REQUEST_TYPES;
     const readOnly = helpers.READ_ONLY_DASHBOARD_REQUEST_TYPES;
-    expect(consequential.size).toBe(29);
+    expect(consequential.size).toBe(28);
     expect(readOnly.size).toBe(10);
     expect([...consequential].filter((type) => readOnly.has(type))).toEqual([]);
     // 39 = every type in DashboardRequest (messages.ts). A future route
     // added to handleRequest without a classification here must update
     // one of these sets, by design: classification is a decision, not a default.
-    expect(new Set([...consequential, ...readOnly]).size).toBe(39);
+    expect(new Set([...consequential, ...readOnly]).size).toBe(38);
     expect([...consequential, ...readOnly].sort()).toEqual([
       "muze/activity.history",
       "muze/activity.list",
@@ -199,7 +199,6 @@ describe("dashboard route classification (guard helpers)", () => {
       "muze/policy/tool",
       "muze/policy/update",
       "muze/state",
-      "muze/tasks.approvePlan",
       "muze/tasks.cancel",
       "muze/tasks.get",
       "muze/tasks.list",

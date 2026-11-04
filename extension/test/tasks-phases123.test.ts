@@ -1,6 +1,6 @@
 /**
  * Complex-task Phases 1–3 tests (mock executor, no live browser):
- * plan approval inside/outside bounds, denial, expiry, dry-run,
+ * per-step approval for consequential steps, denial, dry-run,
  * parallel read-only vs consequential, stale-ref pause + re-observe,
  * single-browser-session binding, and cancel final reports.
  * Phase 0 regression is covered by tasks-runner.test.ts and
@@ -54,7 +54,7 @@ const RISK: Record<string, string> = {
 
 interface HarnessOptions {
   store?: TaskStore & { snapshot(): import("../libs/tasks/index.js").TaskRecord[] };
-  executor?: (tool: string, input: Record<string, unknown>, ctx: { stepIndex: number; planApproved?: boolean }) => Promise<{ outputSummary: string }>;
+  executor?: (tool: string, input: Record<string, unknown>, ctx: { stepIndex: number }) => Promise<{ outputSummary: string }>;
   tabChecker?: (tabId: number) => Promise<{ exists: boolean; url: string | null }>;
   preStepObserve?: (step: TaskStep) => Promise<{ refValid: boolean; summary: string }>;
   progress?: (view: TaskView) => void;
@@ -62,13 +62,13 @@ interface HarnessOptions {
 
 function makeRunner(options: HarnessOptions = {}) {
   const store = options.store ?? createMemoryTaskStore();
-  const calls: { tool: string; stepIndex: number; planApproved?: boolean }[] = [];
+  const calls: { tool: string; stepIndex: number }[] = [];
   const audit: RunnerAuditEntry[] = [];
   const progressViews: TaskView[] = [];
   const executor =
     options.executor ??
-    (async (tool: string, _input: Record<string, unknown>, ctx: { stepIndex: number; planApproved?: boolean }) => {
-      calls.push({ tool, stepIndex: ctx.stepIndex, planApproved: ctx.planApproved });
+    (async (tool: string, _input: Record<string, unknown>, ctx: { stepIndex: number }) => {
+      calls.push({ tool, stepIndex: ctx.stepIndex });
       return { outputSummary: `ok ${ctx.stepIndex}` };
     });
   const runner = new TaskRunner({
@@ -82,7 +82,6 @@ function makeRunner(options: HarnessOptions = {}) {
     toolRisk: (tool) => RISK[tool],
     toolExists: (tool) => tool in RISK,
     validateStepInput: (_tool, input) => (input.bad === true ? ["input failed canonical validation"] : []),
-    verifyApprovalToken: (tokenId) => tokenId === "apv_good",
     now: () => nowVal,
     generateId: nextId,
   });
@@ -93,18 +92,9 @@ function doneIndices(view: TaskView): number[] {
   return view.steps.filter((s) => s.state === "done").map((s) => s.index);
 }
 
-describe("Phase 1: plan approval", () => {
-  it("does not run a bounded consequential plan until approved, then runs inside bounds with no second approval", async () => {
-    const calls: { tool: string; planApproved?: boolean }[] = [];
-    const { runner } = makeRunner({
-      executor: async (tool, _input, ctx) => {
-        calls.push({ tool, planApproved: ctx.planApproved });
-        // Simulate the executor's approval gate: a consequential step
-        // without plan approval must ask again.
-        if (tool === "dom.click" && ctx.planApproved !== true) throw codedError("APPROVAL_REQUIRED", "approval required");
-        return { outputSummary: "clicked" };
-      },
-    });
+describe("No plan approval: consequential plans run through per-step approval", () => {
+  it("runs a bounded consequential plan without any plan approval", async () => {
+    const { runner, calls } = makeRunner();
     const created = await runner.createTask(
       {
         goal: "click once",
@@ -116,45 +106,43 @@ describe("Phase 1: plan approval", () => {
       },
       snapshot,
     );
-    expect(created.status).toBe("waiting_approval");
-    expect(created.pauseReason).toBe("plan-approval-required");
-    expect(calls).toHaveLength(0);
-
-    const approved = await runner.approvePlan(created.id, CLIENT, { source: "dashboard" });
-    expect(approved.status).toBe("paused");
-    const resumed = await runner.resumeTask(created.id, CLIENT, snapshot);
-    expect(resumed.status).toBe("done");
+    expect(created.status).toBe("done");
     expect(calls).toHaveLength(1);
-    expect(calls[0].planApproved).toBe(true);
   });
 
-  it("pauses a step outside the bounds with the exact tool and reason, and resumes after re-approval", async () => {
-    const { runner, calls } = makeRunner();
+  it("sends an out-of-bounds step through the normal per-step approval path, not a plan pause", async () => {
+    let allow = false;
+    const { runner, calls } = makeRunner({
+      executor: async (tool, _input, ctx) => {
+        calls.push({ tool, stepIndex: ctx.stepIndex });
+        // Simulate the executor's per-step approval gate: the first
+        // attempt asks again; once approval is granted it runs.
+        if (tool === "dom.click" && !allow) throw codedError("APPROVAL_REQUIRED", "approval required");
+        return { outputSummary: "clicked" };
+      },
+    });
     const created = await runner.createTask(
       {
         goal: "click elsewhere",
         clientId: CLIENT,
         browserSessionId: SESSION,
         steps: [{ tool: "dom.click", input: { url: "https://other.com/page" } }],
+        planBounds: { allowedDomains: ["example.com"] },
         start: false,
       },
       snapshot,
     );
-    await runner.approvePlan(created.id, CLIENT, { source: "dashboard", bounds: { allowedDomains: ["example.com"] } });
-    const paused = await runner.resumeTask(created.id, CLIENT, snapshot);
-    expect(paused.status).toBe("waiting_approval");
-    expect(paused.steps[0].state).toBe("waiting_approval");
-    expect(paused.steps[0].outsideBoundsReason).toContain("other.com");
-    expect(paused.pauseReason).toContain("other.com");
-    expect(calls).toHaveLength(0);
-
-    await runner.approvePlan(created.id, CLIENT, { source: "dashboard", bounds: { allowedDomains: ["example.com", "other.com"] } });
+    const waiting = await runner.resumeTask(created.id, CLIENT, snapshot);
+    expect(waiting.status).toBe("waiting_approval");
+    expect(waiting.steps[0].state).toBe("waiting_approval");
+    expect(waiting.pauseReason).toBe("approval-required");
+    allow = true;
     const resumed = await runner.resumeTask(created.id, CLIENT, snapshot);
     expect(resumed.status).toBe("done");
-    expect(calls).toHaveLength(1);
+    expect(calls.filter((c) => c.tool === "dom.click")).toHaveLength(2);
   });
 
-  it("pauses only the denied step and ends honestly partial after resume, never done", async () => {
+  it("ends honestly partial when a step is denied, instead of pausing for a denied step", async () => {
     const { runner, calls } = makeRunner({
       executor: async (tool, _input, ctx) => {
         calls.push({ tool, stepIndex: ctx.stepIndex });
@@ -164,104 +152,51 @@ describe("Phase 1: plan approval", () => {
     });
     const created = await runner.createTask(
       {
-        goal: "click then read",
+        goal: "read then click",
         clientId: CLIENT,
         browserSessionId: SESSION,
         steps: [
-          { tool: "dom.click", input: { url: "https://example.com/a" } },
           { tool: "tabs.list", input: {} },
+          { tool: "dom.click", input: { url: "https://example.com/a" } },
         ],
         start: false,
       },
       snapshot,
     );
-    await runner.approvePlan(created.id, CLIENT, { source: "dashboard" });
-    const paused = await runner.resumeTask(created.id, CLIENT, snapshot);
-    expect(paused.status).toBe("paused");
-    expect(paused.pauseReason).toBe("step-denied");
-    expect(paused.steps[0].state).toBe("failed");
-    expect(paused.steps[1].state).toBe("pending");
-
     const finished = await runner.resumeTask(created.id, CLIENT, snapshot);
     expect(finished.status).toBe("partial");
-    expect(finished.finalReport?.failed).toEqual([0]);
-    expect(finished.finalReport?.done).toEqual([1]);
-    expect(finished.finalReport?.undone).toEqual([0]);
+    expect(finished.finalReport?.failed).toEqual([1]);
+    expect(finished.finalReport?.done).toEqual([0]);
     expect(calls.filter((c) => c.tool === "dom.click")).toHaveLength(1);
   });
 
-  it("pauses on expired plan approval, at run start and mid-run", async () => {
-    const { runner, calls } = makeRunner();
+  it("resumes a task left waiting_approval by the old plan gate and runs it", async () => {
+    const store = createMemoryTaskStore();
+    const { runner, calls } = makeRunner({ store });
     const created = await runner.createTask(
       {
-        goal: "slow task",
+        goal: "click once",
         clientId: CLIENT,
         browserSessionId: SESSION,
-        steps: [
-          { tool: "tabs.list", input: {} },
-          { tool: "tabs.list", input: {} },
-        ],
+        steps: [{ tool: "dom.click", input: { url: "https://example.com/page" } }],
+        planBounds: { allowedDomains: ["example.com"] },
         start: false,
       },
       snapshot,
     );
-    await runner.approvePlan(created.id, CLIENT, { source: "dashboard" });
-    // Approval expires at min(now + 24h, createdAt + 600s budget) = 1_600_000.
-    nowVal = 2_000_000;
-    const expired = await runner.resumeTask(created.id, CLIENT, snapshot);
-    expect(expired.status).toBe("paused");
-    expect(expired.pauseReason).toBe("plan-approval-expired");
-    expect(calls).toHaveLength(0);
-
-    // Mid-run expiry: the first step advances the clock past expiry.
-    // The task budget (200M ms) is longer than the 24h approval cap, so
-    // expiry — not budget-exceeded — is what pauses the second step.
-    nowVal = 1_000_000;
-    const { runner: runner2, calls: calls2 } = makeRunner({
-      executor: async (_tool, _input, ctx) => {
-        calls2.push({ tool: "tabs.list", stepIndex: ctx.stepIndex });
-        nowVal = 100_000_000;
-        return { outputSummary: "ok" };
-      },
-    });
-    const created2 = await runner2.createTask(
-      {
-        goal: "mid-run expiry",
-        clientId: CLIENT,
-        browserSessionId: SESSION,
-        steps: [
-          { tool: "tabs.list", input: {} },
-          { tool: "tabs.list", input: {} },
-        ],
-        totalBudgetMs: 200_000_000,
-        start: false,
-      },
-      snapshot,
-    );
-    await runner2.approvePlan(created2.id, CLIENT, { source: "dashboard" });
-    const mid = await runner2.resumeTask(created2.id, CLIENT, snapshot);
-    expect(mid.status).toBe("paused");
-    expect(mid.pauseReason).toBe("plan-approval-expired");
-    expect(doneIndices(mid)).toEqual([0]);
-    expect(calls2).toHaveLength(1);
+    // Legacy record: stuck waiting on the removed gate.
+    const all = store.snapshot();
+    const legacy = all.find((t) => t.id === created.id);
+    if (!legacy) throw new Error("task not stored");
+    legacy.status = "waiting_approval";
+    legacy.pauseReason = "plan-approval-required";
+    await store.save(all);
+    const resumed = await runner.resumeTask(created.id, CLIENT, snapshot);
+    expect(resumed.status).toBe("done");
+    expect(calls).toHaveLength(1);
   });
 
-  it("rejects a broker-token approval that does not verify, and requires a token at all", async () => {
-    const { runner } = makeRunner();
-    const created = await runner.createTask(
-      { goal: "x", clientId: CLIENT, browserSessionId: SESSION, steps: [{ tool: "tabs.list", input: {} }], start: false },
-      snapshot,
-    );
-    await expect(runner.approvePlan(created.id, CLIENT, { source: "broker-token", approvalTokenId: "apv_bad" })).rejects.toThrow(/did not verify/);
-    await expect(runner.approvePlan(created.id, CLIENT, { source: "broker-token" })).rejects.toThrow(/requires an approval token/);
-    const ok = await runner.approvePlan(created.id, CLIENT, { source: "broker-token", approvalTokenId: "apv_good" });
-    expect(ok.status).toBe("created");
-    const got = await runner.getTask(created.id, CLIENT);
-    expect(got.status).toBe("created");
-    expect(doneIndices(got)).toEqual([]);
-  });
-
-  it("keeps plan-approved idempotency: a resumed done step is never re-executed", async () => {
+  it("keeps idempotency: a resumed done step is never re-executed", async () => {
     const store = createMemoryTaskStore();
     let taskId = "";
     let pausedOnce = false;
@@ -292,7 +227,6 @@ describe("Phase 1: plan approval", () => {
       snapshot,
     );
     taskId = created.id;
-    await runner.approvePlan(created.id, CLIENT, { source: "dashboard" });
     await runner.resumeTask(created.id, CLIENT, snapshot);
     // New runner over the same store = service-worker restart.
     const second = makeRunner({ store });
@@ -383,7 +317,7 @@ describe("Phase 3: parallel read-only, grounding, session binding", () => {
     expect(maxConcurrent).toBeLessThanOrEqual(4);
   });
 
-  it("never parallelises consequential steps unless explicitly independent AND plan-approved", async () => {
+  it("never parallelises consequential steps, even when explicitly independent", async () => {
     let concurrent = 0;
     let maxConcurrent = 0;
     const { runner } = makeRunner({
@@ -395,7 +329,7 @@ describe("Phase 3: parallel read-only, grounding, session binding", () => {
         return { outputSummary: "ok" };
       },
     });
-    // No plan approval: consequential group members run one at a time.
+    // Consequential group members run one at a time.
     const sequential = await runner.createTask(
       {
         goal: "click three",
@@ -408,33 +342,6 @@ describe("Phase 3: parallel read-only, grounding, session binding", () => {
     );
     expect(sequential.status).toBe("done");
     expect(maxConcurrent).toBe(1);
-
-    // Explicitly independent + plan-approved: the same shape batches.
-    concurrent = 0;
-    maxConcurrent = 0;
-    const { runner: runner2 } = makeRunner({
-      executor: async () => {
-        concurrent += 1;
-        maxConcurrent = Math.max(maxConcurrent, concurrent);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        concurrent -= 1;
-        return { outputSummary: "ok" };
-      },
-    });
-    const approved = await runner2.createTask(
-      {
-        goal: "click three approved",
-        clientId: CLIENT,
-        browserSessionId: SESSION,
-        steps: Array.from({ length: 3 }, () => ({ tool: "dom.click", input: { url: "https://example.com/a" }, independent: true, parallelGroup: 0 })),
-        start: false,
-      },
-      snapshot,
-    );
-    await runner2.approvePlan(approved.id, CLIENT, { source: "dashboard" });
-    const batched = await runner2.resumeTask(approved.id, CLIENT, snapshot);
-    expect(batched.status).toBe("done");
-    expect(maxConcurrent).toBe(3);
   });
 
   it("pauses on a stale ref and re-observes on resume instead of failing", async () => {
@@ -546,7 +453,7 @@ describe("Phase 2: cancel final report", () => {
   });
 });
 
-describe("Phase 1: host dispatch for approvePlan and dry-run", () => {
+describe("Host dispatch for dry-run", () => {
   function setupDispatch() {
     const rt = createTestRuntime({
       policy: {
@@ -556,7 +463,7 @@ describe("Phase 1: host dispatch for approvePlan and dry-run", () => {
       },
     });
     const messages: BridgeHostMessage[] = [];
-    const seen: { approvePlan?: unknown; preview?: unknown; create?: unknown } = {};
+    const seen: { preview?: unknown; create?: unknown } = {};
     const runnerView = {
       id: "task_1",
       goal: "g",
@@ -588,7 +495,6 @@ describe("Phase 1: host dispatch for approvePlan and dry-run", () => {
       correlationId: "corr",
       resultSummary: "",
       planBounds: null,
-      planApproval: null,
       finalReport: null,
       policySnapshot: snapshot,
       createdAt: 1000,
@@ -610,10 +516,6 @@ describe("Phase 1: host dispatch for approvePlan and dry-run", () => {
       pauseTask: async () => runnerView as never,
       resumeTask: async () => runnerView as never,
       cancelTask: async () => runnerView as never,
-      approvePlan: async (_id, _client, opts) => {
-        seen.approvePlan = opts;
-        return runnerView as never;
-      },
       appendSteps: async () => runnerView as never,
       previewTask: async (input) => {
         seen.preview = input;
@@ -636,28 +538,8 @@ describe("Phase 1: host dispatch for approvePlan and dry-run", () => {
     return { handler, messages, seen };
   }
 
-  it("fails closed on tasks.approvePlan without a broker approval token", async () => {
+  it("routes tasks.create dryRun to preview only", async () => {
     const { handler, messages, seen } = setupDispatch();
-    await handler.handle({ type: "tool.call", id: "a1", tool: "tasks.approvePlan", input: { taskId: "task_1" } });
-    const last = messages[messages.length - 1] as { type: string; error: { message: string } };
-    expect(last.type).toBe("tool.error");
-    expect(last.error.message).toContain("broker approval token");
-    expect(seen.approvePlan).toBeUndefined();
-  });
-
-  it("routes tasks.approvePlan with a broker token, and tasks.create dryRun to preview only", async () => {
-    const { handler, messages, seen } = setupDispatch();
-    await handler.handle({
-      type: "tool.call",
-      id: "a2",
-      tool: "tasks.approvePlan",
-      input: { taskId: "task_1", bounds: { allowedDomains: ["example.com"] } },
-      approvalId: "apv_1",
-    });
-    expect(seen.approvePlan).toMatchObject({ source: "broker-token", approvalTokenId: "apv_1" });
-    const approvedMsg = messages[messages.length - 1] as { type: string };
-    expect(approvedMsg.type).toBe("tool.result");
-
     await handler.handle({
       type: "tool.call",
       id: "a3",

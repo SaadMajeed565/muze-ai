@@ -132,7 +132,6 @@ function dashboardPort(runner: TaskRunner): TaskDashboardPort {
       return toView(await runner.resumeTask(id, clientId, { ...SNAPSHOT, clientId }));
     },
     cancelTask: async (id) => toView(await runner.cancelTask(id, await withClient(id))),
-    approvePlan: async (id, bounds) => toView(await runner.approvePlan(id, await withClient(id), { source: "dashboard", bounds })),
   };
 }
 
@@ -425,7 +424,7 @@ describe("integration: host dispatch + dashboard wiring", () => {
 
   it("registry includes tasks.* with stub handlers that fail cleanly on direct executor calls", () => {
     const registry = createToolRegistry();
-    expect(registry.names().filter((n) => n.startsWith("tasks."))).toHaveLength(8);
+    expect(registry.names().filter((n) => n.startsWith("tasks."))).toHaveLength(7);
     expect(registry.get("tasks.create")).toBeDefined();
     expect(registry.get("tasks.appendSteps")).toBeDefined();
   });

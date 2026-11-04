@@ -51,7 +51,7 @@ export interface TaskStepView {
   state: TaskStepState;
   attempts: number;
   outputSummary: string;
-  /** Phase 1: why this step paused outside the approved plan bounds, if it did. */
+  /** Why this step paused outside the plan bounds, if it did (legacy field). */
   outsideBoundsReason?: string;
 }
 
@@ -62,21 +62,6 @@ export interface TaskFinalReport {
   failed: number[];
   compensations: string[];
   manualCleanup: string[];
-}
-
-/** Dashboard-supplied plan bounds (Phase 1): same shape as the contract
- * bounds, but every field is optional and unvalidated here — the runner
- * normalises and validates at approval time. */
-export interface PlanBoundsInput {
-  allowedTools?: string[];
-  allowedRiskLevels?: string[];
-  allowedDomains?: string[];
-  allowPurchases?: boolean;
-  allowPayments?: boolean;
-  allowExternalSubmit?: boolean;
-  maxSteps?: number;
-  maxAttemptsPerStep?: number;
-  totalBudgetMs?: number;
 }
 
 /**
@@ -122,13 +107,6 @@ export interface TaskDashboardPort {
   pauseTask(id: string, reason?: string): Promise<TaskView>;
   resumeTask(id: string): Promise<TaskView>;
   cancelTask(id: string): Promise<TaskView>;
-  /**
-   * Phase 1 dashboard plan approval. Optional so existing ports keep
-   * working: the handler reports "not wired" when absent instead of
-   * crashing. The dashboard's own confirm dialog (in the Tasks page)
-   * is the user decision; there is no MCP approval flag on this path.
-   */
-  approvePlan?(id: string, bounds?: PlanBoundsInput): Promise<TaskView>;
 }
 
 /**
@@ -140,8 +118,6 @@ export interface TaskDashboardRequest {
   type: string;
   taskId?: string;
   reason?: string;
-  /** Phase 1: dashboard-supplied plan bounds for muze/tasks.approvePlan. */
-  bounds?: unknown;
 }
 
 export interface TaskDashboardResponse {
@@ -211,39 +187,6 @@ function sanitizeStep(value: unknown): TaskStepView {
 function asStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === "string");
-}
-
-/** Allowlisted bounds from an untrusted dashboard request; anything else is dropped. */
-export function sanitizePlanBounds(value: unknown): PlanBoundsInput | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  const bounds: PlanBoundsInput = {};
-  const stringList = (key: string): string[] | undefined => {
-    const list = asStringList(record[key]);
-    return list.length > 0 ? list : undefined;
-  };
-  const bool = (key: string): boolean | undefined => (typeof record[key] === "boolean" ? record[key] : undefined);
-  const positiveInt = (key: string): number | undefined =>
-    typeof record[key] === "number" && Number.isInteger(record[key]) && record[key] > 0 ? record[key] : undefined;
-  const allowedTools = stringList("allowedTools");
-  if (allowedTools) bounds.allowedTools = allowedTools;
-  const allowedRiskLevels = stringList("allowedRiskLevels");
-  if (allowedRiskLevels) bounds.allowedRiskLevels = allowedRiskLevels;
-  const allowedDomains = stringList("allowedDomains");
-  if (allowedDomains) bounds.allowedDomains = allowedDomains;
-  const allowPurchases = bool("allowPurchases");
-  if (allowPurchases !== undefined) bounds.allowPurchases = allowPurchases;
-  const allowPayments = bool("allowPayments");
-  if (allowPayments !== undefined) bounds.allowPayments = allowPayments;
-  const allowExternalSubmit = bool("allowExternalSubmit");
-  if (allowExternalSubmit !== undefined) bounds.allowExternalSubmit = allowExternalSubmit;
-  const maxSteps = positiveInt("maxSteps");
-  if (maxSteps !== undefined) bounds.maxSteps = maxSteps;
-  const maxAttemptsPerStep = positiveInt("maxAttemptsPerStep");
-  if (maxAttemptsPerStep !== undefined) bounds.maxAttemptsPerStep = maxAttemptsPerStep;
-  const totalBudgetMs = positiveInt("totalBudgetMs");
-  if (totalBudgetMs !== undefined) bounds.totalBudgetMs = totalBudgetMs;
-  return Object.keys(bounds).length > 0 ? bounds : undefined;
 }
 
 function sanitizeFinalReport(value: unknown): TaskFinalReport | undefined {
@@ -399,21 +342,14 @@ export async function handleTaskDashboardRequest(
       case "muze/tasks.get":
       case "muze/tasks.pause":
       case "muze/tasks.resume":
-      case "muze/tasks.cancel":
-      case "muze/tasks.approvePlan": {
+      case "muze/tasks.cancel": {
         const taskId = typeof request.taskId === "string" ? request.taskId.trim() : "";
         if (!taskId) return { ok: false, error: "task id required" };
         let task: TaskView;
         if (type === "muze/tasks.get") task = await port.getTask(taskId);
         else if (type === "muze/tasks.pause") task = await port.pauseTask(taskId, request.reason);
         else if (type === "muze/tasks.resume") task = await port.resumeTask(taskId);
-        else if (type === "muze/tasks.approvePlan") {
-          // The dashboard decision itself is the approval source; the
-          // service-worker port maps this onto runner.approvePlan with
-          // source "dashboard". No client-supplied flag is involved.
-          if (!port.approvePlan) return { ok: false, error: "task approvePlan not wired" };
-          task = await port.approvePlan(taskId, sanitizePlanBounds(request.bounds));
-        } else task = await port.cancelTask(taskId);
+        else task = await port.cancelTask(taskId);
         return { ok: true, task: sanitizeTaskView(task) };
       }
       default:

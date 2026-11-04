@@ -51,7 +51,6 @@ export const CORE_TOOL_NAMES = new Set<string>([
   "tasks.pause",
   "tasks.resume",
   "tasks.cancel",
-  "tasks.approvePlan",
 ]);
 
 /** Stale names from older instructions; rewrite so cached clients still work. */
@@ -417,7 +416,7 @@ export function parseAgentMode(value: unknown): AgentMode | undefined {
 export const MODE_PROMPTS: Record<AgentMode, string> = {
   read: "Read mode: ground first, batch independent reads, and never act. You see read-only tools only. A tool you cannot see is not available in this mode — it is not merely discouraged.",
   act: "Act mode: verify after every consequential step, work the fallback ladder, never re-resolve a stale ref, and be aware that a step may need a compensation if a later step fails.",
-  plan: "Plan mode: explore, ground, and propose ordered steps with bounds and verify conditions — never execute. Approving a plan does not execute it; execution requires resuming in act mode.",
+  plan: "Plan mode: explore, ground, and propose ordered steps with bounds and verify conditions — never execute. Execution requires resuming in act mode.",
   explore: "Explore mode (read-only child): make bounded reads and return only the requested summary shape. You see read-only tools only and you cannot create child tasks.",
   summary: "Internal summary mode: you have no browser tools. Condense only the task record you were given — what was done, what is in progress, what is next, and the key constraints and decisions.",
   compaction: "Internal compaction mode: you have no browser tools. Operate only on stored task records, protect the newest tail and instruction-bearing records, and act only above the reclaim threshold.",
@@ -428,7 +427,7 @@ export function isModeVisibleTool(mode: AgentMode, descriptor: ToolDescriptor): 
   if (mode === "summary" || mode === "compaction") return false;
   if (mode === "act") return true;
   if (mode === "plan") {
-    if (descriptor.name === "tasks.create" || descriptor.name === "tasks.approvePlan") return true;
+    if (descriptor.name === "tasks.create") return true;
   }
   // read / explore / plan (base): read-only descriptors, plus the two
   // meta tools that are themselves read-only (discovery, batching reads).
@@ -1269,7 +1268,7 @@ export function createGatewayMcpServer(
     // puts tasks.create first). Fail closed like the discovered append:
     // when the live list is empty (permission level allows nothing),
     // advertise nothing extra. Mode visibility still applies (read mode
-    // keeps only get/list; plan mode keeps only create/approvePlan).
+    // keeps only get/list; plan mode keeps only create).
     // ListTools stays an offer — call-time scope still gates every call,
     // and task creation itself is not permission-level gated (the runner
     // validates shape/bounds/mode only; execution gates per step).

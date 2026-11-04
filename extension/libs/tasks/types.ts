@@ -159,13 +159,11 @@ export interface TaskStep {
 }
 
 /**
- * Plan-level approval bounds (Phase 1, plan 3.3). Every field is a
- * restriction, never a permission grant beyond the plan: the defaults
- * deny purchases, payments, and external submits. An absent
- * allowedTools/allowedDomains list means "no restriction from that
- * axis beyond the plan itself" — allowedDomains is filled in from the
- * plan's own domains at approval time when not supplied, so a step
- * touching a new domain still pauses.
+ * Plan-level bounds. Every field is a restriction, never a permission
+ * grant beyond the plan: the defaults deny purchases, payments, and
+ * external submits. An absent allowedTools/allowedDomains list means
+ * "no restriction from that axis beyond the plan itself". Bounds are
+ * data for dry-run previews; they never pre-approve a step.
  */
 export interface PlanBounds {
   allowedTools?: string[];
@@ -177,21 +175,6 @@ export interface PlanBounds {
   maxSteps?: number;
   maxAttemptsPerStep?: number;
   totalBudgetMs?: number;
-}
-
-/** Where a plan approval came from. Never a client-supplied flag: the
- * caller (host dispatch / dashboard port) derives this from transport,
- * and the runner trusts the caller, not the client input. */
-export type PlanApprovalSource = "broker-token" | "dashboard" | "elicitation";
-
-export interface PlanApproval {
-  source: PlanApprovalSource;
-  approvedAt: number;
-  /** min(approvedAt + 24h, task lifetime budget end). No token id is
-   * stored: the broker token is verified at approval time and then
-   * discarded, so a task view can never leak it. */
-  expiresAt: number;
-  bounds: PlanBounds;
 }
 
 /** Structured final report (Phase 2): done/undone/failed step indices,
@@ -245,10 +228,10 @@ export interface TaskRecord {
   totalBudgetMs: number;
   correlationId: string;
   resultSummary: string;
-  /** Phase 1: bounds supplied at creation (may be null) and the stored
-   * plan approval (null until tasks.approvePlan succeeds). */
+  /** Plan bounds supplied at creation (may be null). Bounds are data
+   * only: they never pre-approve a step — every consequential step
+   * still goes through the normal per-step approval path. */
   planBounds: PlanBounds | null;
-  planApproval: PlanApproval | null;
   /** Phase 2: set when the task reaches a terminal state; null before. */
   finalReport: TaskFinalReport | null;
   policySnapshot: PolicySnapshot;
@@ -303,8 +286,6 @@ export const DEFAULT_RESUME_AFTER_MS = 1000;
 export const MAX_RESUME_AFTER_MS = 60000;
 /** Retryable errors may be retried up to this many attempts per step per run. */
 export const MAX_STEP_ATTEMPTS = 2;
-/** Plan approval lifetime cap (Phase 1, plan 3.3): task lifetime or 24h, whichever shorter. */
-export const PLAN_APPROVAL_MAX_MS = 24 * 60 * 60 * 1000;
 /** Parallel read-only batch cap (Phase 3, same limit workflows already use for mapPool). */
 export const MAX_PARALLEL_STEPS = 4;
 /** Cap on the stored result summary so a long task cannot grow its record without bound. */
@@ -573,7 +554,7 @@ export function checkStepAgainstBounds(
   return null;
 }
 
-/** Domains touched by a whole plan, for deriving default approval bounds. */
+/** Domains touched by a whole plan, for deriving default bounds. */
 export function planDomains(steps: { input: Record<string, unknown> }[]): string[] {
   const all = new Set<string>();
   for (const step of steps) {

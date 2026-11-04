@@ -98,7 +98,7 @@ describe("shotfix: inline files through unified form / submit (the dropped-files
     const seen: unknown[] = [];
     stubPageOps(rt, seen);
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    // No planApproved token: the handler's dry-run approval gate must run
+    // No pre-approval: the handler's dry-run approval gate must run
     // (this is the live path for auto-approved sessions), and it must not
     // fail validation on the inline files it is supposed to gate.
     const result = await rt.executor.execute({ taskId: "task_step", 

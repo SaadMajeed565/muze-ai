@@ -144,9 +144,8 @@ export class ApprovalBroker {
 
   /**
    * Burn an approved token without re-checking its fingerprint. Used
-   * only by the service worker's plan-approval verification, which
-   * already checked tool (tasks.approvePlan), approved status, and
-   * client match before calling this. Returns false unless the record
+   * only by callers that already checked approved status and client
+   * match before calling this. Returns false unless the record
    * was approved at call time.
    */
   markUsed(id: string): boolean {

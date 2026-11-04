@@ -127,26 +127,23 @@ describe("Phase C: pruning is output-only with protected records", () => {
     expect(after.steps[1].input).toEqual({ ref: "r1" });
   });
 
-  it("keeps the plan approval and policy snapshot when pruning applies", async () => {
+  it("keeps the policy snapshot when pruning applies", async () => {
     idCounter = 0;
     const { runner, store } = makeRunner();
     const created = await runner.createTask(
       {
-        goal: "approved reads",
+        goal: "plain reads",
         clientId: CLIENT,
         browserSessionId: SESSION,
         steps: Array.from({ length: 4 }, () => ({ tool: "tabs.list", input: {} })),
       },
       { policyVersion: 1, mode: "default", clientId: CLIENT, scope: "call:tools" },
     );
-    await runner.approvePlan(created.id, CLIENT, { source: "dashboard" });
     await runner.runTask(created.id, CLIENT);
     const before = findTask(store, created.id);
-    expect(before.planApproval).not.toBeNull();
     const pruned = await runner.pruneTask(created.id, CLIENT, { tailSteps: 1, minReclaimChars: 10 });
     expect(pruned.applied).toBe(true);
     const after = findTask(store, created.id);
-    expect(after.planApproval).toEqual(before.planApproval);
     expect(after.policySnapshot).toEqual(before.policySnapshot);
   });
 
@@ -199,7 +196,6 @@ describe("Phase C: child tasks", () => {
     expect(childRecord.parentId).toBe(parent.id);
     expect(childRecord.browserSessionId).toBe(parent.browserSessionId);
     expect(childRecord.policySnapshot.policyVersion).toBe(2);
-    expect(childRecord.planApproval).toBeNull();
     // Isolation: child context carries only the child's own record.
     const context = await runner.getChildContext(child.id, CLIENT);
     expect(context.parentId).toBe(parent.id);

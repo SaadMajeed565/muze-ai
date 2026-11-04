@@ -16,7 +16,7 @@
  * - Pruning is OUTPUT-ONLY. pruneTaskOutputs() clears only the
  *   `outputSummary` field of old completed steps. It never changes a
  *   step's state, outcome, verify result, checkpoint, input,
- *   idempotency key, or the task's policy snapshot / plan approval,
+ *   idempotency key, or the task's policy snapshot,
  *   and it never touches approvals, checkpoints, or the latest verify
  *   record (see PROTECTED rules below).
  *
@@ -136,7 +136,7 @@ export interface PruneTaskOutputsResult {
  *   waiting_approval) — a waiting_approval step is an approval record
  *   in flight and is never pruned.
  *
- * The task's policy snapshot and plan approval are untouched (this
+ * The task's policy snapshot is untouched (this
  * function only ever clears step `outputSummary` fields), and a step's
  * state, verify outcome, verify summary, checkpoint, input, and
  * idempotency key are never modified.

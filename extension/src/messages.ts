@@ -97,7 +97,6 @@ export type DashboardRequest =
   | { type: "muze/tasks.pause"; taskId: string; reason?: string }
   | { type: "muze/tasks.resume"; taskId: string }
   | { type: "muze/tasks.cancel"; taskId: string }
-  | { type: "muze/tasks.approvePlan"; taskId: string; bounds?: unknown }
   | { type: "muze/activity.list" }
   | { type: "muze/activity.history" }
   | { type: "muze/browsers/list" }

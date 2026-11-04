@@ -53,10 +53,6 @@ function canResume(status: TaskStatus): boolean {
   return status === "paused" || status === "waiting_approval";
 }
 
-function canApprovePlan(status: TaskStatus): boolean {
-  return status === "created" || status === "waiting_approval" || status === "paused";
-}
-
 function isFinal(status: TaskStatus): boolean {
   return status === "done" || status === "failed" || status === "cancelled" || status === "partial";
 }
@@ -195,7 +191,7 @@ export function TasksPage({
     };
   }, [load, loadHistory]);
 
-  const act = async (task: TaskView, action: "pause" | "resume" | "cancel" | "approvePlan"): Promise<void> => {
+  const act = async (task: TaskView, action: "pause" | "resume" | "cancel"): Promise<void> => {
     if (action === "cancel") {
       const ok = await confirm({
         title: "Cancel this task?",
@@ -206,14 +202,6 @@ export function TasksPage({
       });
       if (!ok) return;
     }
-    if (action === "approvePlan") {
-      const ok = await confirm({
-        title: "Approve this plan?",
-        body: "Steps in the plan will run without asking again. Steps outside it will still pause and ask. Purchases, payments, and external submits are never auto-approved.",
-        confirmLabel: "Approve plan",
-      });
-      if (!ok) return;
-    }
     setBusyId(task.id);
     setError(null);
     const response = await sendRequest({ type: `muze/tasks.${action}`, taskId: task.id });
@@ -221,7 +209,7 @@ export function TasksPage({
       setError(response.error ?? `Could not ${action} the task`);
     } else {
       showToast(
-        action === "pause" ? "Task paused" : action === "resume" ? "Task resumed" : action === "cancel" ? "Task cancelled" : "Plan approved",
+        action === "pause" ? "Task paused" : action === "resume" ? "Task resumed" : "Task cancelled",
       );
     }
     setBusyId(null);
@@ -326,11 +314,6 @@ export function TasksPage({
         </div>
 
         <div class="detail-actions">
-          {canApprovePlan(selected.status) ? (
-            <Button variant="primary" size="sm" icon="check" disabled={taskBusy} onClick={() => void act(selected, "approvePlan")}>
-              Approve plan
-            </Button>
-          ) : null}
           {canPause(selected.status) ? (
             <Button variant="secondary" size="sm" icon="pause" disabled={taskBusy} onClick={() => void act(selected, "pause")}>
               Pause

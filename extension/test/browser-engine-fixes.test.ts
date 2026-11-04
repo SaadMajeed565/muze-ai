@@ -4,8 +4,8 @@
  * consequential tool names, multi-frame ref routing, act summaries,
  * CDP key codes / char events / timeout generation guard, captureTab
  * windowId, screenshots.viewport capture, coordinate typing
- * (dom.typeAt/dom.pressAt), dom.click TIMEOUT-only fallback, batch
- * bounds re-check, and approval-response broker errors.
+ * (dom.typeAt/dom.pressAt), dom.click TIMEOUT-only fallback, and
+ * approval-response broker errors.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultIsConsequential } from "../libs/tasks/types.js";
@@ -16,12 +16,6 @@ import { systemToolHandlers } from "../libs/browser-engine/tools/system.js";
 import { interactToolHandlers } from "../libs/browser-engine/tools/interact.js";
 import { createTestRuntime } from "../libs/testing/index.js";
 import { ToolErrorException } from "../libs/tool-contracts/index.js";
-import {
-  TaskRunner,
-  createMemoryTaskStore,
-  type PolicySnapshot,
-  type TaskStep,
-} from "../libs/tasks/index.js";
 import { HostProtocolHandler, type BridgeTransport } from "../src/host-protocol.js";
 import { PROTOCOL_VERSION } from "../libs/tool-contracts/index.js";
 
@@ -305,48 +299,6 @@ describe("dom.click TIMEOUT-only synthetic fallback", () => {
     await expect(
       rt.executor.execute({ taskId: "task_step",  tool: "dom.click", input: { ref, button: "left" }, client, ctx: rt.ctx }),
     ).rejects.toThrow("debugger detached");
-  });
-});
-
-describe("batch bounds re-check", () => {
-  it("pauses before launch when the plan approval expires during pre-flight, without running any member", async () => {
-    let nowVal = 1_000_000;
-    let idCounter = 0;
-    const snapshot: PolicySnapshot = { policyVersion: 1, mode: "default", clientId: "client-a", scope: "call:tools" };
-    const calls: string[] = [];
-    const runner = new TaskRunner({
-      store: createMemoryTaskStore(),
-      executeStep: async (tool: string) => {
-        calls.push(tool);
-        return { outputSummary: "ok" };
-      },
-      audit: () => undefined,
-      progress: () => undefined,
-      policySnapshot: () => ({ ...snapshot }),
-      captureSnapshot: async (_step: TaskStep) => {
-        // The approval expires while snapshots are being captured.
-        nowVal = 10_000_000_000;
-        return { url: null, a11ySummary: "", formSummary: "" };
-      },
-      now: () => nowVal,
-      generateId: () => `task_${(++idCounter).toString(16).padStart(32, "0")}`,
-      isConsequential: () => true,
-    });
-    const created = await runner.createTask({
-      goal: "parallel clicks",
-      clientId: "client-a",
-      browserSessionId: "browser-session-1",
-      steps: [
-        { tool: "dom.click", input: { ref: "r1" }, independent: true, parallelGroup: 1 },
-        { tool: "dom.click", input: { ref: "r2" }, independent: true, parallelGroup: 1 },
-      ],
-    }, snapshot);
-    await runner.approvePlan(created.id, "client-a", { source: "dashboard", bounds: {} });
-    const view = await runner.runTask(created.id, "client-a");
-    expect(view.status).toBe("paused");
-    expect(view.pauseReason).toBe("plan-approval-expired");
-    expect(calls).toEqual([]);
-    expect(view.steps.every((s) => s.state === "pending")).toBe(true);
   });
 });
 

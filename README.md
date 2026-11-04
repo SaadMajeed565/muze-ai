@@ -17,8 +17,8 @@ AI client -> Worker /mcp (OAuth) -> Session Durable Object
 
 The registry is the single source of truth. Tool counts are derived from it at runtime and in tests — never hardcode a count in UI copy.
 
-- 139 tools in 0.5.0: 118 granular tools plus 13 unified tools plus 8 task tools (`tasks.create`, `tasks.appendSteps`, `tasks.get`, `tasks.list`, `tasks.pause`, `tasks.resume`, `tasks.cancel`, `tasks.approvePlan`). Tool counts are generated from the registry by `node scripts/tool-inventory.mjs` (`TOOL-INVENTORY.md`) — never hardcode a count in UI copy.
-- The MCP surface by default shows 5 master tools (observe, act, navigate, form, data) plus batch and discover, plus the 8 task tools in the core set. Other tools are discoverable through `tools.discover`, or shown in full when `MCP_SHOW_ALL_TOOLS` is set.
+- 138 tools in 0.5.0: 118 granular tools plus 13 unified tools plus 7 task tools (`tasks.create`, `tasks.appendSteps`, `tasks.get`, `tasks.list`, `tasks.pause`, `tasks.resume`, `tasks.cancel`). Tool counts are generated from the registry by `node scripts/tool-inventory.mjs` (`TOOL-INVENTORY.md`) — never hardcode a count in UI copy.
+- The MCP surface by default shows 5 master tools (observe, act, navigate, form, data) plus batch and discover, plus the 7 task tools in the core set. Other tools are discoverable through `tools.discover`, or shown in full when `MCP_SHOW_ALL_TOOLS` is set.
 - Risk tiers: read-only, reversible, sensitive-read, consequential, restricted. No tool currently uses the restricted tier; the tier exists as a deny-by-default gate.
 - Batch calls on the extension side are limited to read-only tools.
 
@@ -64,23 +64,18 @@ validation; the unified output now accepts boolean or number.
   (`extension/test/tool-governance.test.ts`) plus sync/check scripts.
 
 
-## Durable tasks: plan approval, dry-run, progress, parallel read-only (0.5.0)
+## Durable tasks: dry-run, progress, parallel read-only (0.5.0)
 
-- `tasks.approvePlan` is a separate granular tool, never an action
-  parameter and never a client-supplied flag. MCP callers approve with
-  a broker approval token (verified, bound to `tasks.approvePlan` and
-  the calling client, then burned single-use); dashboard users approve
-  with the dashboard decision itself. Approval expires at the task
-  lifetime or 24 hours, whichever is shorter. Steps inside the approved
-  bounds (tools, risk levels, domains, no purchases/payments/external
-  submits unless explicitly allowed, max steps/attempts, total budget)
-  run without a second approval; steps outside bounds pause in
-  `waiting_approval` with the reason; denial fails only that step and
-  the task ends `partial`, never `done`. The executor's internal
-  `planApproved` flag is set only by the TaskRunner after verifying an
-  active in-bounds plan approval — it is not a tool-input field, is
-  never forwarded from an MCP call, and policy checks still run per
-  tool, so plan approval never overrides a policy denial.
+- There is no separate step for approving a plan: a task's plan runs straight into
+  the loop, and every consequential step goes through the normal
+  per-step executor, policy, and approval gates at execution time —
+  creating a task never pre-approves its steps, and a client-supplied
+  confirmation flag is still never approval. Plan bounds supplied at
+  creation are data for dry-run previews only. A step that needs
+  approval pauses in `waiting_approval` until it is granted through
+  the existing step-approval flow (elicitation dialog or dashboard
+  decision); a denied step ends the task `partial` (or `failed` when
+  nothing succeeded), never `done`.
 - `tasks.create` with `dryRun: true` validates the whole plan (tool
   existence, canonical parameters, risk, domains, approvals needed,
   budget) and executes nothing, creating no task record.
@@ -89,8 +84,8 @@ validation; the unified output now accepts boolean or number.
   (done/undone/failed/compensations/manual cleanup); external submits
   are listed as done and not undoable, never as compensated.
 - Parallel steps: read-only, independent steps in one group run
-  together, max 4; consequential steps only when explicitly
-  independent and plan-approved. Pre-step re-observation in the
+  together, max 4; consequential steps never join a batch and run
+  sequentially through per-step approval. Pre-step re-observation in the
   service worker checks a step's dom ref against a fresh observe
   before consequential steps; a stale ref pauses the task for
   re-observation instead of failing it. Tasks are bound to one
@@ -193,7 +188,7 @@ A task is a durable multi-step job owned by the extension, not by the MCP client
 - Safety pauses, never silent failures: pinned tab closed or navigated externally, rate limit (429/503, with `resumeAfterMs` backoff), policy version/mode change, different client, or weaker scope on resume, and bridge disconnect (step marked `unknown`, re-observed before any retry, never blindly retried).
 - Honest endings only: `done`, `failed`, `cancelled`, or `partial`, always with done and undone step lists and best-effort compensations (external submits are reported as done and not undoable, never claimed as rolled back).
 - The gateway only mirrors task status (status-only, from `tasks.*` results, exposed on `/session/status`); it never executes a step and never synthesises a task view. The dashboard Tasks page shows progress (polling every 5 seconds while open) and pause/resume/cancel, with sanitised views only.
-- Not yet built (Phase 1/2, as of the 0.4.0 section this list sits in — see the 0.5.0 section above, where plan-level approval (`tasks.approvePlan`) and dry-run and parallel read-only steps are built; durable audit export is still not built): plan-level approval (`tasks.approvePlan`) and dry-run, parallel steps, and durable audit export. A task still cannot undo an external submit, cannot make a slow page fast, and cannot survive a client turn limit on its own — but it can be resumed in a later turn with `tasks.resume`, because the task now lives in the extension.
+- Not yet built (Phase 1/2, as of the 0.4.0 section this list sits in — see the 0.5.0 section above, where dry-run and parallel read-only steps are built; durable audit export is still not built): dry-run, parallel steps, and durable audit export. A task still cannot undo an external submit, cannot make a slow page fast, and cannot survive a client turn limit on its own — but it can be resumed in a later turn with `tasks.resume`, because the task now lives in the extension.
 - Known task limits, stated plainly: OAuth scope is enforced at the gateway, not forwarded over the bridge, so the extension task snapshot records scope as `gateway-enforced` and enforces client identity, policy version, and mode; per-client task isolation therefore relies on the gateway's verified OAuth client id (host dispatch uses bridge client id, not name). Direct executor calls to `tasks.*` fail with UNSUPPORTED — tasks must go through host dispatch to the runner.
 
 ## Known limitations (honest, not fixed by 0.4.0)

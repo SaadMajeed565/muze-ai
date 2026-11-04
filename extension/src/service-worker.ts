@@ -97,7 +97,7 @@ export function normalizeDashboardRequestType(type: unknown): string | null {
  * except the read-only set below: policy/kill-switch changes, approval
  * decisions, bridge/gateway session changes, onboarding changes, file
  * adds/removes, browser default/rename/disconnect/remove, MCP-client
- * revocation, and task pause/resume/cancel/plan-approval. The legacy
+ * revocation, and task pause/resume/cancel. The legacy
  * "uabb/*" spelling is normalised to "muze/*" before this check, so it
  * is guarded identically.
  */
@@ -130,7 +130,6 @@ export const CONSEQUENTIAL_DASHBOARD_REQUEST_TYPES: ReadonlySet<string> = new Se
   "muze/tasks.pause",
   "muze/tasks.resume",
   "muze/tasks.cancel",
-  "muze/tasks.approvePlan",
 ]);
 
 /**
@@ -349,11 +348,6 @@ function getTaskRunner(): TaskRunner {
         // pass taskId, so they stay standalone actions. This changes
         // no policy, approval, or execution behavior.
         taskId: ctx.taskId,
-        // Plan approval is internal only: runner verified an active,
-        // in-bounds plan approval (broker/dashboard/elicitation) before
-        // setting this. It is never derived from MCP tool input, and
-        // policy checks still run per tool in the executor.
-        ...(ctx.planApproved ? { planApproved: true } : {}),
       });
       const raw = result.result;
       const text = typeof raw === "string" ? raw : JSON.stringify(raw) ?? "";
@@ -391,16 +385,6 @@ function getTaskRunner(): TaskRunner {
       return parsed.success
         ? []
         : parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`);
-    },
-    verifyApprovalToken: (tokenId, clientId) => {
-      // Single-use, bound to tasks.approvePlan: the record must be an
-      // approved broker approval for tasks.approvePlan, for the same
-      // client when the caller supplies one, and is then burned so it
-      // cannot approve a second plan.
-      const record = approvals.get(tokenId);
-      if (!record || record.status !== "approved" || record.tool !== "tasks.approvePlan") return false;
-      if (clientId !== undefined && record.client.id !== clientId) return false;
-      return approvals.markUsed(tokenId);
     },
     // Phase B per-iteration tool resolution: existence + live policy
     // (the runner already applied its mode gate). Approval is NOT
@@ -579,13 +563,6 @@ async function taskDashboardPort(): Promise<TaskDashboardPort> {
       return toDashboardTaskView(await runner.resumeTask(id, clientId, { ...getTaskPolicySnapshot(), clientId }));
     },
     cancelTask: async (id) => toDashboardTaskView(await runner.cancelTask(id, (await withClient(id)).clientId)),
-    approvePlan: async (id, bounds) =>
-      toDashboardTaskView(
-        await runner.approvePlan(id, (await withClient(id)).clientId, {
-          source: "dashboard",
-          ...(bounds !== undefined ? { bounds } : {}),
-        }),
-      ),
   };
 }
 
@@ -1369,15 +1346,13 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
     case "muze/tasks.get":
     case "muze/tasks.pause":
     case "muze/tasks.resume":
-    case "muze/tasks.cancel":
-    case "muze/tasks.approvePlan": {
+    case "muze/tasks.cancel": {
       const port = await taskDashboardPort();
       const result = await handleTaskDashboardRequest(
         {
           type: request.type,
           taskId: (request as { taskId?: string }).taskId,
           reason: (request as { reason?: string }).reason,
-          bounds: (request as { bounds?: unknown }).bounds,
         },
         port,
       );

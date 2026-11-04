@@ -254,7 +254,6 @@ describe("timeline family icons", () => {
       "tasks.get": "checklist",
       "tasks.list": "checklist", "tasks.pause": "checklist",
       "tasks.resume": "checklist", "tasks.cancel": "checklist",
-      "tasks.approvePlan": "checklist",
     };
     // The table must cover the registry exactly: a future tool added to
     // the registry without a family mapping fails here, not silently.

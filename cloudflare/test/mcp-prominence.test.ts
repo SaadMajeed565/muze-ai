@@ -11,7 +11,7 @@ import {
 } from "../src/mcp.js";
 import type { GatewayBridge } from "../src/bridge.js";
 
-const TASK_SEQUENCE = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel", "tasks.approvePlan"];
+const TASK_SEQUENCE = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
 
 function disconnectedBridge(): GatewayBridge {
   return {
@@ -67,7 +67,7 @@ describe("tasks prominence in initialize + ListTools", () => {
   test("orderToolsTasksFirst puts tasks.* first with tasks.create first, set unchanged", () => {
     const input = SEARCH_DESCRIPTORS.map((t) => ({ name: t.name }));
     const ordered = orderToolsTasksFirst(input);
-    expect(ordered.map((t) => t.name).slice(0, 8)).toEqual(TASK_SEQUENCE);
+    expect(ordered.map((t) => t.name).slice(0, 7)).toEqual(TASK_SEQUENCE);
     expect(ordered[0].name).toBe("tasks.create");
     // Exact set unchanged (sorted comparison, like the registry test).
     expect(ordered.map((t) => t.name).sort()).toEqual(input.map((t) => t.name).sort());
@@ -93,7 +93,7 @@ describe("tasks prominence in initialize + ListTools", () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name);
       expect(names[0]).toBe("tasks.create");
-      expect(names.slice(0, 8)).toEqual(TASK_SEQUENCE);
+      expect(names.slice(0, 7)).toEqual(TASK_SEQUENCE);
     } finally {
       await client.close();
       await server.close();

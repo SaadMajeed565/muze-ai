@@ -71,8 +71,8 @@ describe("tasks.appendSteps", () => {
       }
       return { outputSummary: "ok" };
     });
-    // Unrestricted skips the plan-approval gate, so the run starts at
-    // once and blocks on the first step's deferred executeStep.
+    // With no plan gate, the run starts at once and blocks on the
+    // first step's deferred executeStep.
     const runPromise = runner.createTask(
       { goal: "read then click", clientId: CLIENT, browserSessionId: SESSION, steps: [OBSERVE, CLICK], start: true },
       snapshotFor("unrestricted"),
@@ -125,10 +125,17 @@ describe("tasks.appendSteps", () => {
 
   it("appending to a waiting_approval task joins the pending plan without bypassing approval", async () => {
     const executed: string[] = [];
+    let allow = false;
     const runner = new TaskRunner({
       store: createMemoryTaskStore(),
       executeStep: (async (tool: string) => {
         executed.push(tool);
+        // Simulate the executor's per-step approval gate.
+        if (!allow) {
+          const error = new Error("approval required") as Error & { code: string };
+          error.code = "APPROVAL_REQUIRED";
+          throw error;
+        }
         return { outputSummary: "ok" };
       }) as never,
       audit: () => undefined,
@@ -137,8 +144,8 @@ describe("tasks.appendSteps", () => {
       now: () => nowVal,
       generateId: nextId,
     });
-    // Balanced + bounds + a consequential step => the run-start plan
-    // gate stops the task at waiting_approval before any step runs.
+    // A consequential step facing the per-step approval gate stops
+    // the task at waiting_approval before it completes.
     const created = await runner.createTask(
       {
         goal: "submit a form",
@@ -151,10 +158,17 @@ describe("tasks.appendSteps", () => {
       snapshotFor("default"),
     );
     expect(created.status).toBe("waiting_approval");
+    expect(created.pauseReason).toBe("approval-required");
     const appended = await runner.appendSteps(created.id, CLIENT, [OBSERVE]);
     expect(appended.status).toBe("waiting_approval");
     expect(appended.steps).toHaveLength(2);
-    expect(executed).toEqual([]);
+    expect(appended.steps[1].state).toBe("pending");
+    // The appended step did not run while approval was outstanding.
+    expect(executed).toEqual(["forms.submit"]);
+    allow = true;
+    const resumed = await runner.resumeTask(created.id, CLIENT, snapshotFor("default"));
+    expect(resumed.status).toBe("done");
+    expect(executed).toEqual(["forms.submit", "forms.submit", "observe"]);
   });
 
   it("rejects appends to a terminal task and leaves the plan unchanged", async () => {

@@ -28,7 +28,6 @@ import {
 // port interface itself is defined here, structurally, so the dispatch
 // stays decoupled from the runner class and test fakes stay possible.
 import type {
-  ApprovePlanInput,
   CreateStepInput,
   CreateTaskInput,
   DryRunPreview as RunnerDryRunPreview,
@@ -72,8 +71,6 @@ export interface TaskRunnerPort {
   pauseTask(id: string, clientId: string, reason: string): Promise<RunnerTaskView>;
   resumeTask(id: string, clientId: string, policySnapshot: PolicySnapshot, browserSessionId?: string): Promise<RunnerTaskView>;
   cancelTask(id: string, clientId: string): Promise<RunnerTaskView>;
-  /** Phase 1: separate granular plan-approval tool (see tasks.ts). */
-  approvePlan(id: string, clientId: string, opts: ApprovePlanInput): Promise<RunnerTaskView>;
   /** Phase 1: dry-run preview; creates no task record. */
   previewTask(input: CreateTaskInput): Promise<RunnerDryRunPreview>;
 }
@@ -948,26 +945,6 @@ export class HostProtocolHandler {
             (input.steps as CreateStepInput[]) ?? [],
           );
           view = toContractTaskView(appended);
-          break;
-        }
-        case "tasks.approvePlan": {
-          // Phase 1: the approval source is derived from transport, never
-          // from client input. An MCP caller must carry a broker approval
-          // token as the message's approvalId; without one this fails
-          // closed. Dashboard decisions do not come through this path.
-          const approvalId = message.approvalId;
-          if (typeof approvalId !== "string" || approvalId === "") {
-            throw new ToolErrorException(
-              "APPROVAL_DENIED",
-              "tasks.approvePlan requires a broker approval token (approvalId); client-supplied approval flags are never accepted",
-            );
-          }
-          const approved = await runner.approvePlan(String(input.taskId), clientId, {
-            source: "broker-token",
-            approvalTokenId: approvalId,
-            ...(input.bounds !== undefined ? { bounds: input.bounds as PlanBounds } : {}),
-          });
-          view = toContractTaskView(approved);
           break;
         }
         case "tasks.get":

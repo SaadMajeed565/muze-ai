@@ -28,15 +28,6 @@ export interface ExecuteOptions {
   client: ClientIdentity;
   ctx: BrowserContext;
   approvalId?: string;
-  /**
-   * Internal only, set only by the extension TaskRunner's service-worker
-   * executeStep when the runner has verified an active, in-bounds plan
-   * approval (broker token, dashboard decision, or verified elicitation).
-   * It is NOT a tool-input field and is never forwarded from an MCP call,
-   * so a client cannot set it. Policy checks still run per tool; this
-   * only satisfies the approval gate for in-bounds plan steps.
-   */
-  planApproved?: boolean;
   dryRun?: boolean;
   signal?: AbortSignal;
   target?: PolicyTarget;
@@ -329,7 +320,7 @@ export class ToolExecutor {
     // for tabs.list can never be consumed by tabs.close, because the
     // broker fingerprint binds tool + input + client.
     const needsApproval = this.requiresApproval(tool, input, decision.requiresApproval);
-    let approvalValidated = Boolean(options.planApproved) || Boolean(options.nested && options.approvalId);
+    let approvalValidated = Boolean(options.nested && options.approvalId);
     if (!options.nested && options.approvalId) {
       this.deps.approvals.consume(
         options.approvalId,
@@ -439,7 +430,6 @@ export class ToolExecutor {
               ctx: options.ctx,
               signal: controller.signal,
               approvalId: options.approvalId,
-              planApproved: options.planApproved,
               dryRun: invokeOptions?.dryRun,
               nested: true,
             });

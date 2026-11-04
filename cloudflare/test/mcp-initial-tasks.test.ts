@@ -8,7 +8,7 @@ import {
 } from "../src/mcp.js";
 import type { GatewayBridge } from "../src/bridge.js";
 
-const TASK_SEQUENCE = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel", "tasks.approvePlan"];
+const TASK_SEQUENCE = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
 const MASTER_TOOLS = ["observe", "act", "navigate", "form", "data"];
 const SCOPE = "read:tools call:tools";
 
@@ -63,7 +63,7 @@ async function listToolNames(
 describe("initial ListTools includes tasks tools (connected live list)", () => {
   test("connected session with unified-only live list still lists tasks.* first with tasks.create first", async () => {
     const names = await listToolNames(connectedBridge(liveUnifiedOnly()));
-    expect(names.slice(0, 8)).toEqual(TASK_SEQUENCE);
+    expect(names.slice(0, 7)).toEqual(TASK_SEQUENCE);
     expect(names.filter((n) => n === "tasks.create")).toHaveLength(1);
     for (const master of MASTER_TOOLS) expect(names).toContain(master);
     expect(names).toContain("tools.discover");
@@ -72,7 +72,7 @@ describe("initial ListTools includes tasks tools (connected live list)", () => {
     expect(names).toContain("browsers.select");
     // No duplicates, and the whole list fits the conservative cap.
     expect(new Set(names).size).toBe(names.length);
-    expect(names.length).toBe(17);
+    expect(names.length).toBe(16);
   });
 
   test("fail closed: connected session with an empty live list advertises no tasks tools", async () => {
@@ -89,12 +89,11 @@ describe("initial ListTools includes tasks tools (connected live list)", () => {
     expect(names).not.toContain("tasks.pause");
     expect(names).not.toContain("tasks.resume");
     expect(names).not.toContain("tasks.cancel");
-    expect(names).not.toContain("tasks.approvePlan");
   });
 
   test("disconnected static path does not duplicate tasks tools", async () => {
     const names = await listToolNames(disconnectedBridge());
-    expect(names.slice(0, 8)).toEqual(TASK_SEQUENCE);
+    expect(names.slice(0, 7)).toEqual(TASK_SEQUENCE);
     expect(names.filter((n) => n === "tasks.create")).toHaveLength(1);
   });
 });

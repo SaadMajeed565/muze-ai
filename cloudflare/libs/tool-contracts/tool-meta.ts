@@ -195,9 +195,6 @@ export const TOOL_META: Record<string, ToolMeta> = {
   "tasks.pause": m(["task", "pause", "stop-task"], { requires: ["tasks.list"] }),
   "tasks.resume": m(["task", "resume", "continue-task"], { requires: ["tasks.list"] }),
   "tasks.cancel": m(["task", "cancel", "stop-task"], { requires: ["tasks.list"] }),
-  // Added by the parallel Complex-Task track (plan approval, Phase 1);
-  // metadata only — this track does not edit tasks.ts.
-  "tasks.approvePlan": m(["task", "approve", "plan", "review"], { requires: ["tasks.list"], requiresNote: "Approving does not start the task; call tasks.resume afterwards.", related: ["tasks.create", "tasks.resume"] }),
 
   // ---- meta tools ----
   "tools.batch": m(["batch", "read", "parallel", "workflow"], { related: ["observe", "tools.discover"] }),

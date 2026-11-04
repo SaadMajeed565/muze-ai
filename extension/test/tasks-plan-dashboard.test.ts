@@ -1,10 +1,9 @@
 /** @vitest-environment jsdom */
 /**
- * Phase 1/2 dashboard tests: the handler routes muze/tasks.approvePlan
- * (dashboard decision, no client flag), sanitises the structured final
- * report and outside-bounds reasons through, and the Tasks page shows
- * the current step, failed list, final report, browser session, and an
- * Approve plan button.
+ * Dashboard tests: the handler sanitises the structured final report
+ * and outside-bounds reasons through, and the Tasks page shows the
+ * current step, failed list, final report, and browser session —
+ * with pause/resume/cancel only (no plan button).
  */
 import { act } from "preact/test-utils";
 import { h, render } from "preact";
@@ -71,31 +70,25 @@ function createdTask(): Record<string, unknown> {
   };
 }
 
-describe("dashboard plan approval handler", () => {
-  it("routes muze/tasks.approvePlan through the port with sanitised bounds and no approval flag", async () => {
-    const calls: unknown[] = [];
+describe("dashboard task handler", () => {
+  it("routes pause/resume/cancel through the port with no approval flag on the request", async () => {
+    const calls: string[] = [];
     const port: TaskDashboardPort = {
       listTasks: async () => [],
       getTask: async () => cancelledTask() as unknown as TaskView,
-      pauseTask: async () => cancelledTask() as unknown as TaskView,
+      pauseTask: async () => {
+        calls.push("pause");
+        return cancelledTask() as unknown as TaskView;
+      },
       resumeTask: async () => cancelledTask() as unknown as TaskView,
       cancelTask: async () => cancelledTask() as unknown as TaskView,
-      approvePlan: async (id, bounds) => {
-        calls.push({ id, bounds });
-        return { ...(cancelledTask() as unknown as TaskView), status: "paused" as const };
-      },
     };
-    const response = await handleTaskDashboardRequest(
-      { type: "muze/tasks.approvePlan", taskId: "task_done", bounds: { allowedDomains: ["example.com"], allowPurchases: true, injected: "drop me", maxSteps: "not-a-number" } },
-      port,
-    );
+    const response = await handleTaskDashboardRequest({ type: "muze/tasks.pause", taskId: "task_done" }, port);
     expect(response.ok).toBe(true);
-    expect(response.task?.status).toBe("paused");
-    expect(calls).toEqual([{ id: "task_done", bounds: { allowedDomains: ["example.com"], allowPurchases: true } }]);
-    expect("confirmed" in { type: "muze/tasks.approvePlan", taskId: "task_done" }).toBe(false);
+    expect(calls).toEqual(["pause"]);
   });
 
-  it("reports approvePlan as not wired when the port has no approvePlan method", async () => {
+  it("rejects an unknown dashboard task request", async () => {
     const port: TaskDashboardPort = {
       listTasks: async () => [],
       getTask: async () => cancelledTask() as unknown as TaskView,
@@ -103,9 +96,9 @@ describe("dashboard plan approval handler", () => {
       resumeTask: async () => cancelledTask() as unknown as TaskView,
       cancelTask: async () => cancelledTask() as unknown as TaskView,
     };
-    const response = await handleTaskDashboardRequest({ type: "muze/tasks.approvePlan", taskId: "task_done" }, port);
+    const response = await handleTaskDashboardRequest({ type: "muze/tasks.bogus", taskId: "task_done" }, port);
     expect(response.ok).toBe(false);
-    expect(response.error).toBe("task approvePlan not wired");
+    expect(response.error).toBe("unknown task dashboard request");
   });
 
   it("sanitises the final report and outside-bounds reasons through, and never step inputs", async () => {
@@ -142,7 +135,6 @@ describe("TasksPage Phase 2 rendering", () => {
         pauseTask: async () => cancelledTask() as unknown as TaskView,
         resumeTask: async () => cancelledTask() as unknown as TaskView,
         cancelTask: async () => cancelledTask() as unknown as TaskView,
-        approvePlan: async () => createdTask() as unknown as TaskView,
       };
       const response = await handleTaskDashboardRequest({ type: message.type, taskId: message.taskId }, port);
       return { ok: response.ok, error: response.error, tasks: response.tasks, task: response.task };
@@ -218,7 +210,7 @@ describe("TasksPage Phase 2 rendering", () => {
     expect(container.textContent).toContain("No steps recorded yet.");
   });
 
-  it("sends muze/tasks.approvePlan after confirming", async () => {
+  it("task detail offers no plan button, only pause/resume/cancel", async () => {
     const container = mount();
     await flush();
     await flush();
@@ -234,19 +226,6 @@ describe("TasksPage Phase 2 rendering", () => {
       row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    const approve = [...container.querySelectorAll("button")].find((b) => b.textContent === "Approve plan" && !(b as HTMLButtonElement).disabled) ?? null;
-    expect(approve).not.toBeNull();
-    await act(() => {
-      approve!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await flush();
-
-    // click the sheet's confirm button (last matching)
-    const allApprove = [...container.querySelectorAll("button")].filter((b) => b.textContent === "Approve plan");
-    await act(() => {
-      allApprove[allApprove.length - 1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await flush();
-    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "muze/tasks.approvePlan" }));
+    expect(container.textContent).not.toContain("Approve plan");
   });
 });

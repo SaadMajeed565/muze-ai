@@ -55,7 +55,7 @@ function rawTask(overrides: Partial<Record<string, unknown>> = {}): Record<strin
 }
 
 function fakePort(): { port: TaskDashboardPort; calls: string[]; store: Record<string, unknown>[] } {
-  const store = [rawTask(), rawTask({ id: "task_2", goal: "Fill the test form", status: "paused", pauseReason: "waiting on plan approval", createdAt: 3000 })];
+  const store = [rawTask(), rawTask({ id: "task_2", goal: "Fill the test form", status: "paused", pauseReason: "waiting on step approval", createdAt: 3000 })];
   const calls: string[] = [];
   const find = (id: string): Record<string, unknown> => {
     const found = store.find((task) => task.id === id);
@@ -108,7 +108,7 @@ describe("handleTaskDashboardRequest", () => {
     const got = await handleTaskDashboardRequest({ type: "muze/tasks.get", taskId: "task_2" }, port);
     expect(got.ok).toBe(true);
     expect(got.task?.goal).toBe("Fill the test form");
-    expect(got.task?.pauseReason).toBe("waiting on plan approval");
+    expect(got.task?.pauseReason).toBe("waiting on step approval");
 
     const paused = await handleTaskDashboardRequest({ type: "muze/tasks.pause", taskId: "task_1" }, port);
     expect(paused.task?.status).toBe("paused");
@@ -326,7 +326,7 @@ describe("TasksPage", () => {
       row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(container.textContent).toContain("waiting on plan approval");
+    expect(container.textContent).toContain("waiting on step approval");
   });
 
   it("shows an empty state when no tasks exist", async () => {

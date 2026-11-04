@@ -30,13 +30,12 @@ import type { ToolDefinition } from "../tools.js";
  * client-supplied approval flag is rejected at parse time and is never
  * approval, consistent with the 0.3.0 contract change.
  *
- * Phase 1 (this file): `tasks.approvePlan` as a separate granular
- * tool, and `tasks.create` with `dryRun: true` returning a preview
- * instead of creating a task. Plan approval itself is never a schema
- * field: for MCP callers the broker approval token travels as the
- * bridge message's approvalId (host dispatch derives the source from
- * it and fails closed without one); dashboard decisions travel through
- * the dashboard handler, not through this schema.
+ * Dry-run (this file): `tasks.create` with `dryRun: true` returns a
+ * preview instead of creating a task. There is no separate tool for
+ * approving a plan, and no approval field anywhere in these schemas: a client-supplied
+ * approval flag is rejected at parse time and is never approval, and
+ * every consequential step still goes through the normal per-step
+ * approval path at execution time.
  */
 
 export const TASK_STATUSES = ["created", "running", "paused", "waiting_approval", "done", "failed", "cancelled", "partial"] as const;
@@ -78,7 +77,7 @@ export const TaskStepInputSchema = z
     timeoutMs: z.number().int().min(1).max(60_000).optional().describe("Per-step timeout, 1..60000 ms"),
     compensation: TaskCompensationSchema.optional(),
     independent: z.boolean().optional().describe("Phase 3: this step does not depend on sibling steps; required for parallel execution"),
-    parallelGroup: z.number().int().min(0).optional().describe("Phase 3: steps sharing a group run together when all are independent and read-only (max 4); consequential steps join only when explicitly independent and plan-approved"),
+    parallelGroup: z.number().int().min(0).optional().describe("Phase 3: steps sharing a group run together when all are independent and read-only (max 4); consequential steps never join a batch and run sequentially through per-step approval"),
     verify: TaskStepVerifySchema.optional().describe("Phase B: generic verify condition checked by the runner after a consequential step; a failed verify marks the step unknown and pauses, never done on dispatch"),
   })
   .strict();
@@ -106,7 +105,7 @@ export const TaskStepViewSchema = z
     state: z.string().min(1),
     attempts: z.number().int().min(0),
     outputSummary: z.string(),
-    outsideBoundsReason: z.string().max(1000).optional().describe("Phase 1: why this step paused outside the approved plan bounds, if it did"),
+    outsideBoundsReason: z.string().max(1000).optional().describe("Legacy field: why this step paused outside the plan bounds, if it did (the run loop no longer pauses on it)"),
     verifySummary: z.string().optional().describe("Phase B: truncated post-step verify observation, when a verify ran"),
     verifyOutcome: z.string().optional().describe("Phase B: pass, fail, or skipped (consequential step without verify wiring)"),
   })
@@ -127,9 +126,9 @@ export const TaskFinalReportSchema = z
 export type TaskFinalReport = z.infer<typeof TaskFinalReportSchema>;
 
 /**
- * Plan-level approval bounds (Phase 1, plan 3.3). All restrictions,
- * all optional: purchases, payments, and external submits default to
- * denied at approval time when omitted.
+ * Plan-level bounds. All restrictions, all optional: purchases,
+ * payments, and external submits default to denied when omitted.
+ * Bounds are data for dry-run previews; they never pre-approve a step.
  */
 export const PlanBoundsSchema = z
   .object({
@@ -146,7 +145,7 @@ export const PlanBoundsSchema = z
   .strict();
 export type PlanBounds = z.infer<typeof PlanBoundsSchema>;
 
-/** One step of a dry-run preview (Phase 1, plan 3.4). */
+/** One step of a dry-run preview. */
 export const DryRunPreviewStepSchema = z
   .object({
     index: z.number().int().min(0),
@@ -209,8 +208,8 @@ export const TasksCreateInputSchema = z
     totalBudgetMs: z.number().int().positive().optional().describe("Total budget for the whole task in ms; omit for the runner default"),
     start: z.boolean().default(true).describe("Start running immediately; false leaves the task created but not started"),
     browserSessionId: z.string().min(1).max(256).optional().describe("Target browser session; a task never moves to a different browser on its own"),
-    bounds: PlanBoundsSchema.optional().describe("Phase 1: plan bounds supplied at creation; consequential steps still wait for tasks.approvePlan"),
-    dryRun: z.boolean().optional().describe("Phase 1: when true, validate the whole plan and return a preview; execute nothing and create no task record"),
+    bounds: PlanBoundsSchema.optional().describe("Plan bounds supplied at creation (data for dry-run previews; never pre-approval — consequential steps still go through per-step approval)"),
+    dryRun: z.boolean().optional().describe("When true, validate the whole plan and return a preview; execute nothing and create no task record"),
     mode: TaskAgentModeSchema.optional().describe("Phase B: agent mode pinned at creation (read/act/plan/explore/summary/compaction); omit for act. Never changes mid-task; this field never changes the caller's session mode"),
   })
   .strict();
@@ -232,14 +231,6 @@ export type TasksResumeInput = z.infer<typeof TasksResumeInputSchema>;
 
 export const TasksCancelInputSchema = z.object({ taskId: z.string().min(1).max(256) }).strict();
 export type TasksCancelInput = z.infer<typeof TasksCancelInputSchema>;
-
-export const TasksApprovePlanInputSchema = z
-  .object({
-    taskId: z.string().min(1).max(256),
-    bounds: PlanBoundsSchema.optional().describe("Bounds for this approval; omit to approve under the creation bounds, or plan-derived defaults"),
-  })
-  .strict();
-export type TasksApprovePlanInput = z.infer<typeof TasksApprovePlanInputSchema>;
 
 export const TasksAppendStepsInputSchema = z
   .object({
@@ -321,18 +312,6 @@ export const tasksCancel: ToolDefinition = {
   output: TaskViewSchema,
 };
 
-export const tasksApprovePlan: ToolDefinition = {
-  name: "tasks.approvePlan",
-  title: "Approve task plan",
-  description:
-    "Approve a task's plan with bounds, so steps inside the bounds run without a second approval and steps outside them pause and ask again. This is a separate granular tool, never an action parameter and never a client-supplied confirmed flag: for MCP callers the approval must arrive as a broker approval token on the call (host dispatch fails closed without one); dashboard approvals travel through the dashboard handler. Approval expires at the task lifetime or 24 hours, whichever is shorter. Approving does not start the task; call tasks.resume afterwards.",
-  category: "workflows",
-  risk: "reversible",
-  requiresApproval: false,
-  input: TasksApprovePlanInputSchema,
-  output: TaskViewSchema,
-};
-
 export const tasksAppendSteps: ToolDefinition = {
   name: "tasks.appendSteps",
   title: "Append task steps",
@@ -345,6 +324,6 @@ export const tasksAppendSteps: ToolDefinition = {
   output: TaskViewSchema,
 };
 
-export const taskTools: ToolDefinition[] = [tasksCreate, tasksAppendSteps, tasksGet, tasksList, tasksPause, tasksResume, tasksCancel, tasksApprovePlan];
+export const taskTools: ToolDefinition[] = [tasksCreate, tasksAppendSteps, tasksGet, tasksList, tasksPause, tasksResume, tasksCancel];
 
 export const TASK_TOOL_NAMES: string[] = taskTools.map((t) => t.name);

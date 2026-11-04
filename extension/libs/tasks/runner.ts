@@ -31,7 +31,6 @@ import {
   MAX_STEP_ATTEMPTS,
   MAX_STEP_TIMEOUT_MS,
   MAX_STORED_TASKS,
-  PLAN_APPROVAL_MAX_MS,
   PRUNE_COMPLETED_AFTER_MS,
   buildResultSummary,
   canonicalizeInput,
@@ -56,8 +55,6 @@ import {
   type CompensationKind,
   type PageSnapshotCheckpoint,
   type PinnedTab,
-  type PlanApproval,
-  type PlanApprovalSource,
   type PlanBounds,
   type PolicySnapshot,
   type TaskRecord,
@@ -81,16 +78,6 @@ export interface StepContext {
   stepIndex: number;
   timeoutMs: number;
   signal: AbortSignal;
-  /**
-   * Phase 1: true when this step runs under a stored, unexpired plan
-   * approval and is inside its bounds. This is a signal to the
-   * executor wiring (which maps it onto the approval the user already
-   * gave for the plan); the runner itself never invents approval, and
-   * an APPROVAL_REQUIRED error from the executor still pauses the task
-   * instead of proceeding. Wiring that ignores this flag keeps the old
-   * per-step approval behaviour (fail closed).
-   */
-  planApproved?: boolean;
 }
 
 export interface StepExecutionResult {
@@ -240,12 +227,6 @@ export interface RunnerDeps {
   resolveTool?: (tool: string, context: ToolResolutionContext) => ToolResolution | Promise<ToolResolution>;
   captureSnapshot?: (step: TaskStep, signal?: AbortSignal) => Promise<PageSnapshotCheckpoint>;
   postStepObserve?: (step: TaskStep, signal?: AbortSignal) => Promise<PostStepObservation>;
-  /**
-   * Phase 1: verifies a broker approval token id for tasks.approvePlan.
-   * Required when the source is "broker-token"; without it, broker-token
-   * approval fails closed instead of trusting the token id.
-   */
-  verifyApprovalToken?: (tokenId: string, clientId?: string) => boolean | Promise<boolean>;
 }
 
 export interface CreateStepInput {
@@ -267,7 +248,7 @@ export interface CreateTaskInput {
   steps: CreateStepInput[];
   totalBudgetMs?: number;
   start?: boolean;
-  /** Phase 1: plan bounds supplied at creation; approval still comes via tasks.approvePlan. */
+  /** Plan bounds supplied at creation (data only; never pre-approval). */
   planBounds?: PlanBounds;
   /**
    * Phase B: agent mode pinned at creation (read/act/plan/explore/
@@ -284,7 +265,7 @@ export interface CreateTaskInput {
  * and step list are supplied by the caller, its browser session is
  * inherited from the parent (one account = one browser session), and
  * it inherits NOTHING else — no parent steps, no parent step inputs,
- * no parent policy snapshot, no parent plan approval, and no parent
+ * no parent policy snapshot and no parent
  * plan bounds unless explicitly supplied here. Its mode must be a
  * child mode (explore or summary); anything else is rejected.
  */
@@ -342,14 +323,6 @@ export interface DryRunPreview {
   approvalsNeeded: number[];
   errors: string[];
   valid: boolean;
-}
-
-export interface ApprovePlanInput {
-  source: PlanApprovalSource;
-  /** Required when source is "broker-token"; verified, then discarded (never stored). */
-  approvalTokenId?: string;
-  /** Bounds for this approval; defaults to the creation bounds, else plan-derived defaults. */
-  bounds?: PlanBounds;
 }
 
 const TERMINAL_STATUSES: TaskStatus[] = ["done", "failed", "cancelled", "partial"];
@@ -644,52 +617,9 @@ export class TaskRunner {
     }
   }
 
-  // -- Phase 1 plan approval helpers --------------------------------------
-
-  /** Normalise bounds: deny purchases/payments/external submits unless
-   * explicitly allowed, cap steps at the plan length, attempts at the
-   * runner default, budget at the task budget, domains from the plan
-   * when not supplied. Throws on an inconsistent bound. */
-  private normalizeBounds(task: TaskRecord, bounds: PlanBounds): PlanBounds {
-    const maxSteps = bounds.maxSteps ?? task.steps.length;
-    if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps < task.steps.length) {
-      throw new Error(`plan approval rejected: maxSteps must be at least the plan length (${task.steps.length})`);
-    }
-    const maxAttemptsPerStep = bounds.maxAttemptsPerStep ?? MAX_STEP_ATTEMPTS;
-    if (!Number.isInteger(maxAttemptsPerStep) || maxAttemptsPerStep < 1) {
-      throw new Error("plan approval rejected: maxAttemptsPerStep must be a positive integer");
-    }
-    const totalBudgetMs = bounds.totalBudgetMs ?? task.totalBudgetMs;
-    if (!Number.isFinite(totalBudgetMs) || totalBudgetMs <= 0) {
-      throw new Error("plan approval rejected: totalBudgetMs must be positive");
-    }
-    return {
-      ...(bounds.allowedTools !== undefined ? { allowedTools: [...bounds.allowedTools] } : {}),
-      ...(bounds.allowedRiskLevels !== undefined ? { allowedRiskLevels: [...bounds.allowedRiskLevels] } : {}),
-      allowedDomains: bounds.allowedDomains !== undefined ? [...bounds.allowedDomains] : planDomains(task.steps),
-      allowPurchases: bounds.allowPurchases === true,
-      allowPayments: bounds.allowPayments === true,
-      allowExternalSubmit: bounds.allowExternalSubmit === true,
-      maxSteps,
-      maxAttemptsPerStep,
-      totalBudgetMs,
-    };
-  }
-
-  /** A plan approval counts only while unexpired; expiry pauses, never silently lapses into per-step approval. */
-  private activeApproval(task: TaskRecord): PlanApproval | null {
-    if (!task.planApproval) return null;
-    return this.now() <= task.planApproval.expiresAt ? task.planApproval : null;
-  }
-
-  private stepBoundsReason(step: TaskStep, approval: PlanApproval | null): string | null {
-    if (!approval) return null;
-    return checkStepAgainstBounds(step.tool, step.input, approval.bounds, this.deps.toolRisk);
-  }
+  // -- plan bounds helpers (dry-run previews only) ----------------------
 
   private effectiveBudgetMs(task: TaskRecord): number {
-    const approval = this.activeApproval(task);
-    if (approval?.bounds.totalBudgetMs !== undefined) return Math.min(task.totalBudgetMs, approval.bounds.totalBudgetMs);
     return task.totalBudgetMs;
   }
 
@@ -765,7 +695,6 @@ export class TaskRunner {
       correlationId: this.generateId(),
       resultSummary: "",
       planBounds: input.planBounds !== undefined ? cloneJson(input.planBounds) : null,
-      planApproval: null,
       finalReport: null,
       policySnapshot: cloneJson(policySnapshotAtCreation),
       createdAt: now,
@@ -950,57 +879,7 @@ export class TaskRunner {
     return toTaskView(saved);
   }
 
-  // -- Phase 1: plan approval + dry-run -----------------------------------
-
-  /**
-   * Approve a task's plan with bounds (Phase 1, plan 3.3). This is a
-   * SEPARATE granular tool, never an action parameter, and never a
-   * client-supplied confirmed/approved flag: the caller supplies the
-   * verified source (broker approval token id, dashboard decision, or
-   * verified elicitation decision) and the runner verifies a broker
-   * token through its verifier dep, then discards the token id. The
-   * approval expires at min(now + 24h, task budget end) and dies with
-   * the task's terminal state. Approving does not start the task; the
-   * caller resumes it, so an approval can be inspected before running.
-   */
-  async approvePlan(id: string, clientId: string, opts: ApprovePlanInput): Promise<TaskView> {
-    const all = await this.loadAll();
-    const task = this.findOrThrow(all, id);
-    this.assertClient(task, clientId);
-    if (isTerminal(task.status)) return toTaskView(task);
-    if (opts.source === "broker-token") {
-      if (typeof opts.approvalTokenId !== "string" || opts.approvalTokenId === "") {
-        throw new Error("plan approval rejected: broker-token approval requires an approval token id");
-      }
-      if (!this.deps.verifyApprovalToken) {
-        throw new Error("plan approval rejected: broker-token verification is not wired, failing closed");
-      }
-      const verified = await this.deps.verifyApprovalToken(opts.approvalTokenId, clientId);
-      if (verified !== true) throw new Error("plan approval rejected: approval token did not verify");
-    } else if (opts.source !== "dashboard" && opts.source !== "elicitation") {
-      throw new Error(`plan approval rejected: unknown approval source ${String(opts.source)}`);
-    }
-    const now = this.now();
-    const bounds = this.normalizeBounds(task, opts.bounds ?? task.planBounds ?? {});
-    const budgetEnd = task.createdAt + Math.min(task.totalBudgetMs, bounds.totalBudgetMs ?? task.totalBudgetMs);
-    task.planBounds = cloneJson(bounds);
-    task.planApproval = { source: opts.source, approvedAt: now, expiresAt: Math.min(now + PLAN_APPROVAL_MAX_MS, budgetEnd), bounds: cloneJson(bounds) };
-    if (task.status === "waiting_approval" && task.pauseReason === "plan-approval-required") {
-      task.status = "paused";
-      task.pauseReason = null;
-    }
-    task.updatedAt = now;
-    this.refreshSummary(task);
-    const saved = await this.persistOnly(all, task, {
-      kind: "task.plan-approved",
-      taskId: id,
-      stepIndex: -1,
-      tool: "",
-      decision: "plan-approved",
-      outcome: opts.source,
-    });
-    return toTaskView(saved);
-  }
+  // -- dry-run ------------------------------------------------------------
 
   /**
    * Dry-run preview (Phase 1, plan 3.4). Validates the whole plan —
@@ -1010,7 +889,8 @@ export class TaskRunner {
    * NOTHING: no executor call, no store write, no task record. Steps
    * outside the supplied/creation bounds are reported as needing a
    * step approval, not as validation errors, because the plan can still
-   * be created and the step will pause at run time.
+   * be created and the step will pause at run time under the normal
+   * per-step approval path.
    */
   async previewTask(input: CreateTaskInput): Promise<DryRunPreview> {
     const errors: string[] = [];
@@ -1127,9 +1007,7 @@ export class TaskRunner {
    * - The parent record is NEVER mutated: creation only appends the
    *   child, so a child cannot change its parent's mode, policy, or
    *   plan. The child gets a fresh policy snapshot supplied by the
-   *   caller (not the parent's snapshot), no plan approval (never
-   *   inherited — a child step's approval is bound to the child's own
-   *   task id), and the parent's browser session (shared-session
+   *   caller (not the parent's snapshot), and the parent's browser session (shared-session
    *   constraint; per-tab serialisation is shared because the
    *   runner's per-tab chains are instance-wide).
    * - Isolation: the child record contains only the supplied goal and
@@ -1175,7 +1053,7 @@ export class TaskRunner {
     // never written to; the store save below replaces only the child.
     const freshAll = await this.loadAll();
     const child = this.findOrThrow(freshAll, created.id);
-    const patched: TaskRecord = { ...child, parentId: parent.id, planApproval: null };
+    const patched: TaskRecord = { ...child, parentId: parent.id };
     const next = freshAll.map((task) => (task.id === patched.id ? patched : task));
     const saved = await this.saveList(next, patched, {
       kind: "task.created",
@@ -1232,7 +1110,7 @@ export class TaskRunner {
    * does not act (below the reclaim threshold) no store write happens
    * and the task is returned unchanged. Pruning never changes a
    * step's state, outcome, or verify result, and never changes the
-   * task's status, policy snapshot, or plan approval.
+   * task's status or policy snapshot.
    */
   async pruneTask(id: string, clientId: string, options: PruneTaskOutputsOptions = {}): Promise<PruneTaskResult> {
     const all = await this.loadAll();
@@ -1610,51 +1488,10 @@ export class TaskRunner {
         return toTaskView(saved);
       }
 
-      // Phase 1: a plan with bounds but no stored approval does not
-      // execute consequential steps until tasks.approvePlan succeeds.
-      // Read-only/reversible-only plans may run: they need no approval
-      // under the current policy in the first place. The Unrestricted
-      // policy mode is the exception: its promise is "every tool runs
-      // with no confirmation step", so the plan gate is skipped and
-      // the plan runs. The snapshot carries mode, not approvalMode
-      // (PolicySnapshot has no approvalMode field), so the gate keys
-      // on mode; Restricted keeps gating — its mode is "restricted"
-      // even though its approvalMode is also "never", because
-      // Restricted allows nothing consequential at all. A missing
-      // snapshot fails closed to gating.
-      const noPlanApprovalGate = current !== null && current.mode === "unrestricted";
-      if (!noPlanApprovalGate && task.planBounds && !task.planApproval && task.steps.some((s) => this.isConsequential(s.tool))) {
-        task.status = "waiting_approval";
-        task.pauseReason = "plan-approval-required";
-        task.updatedAt = this.now();
-        this.refreshSummary(task);
-        const saved = await this.persistOnly(all, task, {
-          kind: "task.waiting-approval",
-          taskId: id,
-          stepIndex: -1,
-          tool: "",
-          decision: "approval-required",
-          outcome: "plan-approval-required",
-        });
-        return toTaskView(saved);
-      }
-      // Phase 1: an expired plan approval pauses before any step runs.
-      if (task.planApproval && this.activeApproval(task) === null) {
-        task.status = "paused";
-        task.pauseReason = "plan-approval-expired";
-        task.updatedAt = this.now();
-        this.refreshSummary(task);
-        const saved = await this.persistOnly(all, task, {
-          kind: "task.paused",
-          taskId: id,
-          stepIndex: -1,
-          tool: "",
-          decision: "paused",
-          outcome: "plan-approval-expired",
-        });
-        return toTaskView(saved);
-      }
-
+      // No plan gate: a bounded consequential plan runs straight into
+      // the loop, where each consequential step goes through the normal
+      // per-step executor/policy/approval path. A task left in
+      // waiting_approval by the old gate therefore runs on resume.
       task.status = "running";
       task.pauseReason = null;
       task.resumeAfterMs = null;
@@ -1701,7 +1538,6 @@ export class TaskRunner {
         }
 
         // Total budget: elapsed since creation, checked before every step.
-        // A plan approval may narrow the budget further (Phase 1).
         // Phase B: budget exhaustion is terminal, not a pause — elapsed
         // time only grows, so a pause here could never resume into
         // success, and a silent dead-end pause is exactly what the
@@ -1819,53 +1655,15 @@ export class TaskRunner {
           return toTaskView(task);
         }
 
-        // Phase 1: an approval that expired mid-run pauses before the
-        // next step; a step outside the approved bounds pauses in
-        // waiting_approval with the exact tool, input summary, and
-        // reason, so a fresh step approval can be sought for it.
-        if (task.planApproval && this.activeApproval(task) === null) {
-          task.status = "paused";
-          task.pauseReason = "plan-approval-expired";
-          task.updatedAt = this.now();
-          this.refreshSummary(task);
-          const saved = await this.persistOnly(freshAll, task, {
-            kind: "task.paused",
-            taskId: id,
-            stepIndex: next.index,
-            tool: next.tool,
-            decision: "paused",
-            outcome: "plan-approval-expired",
-          });
-          return toTaskView(saved);
-        }
-        const approval = this.activeApproval(task);
-        if (approval) {
-          const reason = this.stepBoundsReason(next, approval);
-          if (reason !== null) {
-            next.state = "waiting_approval";
-            next.outsideBoundsReason = reason;
-            task.status = "waiting_approval";
-            task.pauseReason = `plan-bounds: ${reason}`;
-            task.updatedAt = this.now();
-            this.refreshSummary(task);
-            const saved = await this.persistOnly(freshAll, task, {
-              kind: "task.waiting-approval",
-              taskId: id,
-              stepIndex: next.index,
-              tool: next.tool,
-              decision: "approval-required",
-              outcome: `plan-bounds: ${reason}`,
-            });
-            return toTaskView(saved);
-          }
-          next.outsideBoundsReason = null;
-        }
+        // No plan-bounds pre-pause: a step outside the plan bounds is
+        // not held here — it runs through the normal per-step approval
+        // path in executeOne, exactly like any other consequential step.
 
         // Phase 3: a run of consecutive pending, independent steps in
-        // the same parallel group runs together (read-only only, unless
-        // a consequential step is explicitly independent AND covered by
-        // an active plan approval). Anything else stays sequential.
-        const batch = this.collectBatch(task, next, approval);
+        // the same parallel group runs together (read-only only;
+        // consequential steps always stay sequential so each one faces
+        // the normal per-step approval path).
+        const batch = this.collectBatch(task, next);
         if (batch.length >= 2) {
           const batchOutcome = await this.executeBatch(freshAll, task, batch, controller.signal);
           if (batchOutcome === "done") continue;
@@ -2027,24 +1825,20 @@ export class TaskRunner {
   /**
    * Collect a parallel batch starting at `next` (Phase 3): consecutive
    * pending steps sharing next's non-null parallelGroup, every one
-   * independent, capped at MAX_PARALLEL_STEPS. A consequential step
-   * joins only when explicitly independent AND covered by an active
-   * plan approval inside its bounds; otherwise the batch stops before
-   * it and it runs sequentially. Returns fewer than 2 steps when no
-   * batch is eligible (caller then runs the single step).
+   * independent, capped at MAX_PARALLEL_STEPS. Consequential steps
+   * never join a batch: the batch stops before one and it runs
+   * sequentially through the normal per-step approval path. Returns
+   * fewer than 2 steps when no batch is eligible (caller then runs
+   * the single step).
    */
-  private collectBatch(task: TaskRecord, next: TaskStep, approval: PlanApproval | null): TaskStep[] {
+  private collectBatch(task: TaskRecord, next: TaskStep): TaskStep[] {
     if (next.state !== "pending" || next.parallelGroup === null || next.independent !== true) return [next];
     const batch: TaskStep[] = [];
     for (const step of task.steps) {
       if (step.index < next.index) continue;
       if (batch.length >= MAX_PARALLEL_STEPS) break;
       if (step.state !== "pending" || step.parallelGroup !== next.parallelGroup || step.independent !== true) break;
-      // Every batch member must be inside the approved bounds; the
-      // batch stops before an out-of-bounds member, which then pauses
-      // singly with its reason on the next loop iteration.
-      if (approval && this.stepBoundsReason(step, approval) !== null) break;
-      if (this.isConsequential(step.tool) && !approval) break;
+      if (this.isConsequential(step.tool)) break;
       batch.push(step);
     }
     return batch;
@@ -2062,9 +1856,6 @@ export class TaskRunner {
     // Working group: the tab this step touches joins the "Muze AI"
     // group before it runs, so the group is visible while Muze works.
     await this.trackWorkingTab(task.id, tabId);
-    // Phase 1: this step runs under plan approval only when an active
-    // approval covers it (checked by the run loop before calling here).
-    const planApproved = this.activeApproval(task) !== null && this.stepBoundsReason(step, this.activeApproval(task)) === null;
     const signal = options.signal ?? new AbortController().signal;
 
     // Phase B per-iteration tool resolution: re-resolve before any tab
@@ -2260,7 +2051,6 @@ export class TaskRunner {
             stepIndex: step.index,
             timeoutMs: step.timeoutMs,
             signal,
-            ...(planApproved ? { planApproved: true } : {}),
           });
         result = consequential && tabId !== null ? await this.throughTabChain(tabId, run) : await run();
       } catch (error) {
@@ -2374,27 +2164,8 @@ export class TaskRunner {
           step.state = "failed";
           step.finishedAt = this.now();
           task.updatedAt = step.finishedAt;
-          // Phase 1: a denial under an active plan approval pauses
-          // that step only — it marks the step failed and pauses the
-          // task, it does not end the whole task silently. A later
-          // resume continues past the failed step (the failed step is
-          // never retried automatically). Without a plan approval the
-          // Phase 0 behaviour stands: the task ends partial/failed.
-          if (extracted.code === "APPROVAL_DENIED" && this.activeApproval(task) !== null) {
-            task.status = "paused";
-            task.pauseReason = "step-denied";
-            task.resumeAfterMs = null;
-            this.refreshSummary(task, [`Denied step ${step.index}: ${truncateSummary(extracted.message).slice(0, 200)}`]);
-            await this.checkpoint(all, task, {
-              kind: "task.step-denied",
-              taskId: task.id,
-              stepIndex: step.index,
-              tool: step.tool,
-              decision: "denied",
-              outcome: extracted.code,
-            });
-            return "paused";
-          }
+          // A denied step ends the task partial/failed (Phase 0
+          // behaviour): a denial is never retried automatically.
           const anyDone = task.steps.some((s) => s.state === "done");
           task.status = anyDone ? "partial" : "failed";
           task.pauseReason = null;
@@ -2492,9 +2263,6 @@ export class TaskRunner {
     batch: TaskStep[],
     signal: AbortSignal,
   ): Promise<StepOutcome> {
-    // Recomputed after the re-check below (see there); the initial
-    // value only covers the pre-flight phase.
-    let planApproved = this.activeApproval(task) !== null;
     // Phase B pre-flight: per-iteration resolution and snapshot capture
     // for every member BEFORE anything launches, so a denied tool or a
     // failed snapshot pauses the batch without partial execution.
@@ -2530,61 +2298,6 @@ export class TaskRunner {
           return "paused";
         }
       }
-    }
-    // Per-step bounds re-check, immediately before launch: members were
-    // bounds-checked at collection time, but resolution and snapshot
-    // capture above take time, and a plan approval can expire in that
-    // window. executeOne re-checks per step; the batch path used to
-    // pass planApproved for every member from a single stale check, so
-    // an expired or out-of-bounds member would have run under a dead
-    // approval. Re-checking here pauses the whole batch before anything
-    // launches (mirroring the run loop's expiry/bounds pauses), so no
-    // member runs, and no attempt is consumed, under a dead approval.
-    {
-      const approval = this.activeApproval(task);
-      if (task.planApproval && approval === null) {
-        task.status = "paused";
-        task.pauseReason = "plan-approval-expired";
-        task.updatedAt = this.now();
-        this.refreshSummary(task);
-        await this.checkpoint(all, task, {
-          kind: "task.paused",
-          taskId: task.id,
-          stepIndex: batch[0].index,
-          tool: batch[0].tool,
-          decision: "paused",
-          outcome: "plan-approval-expired",
-        });
-        return "paused";
-      }
-      if (approval) {
-        for (const step of batch) {
-          const reason = this.stepBoundsReason(step, approval);
-          if (reason !== null) {
-            step.state = "waiting_approval";
-            step.outsideBoundsReason = reason;
-            task.status = "waiting_approval";
-            task.pauseReason = `plan-bounds: ${reason}`;
-            task.updatedAt = this.now();
-            this.refreshSummary(task);
-            await this.checkpoint(all, task, {
-              kind: "task.waiting-approval",
-              taskId: task.id,
-              stepIndex: step.index,
-              tool: step.tool,
-              decision: "approval-required",
-              outcome: `plan-bounds: ${reason}`,
-            });
-            return "waiting";
-          }
-          step.outsideBoundsReason = null;
-        }
-      }
-      // Launch under the approval state re-checked above, not the one
-      // from function entry (an approval could also have arrived during
-      // pre-flight; either way the launch flag matches executeOne's
-      // per-step check at launch time).
-      planApproved = this.activeApproval(task) !== null;
     }
     for (const step of batch) {
       step.state = "running";
@@ -2626,7 +2339,6 @@ export class TaskRunner {
             stepIndex: step.index,
             timeoutMs: step.timeoutMs,
             signal,
-            ...(planApproved ? { planApproved: true } : {}),
           });
         return this.isConsequential(step.tool) && tabId !== null ? this.throughTabChain(tabId, run) : run();
       }),

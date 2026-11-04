@@ -21,7 +21,7 @@ import type { PolicySnapshot, TaskView as RunnerTaskView } from "../libs/tasks/i
 import { HostProtocolHandler, type BridgeTransport, type TaskRunnerPort } from "../src/host-protocol.js";
 import type { TaskView } from "../libs/tool-contracts/schemas/tasks.js";
 
-const TASK_NAMES = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel", "tasks.approvePlan"];
+const TASK_NAMES = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
 
 const SNAPSHOT: PolicySnapshot = { policyVersion: 1, mode: "standard", clientId: "Test Client", scope: "call:tools" };
 
@@ -63,7 +63,6 @@ function runnerView(overrides: Partial<RunnerTaskView> = {}): RunnerTaskView {
     correlationId: "corr_1",
     resultSummary: "",
     planBounds: null,
-    planApproval: null,
     finalReport: null,
     policySnapshot: SNAPSHOT,
     createdAt: 1000,
@@ -134,7 +133,6 @@ function stubRunner(overrides: Partial<TaskRunnerPort> = {}): TaskRunnerPort {
     pauseTask: async () => runnerView({ status: "paused" }),
     resumeTask: async () => runnerView({ status: "running" }),
     cancelTask: async () => runnerView({ status: "cancelled" }),
-    approvePlan: async () => runnerView({ status: "paused" }),
     appendSteps: async () => runnerView(),
     previewTask: async () => ({
       goal: "preview",
@@ -151,13 +149,12 @@ function stubRunner(overrides: Partial<TaskRunnerPort> = {}): TaskRunnerPort {
 }
 
 describe("tasks.* contracts", () => {
-  it("defines exactly the eight task tools (Phase 0's six plus Phase 1's tasks.approvePlan plus tasks.appendSteps), and no others", () => {
+  it("defines exactly the seven task tools (create, appendSteps, get, list, pause, resume, cancel), and no others", () => {
     expect(TASK_NAMES).toEqual([...TASK_TOOL_NAMES]);
     expect(taskTools.map((t) => t.name)).toEqual(TASK_NAMES);
     expect(TASK_TOOL_SCHEMAS.map((t) => t.name)).toEqual(TASK_NAMES);
-    // Phase 1: tasks.approvePlan is a separate granular tool; dry-run is
-    // a tasks.create flag, not a separate tool, so no tool name contains "dry".
-    expect(TASK_TOOL_NAMES).toContain("tasks.approvePlan");
+    // Dry-run is a tasks.create flag, not a separate tool, so no tool
+    // name contains "dry"; and there is no tool for approving a plan.
     expect(TASK_TOOL_NAMES).toContain("tasks.appendSteps");
     expect(TASK_TOOL_NAMES.some((name) => name.includes("dry"))).toBe(false);
   });
@@ -169,7 +166,7 @@ describe("tasks.* contracts", () => {
     // executor and routes them to the runner. TASK_TOOL_SCHEMAS is the
     // task subset of TOOL_SCHEMAS, not a disjoint list.
     expect(TASK_TOOL_NAMES.every((name) => TOOL_NAMES.includes(name))).toBe(true);
-    expect(TOOL_SCHEMAS.filter((tool) => tool.name.startsWith("tasks."))).toHaveLength(8);
+    expect(TOOL_SCHEMAS.filter((tool) => tool.name.startsWith("tasks."))).toHaveLength(7);
   });
 
   it("bumps the registry version to 2.3.0 without changing the protocol version", () => {
@@ -221,8 +218,6 @@ describe("tasks.* contracts", () => {
     expect(byName.get("tasks.pause")?.risk).toBe("reversible");
     expect(byName.get("tasks.resume")?.risk).toBe("reversible");
     expect(byName.get("tasks.cancel")?.risk).toBe("reversible");
-    expect(byName.get("tasks.approvePlan")?.risk).toBe("reversible");
-    expect(byName.get("tasks.approvePlan")?.requiresApproval).toBe(false);
     for (const tool of taskTools) expect(tool.category).toBe("workflows");
   });
 
@@ -418,7 +413,7 @@ describe("tasks.* host dispatch", () => {
       },
     });
     const { transport, handler } = setup(runner);
-    await handler.handle({ type: "tool.call", id: "u", tool: "tasks.approvePlan", input: {} });
+    await handler.handle({ type: "tool.call", id: "u", tool: "tasks.unknownTool", input: {} });
     expect(transport.last()?.type).toBe("tool.error");
     await handler.handle({ type: "tool.call", id: "i", tool: "tasks.create", input: { goal: "", steps: [] } });
     expect(transport.last()?.type).toBe("tool.error");

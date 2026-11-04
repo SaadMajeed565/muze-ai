@@ -33,7 +33,7 @@ describe("tool registry schema", () => {
     expect(REGISTRY_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("is at the 0.5.0 versions (protocol unchanged, registry bumped for plan approval + discovery)", () => {
+  it("is at the 0.5.0 versions (protocol unchanged, registry bumped for discovery)", () => {
     expect(PROTOCOL_VERSION).toBe("2.0.0");
     expect(REGISTRY_VERSION).toBe("2.3.0");
   });

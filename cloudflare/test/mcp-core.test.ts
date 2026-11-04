@@ -175,7 +175,7 @@ describe("Phase A mode-filtered tool visibility", () => {
       expect(names).toContain("tools.batch");
       expect(names).toContain("tasks.get");
       expect(names).toContain("tasks.list");
-      for (const hidden of ["act", "navigate", "form", "data", "submit", "tasks.create", "tasks.pause", "tasks.resume", "tasks.cancel", "tasks.approvePlan"]) {
+      for (const hidden of ["act", "navigate", "form", "data", "submit", "tasks.create", "tasks.pause", "tasks.resume", "tasks.cancel"]) {
         expect(names).not.toContain(hidden);
       }
     } finally {
@@ -190,7 +190,6 @@ describe("Phase A mode-filtered tool visibility", () => {
       const names = await listNames();
       expect(names).toContain("observe");
       expect(names).toContain("tasks.create");
-      expect(names).toContain("tasks.approvePlan");
       for (const hidden of ["act", "navigate", "form", "data", "submit", "tasks.pause", "tasks.resume", "tasks.cancel"]) {
         expect(names).not.toContain(hidden);
       }
