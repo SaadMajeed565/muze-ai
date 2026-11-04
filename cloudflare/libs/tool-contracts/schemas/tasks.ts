@@ -4,11 +4,20 @@ import type { ToolDefinition } from "../tools.js";
 /**
  * Phase 0 task contracts (registry 2.1.0, additive only).
  *
- * A task is a durable job owned by the extension: a goal plus an ordered
- * list of steps, each step naming an existing tool and its input. The
- * extension's task runner executes the steps sequentially through the
- * existing executor/policy/approval path; the gateway never executes a
- * step and never synthesises a task view.
+ * A task is a durable job owned by the extension: a goal plus a
+ * DESCRIPTION — plain words describing the job and the possible ways
+ * to do it, like a todo list in words. The description is
+ * intent/documentation, NOT executable tool calls: the AI never
+ * predefines tool+input steps for a description task. Every tool call
+ * the AI makes for the job carries the task id, and the extension
+ * files that execution into the task's timeline itself; tasks.complete
+ * ends a description task. A task created WITH steps keeps the old
+ * step-runner behaviour exactly (backward compatible): the extension's
+ * task runner executes the steps sequentially through the existing
+ * executor/policy/approval path; the gateway never executes a step and
+ * never synthesises a task view. The step runner is dormant for
+ * description tasks, kept for a future update covering common
+ * (repeatable) sites.
  *
  * Two deliberate boundaries, kept explicit so a later section does not
  * blur them:
@@ -180,12 +189,13 @@ export const TaskViewSchema = z
   .object({
     id: z.string().min(1),
     goal: z.string().min(1).max(2000),
+    description: z.string().min(1).max(4000).optional().describe("Description-based model: plain words describing the job and the possible ways to do it; absent for pre-description records"),
     clientId: z.string().min(1),
     browserSessionId: z.string().min(1).optional(),
     mode: TaskAgentModeSchema.optional().describe("Phase B: agent mode pinned at creation; omitted for pre-Phase-B tasks (read as act)"),
     status: TaskStatusSchema,
-    steps: z.array(TaskStepViewSchema).min(1).max(100),
-    totalSteps: z.number().int().min(1).max(100),
+    steps: z.array(TaskStepViewSchema).min(0).max(100),
+    totalSteps: z.number().int().min(0).max(100),
     doneSteps: z.array(z.number().int().min(0)),
     undoneSteps: z.array(z.number().int().min(0)),
     totalBudgetMs: z.number().int().positive(),
@@ -204,7 +214,8 @@ export type TaskView = z.infer<typeof TaskViewSchema>;
 export const TasksCreateInputSchema = z
   .object({
     goal: z.string().min(1).max(2000),
-    steps: z.array(TaskStepInputSchema).min(1).max(100),
+    description: z.string().min(1).max(4000).optional().describe("Plain words describing the job and the possible ways to do it, like a todo list in words. The prompt mandates goal + description with no steps; steps are only for the backward-compatible step-runner path."),
+    steps: z.array(TaskStepInputSchema).min(0).max(100).optional().describe("Optional. Omit (or pass []) for a description task — a record only, never entered into the step loop. A task created WITH steps keeps the step-runner behaviour exactly."),
     totalBudgetMs: z.number().int().positive().optional().describe("Total budget for the whole task in ms; omit for the runner default"),
     start: z.boolean().default(true).describe("Start running immediately; false leaves the task created but not started"),
     browserSessionId: z.string().min(1).max(256).optional().describe("Target browser session; a task never moves to a different browser on its own"),
@@ -232,13 +243,13 @@ export type TasksResumeInput = z.infer<typeof TasksResumeInputSchema>;
 export const TasksCancelInputSchema = z.object({ taskId: z.string().min(1).max(256) }).strict();
 export type TasksCancelInput = z.infer<typeof TasksCancelInputSchema>;
 
-export const TasksAppendStepsInputSchema = z
+export const TasksCompleteInputSchema = z
   .object({
-    taskId: z.string().min(1).max(256).describe("Id returned by tasks.create for the task to extend"),
-    steps: z.array(TaskStepInputSchema).min(1).max(100).describe("Steps to append to the task's plan, same shape as tasks.create steps"),
+    taskId: z.string().min(1).max(256).describe("Id returned by tasks.create for the description task to complete"),
+    summary: z.string().min(1).max(4000).optional().describe("Short summary of what was done; stored as the task's final report when provided"),
   })
   .strict();
-export type TasksAppendStepsInput = z.infer<typeof TasksAppendStepsInputSchema>;
+export type TasksCompleteInput = z.infer<typeof TasksCompleteInputSchema>;
 
 export const TasksListOutputSchema = z.object({ tasks: z.array(TaskViewSchema) }).strict();
 export type TasksListOutput = z.infer<typeof TasksListOutputSchema>;
@@ -247,7 +258,7 @@ export const tasksCreate: ToolDefinition = {
   name: "tasks.create",
   title: "Create task",
   description:
-    "Create a durable multi-step task in the extension and, by default, start running it. Creating the task is reversible (it can be paused or cancelled); consequential steps inside the task still go through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves its steps. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title. tasks.create returns the task id; reuse it with tasks.appendSteps to add follow-up steps to the same task instead of creating a second task for the same job.",
+    "Create a durable task in the extension: exactly ONE task per user request, with a goal plus a description — plain words describing the job and the possible ways to do it, like a todo list in words. Do NOT predefine tool+input steps: create the task with goal + description and no steps. The task is a record only; it starts running by default and accepts filings. Include the returned task id in every subsequent tool call for the job — the extension files each execution into the task's timeline itself — never create a second task for the same job, and call tasks.complete when the job is done. Creating the task is reversible (it can be paused or cancelled); each filed execution still goes through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves anything. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title. (A task created WITH steps keeps the backward-compatible step-runner behaviour: the runner executes those steps and the task ends when they finish.)",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,
@@ -258,7 +269,7 @@ export const tasksCreate: ToolDefinition = {
 export const tasksGet: ToolDefinition = {
   name: "tasks.get",
   title: "Get task",
-  description: "Read the current view of one task: status, step progress, done and undone steps, and result summary. Read-only; returns the summary view, never step inputs or raw outputs.",
+  description: "Read the current view of one task: goal, description, status, progress (step progress for step tasks, filed-action count for description tasks), and result summary. Read-only; returns the summary view, never step inputs or raw outputs.",
   category: "workflows",
   risk: "read-only",
   requiresApproval: false,
@@ -312,18 +323,18 @@ export const tasksCancel: ToolDefinition = {
   output: TaskViewSchema,
 };
 
-export const tasksAppendSteps: ToolDefinition = {
-  name: "tasks.appendSteps",
-  title: "Append task steps",
+export const tasksComplete: ToolDefinition = {
+  name: "tasks.complete",
+  title: "Complete task",
   description:
-    "Append steps to an existing task's plan using the id tasks.create returned. Follow-up work for the same job goes here — never create a second task for work that continues an existing one. Appended steps queue behind unexecuted steps and run through the same executor, policy, and approval gates at execution time; appending never pre-approves them. Appending to a failed task reopens it as paused — call tasks.resume to run the new steps. Appending to a done, cancelled, or partial task is rejected.",
+    "Complete a description task (a task created with goal + description and no steps) when the job is done, optionally with a short summary of what was done, stored as the task's final report. This is the done signal for description tasks — call it when the job is done, never before. It rejects step tasks (step tasks complete when their steps finish) and rejects terminal tasks. A failed description task is terminal: a genuinely new attempt gets a new task, never a revival of the old one.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,
-  input: TasksAppendStepsInputSchema,
+  input: TasksCompleteInputSchema,
   output: TaskViewSchema,
 };
 
-export const taskTools: ToolDefinition[] = [tasksCreate, tasksAppendSteps, tasksGet, tasksList, tasksPause, tasksResume, tasksCancel];
+export const taskTools: ToolDefinition[] = [tasksCreate, tasksComplete, tasksGet, tasksList, tasksPause, tasksResume, tasksCancel];
 
 export const TASK_TOOL_NAMES: string[] = taskTools.map((t) => t.name);

@@ -28,7 +28,6 @@ import {
 // port interface itself is defined here, structurally, so the dispatch
 // stays decoupled from the runner class and test fakes stay possible.
 import type {
-  CreateStepInput,
   CreateTaskInput,
   DryRunPreview as RunnerDryRunPreview,
   PolicySnapshot,
@@ -63,8 +62,8 @@ import { resolveUnifiedAction, type ActionRiskEntry } from "../libs/tool-contrac
  */
 export interface TaskRunnerPort {
   createTask(input: CreateTaskInput, policySnapshot: PolicySnapshot): Promise<RunnerTaskView>;
-  /** Append steps to an existing task's plan (tasks.appendSteps). */
-  appendSteps(id: string, clientId: string, steps: CreateStepInput[]): Promise<RunnerTaskView>;
+  /** Complete a description task (tasks.complete); rejects step and terminal tasks. */
+  completeTask(id: string, clientId: string, summary?: string): Promise<RunnerTaskView>;
   getTask(id: string, clientId: string): Promise<RunnerTaskView>;
   listTasks(clientId: string, browserSessionId?: string): Promise<RunnerTaskView[]>;
   runTask(id: string, clientId: string, browserSessionId?: string): Promise<RunnerTaskView>;
@@ -96,6 +95,9 @@ function toContractTaskView(view: RunnerTaskView): TaskView {
   const candidate = {
     id: view.id,
     goal: view.goal,
+    // Description-based model: the todo-in-words crosses the bridge
+    // when present; pre-description records omit it.
+    ...(view.description !== undefined && view.description !== "" ? { description: view.description } : {}),
     clientId: view.clientId,
     browserSessionId: view.browserSessionId,
     // Phase B: pinned task mode, when present (pre-Phase-B tasks omit it).
@@ -133,6 +135,14 @@ function toContractDryRunPreview(preview: RunnerDryRunPreview): DryRunPreview {
     throw new ToolErrorException("INTERNAL", "Task runner returned a dry-run preview that fails the task contract");
   }
   return checked.data;
+}
+
+/** Terminal task statuses: a filing into one of these is rejected for actions, filed standalone for reads. */
+const TERMINAL_TASK_STATUSES = new Set(["done", "cancelled", "partial", "failed"]);
+
+/** A filing task id: a non-empty string is used; anything else counts as absent. */
+function asFilingTaskId(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
 }
 
 export interface BridgeTransport {
@@ -772,6 +782,69 @@ export class HostProtocolHandler {
     this.deps.transport.post({ type: "approval.resolved", id, approvalId, approved });
   }
 
+  /**
+   * Description-task filing validation, run in host-protocol before
+   * the executor (the executor has no task store, so validation lives
+   * here; runner-originated step executions pass taskId directly to
+   * the executor and never come through this path, so they skip
+   * re-validation). Returns the task id to file under, or undefined
+   * to file standalone.
+   *
+   * - ACTION calls: the task id must exist, be owned by the calling
+   *   client (the runner's assertClient pattern — one app must never
+   *   file into another's task), and be non-terminal. Unknown id →
+   *   TASK_REQUIRED telling the AI to create a task first;
+   *   wrong-client id → PERMISSION_DENIED with the assertClient
+   *   message; terminal id → INVALID_INPUT telling the AI to create
+   *   a new task. Missing taskId is NOT rejected here — the executor's
+   *   TASK_REQUIRED gate owns that case. Paused/waiting_approval
+   *   tasks accept filings (non-terminal; AI discipline says resume
+   *   first, but the system does not block).
+   * - READ calls: no taskId → standalone as today; valid taskId →
+   *   filed; invalid taskId (unknown/wrong-client/terminal) →
+   *   executed normally but filed standalone — a read is never
+   *   rejected and never filed into a wrong task.
+   * - No runner wired → the id passes through unvalidated (the
+   *   executor still files by presence); tasks.* calls already fail
+   *   without a runner, so this only affects direct calls in
+   *   unwired hosts.
+   */
+  private async resolveFilingTaskId(
+    taskId: string | undefined,
+    clientId: string,
+    effectiveRisk: string | undefined,
+  ): Promise<string | undefined> {
+    if (taskId === undefined) return undefined;
+    const runner = this.deps.tasks;
+    if (!runner) return taskId;
+    const isAction = effectiveRisk !== undefined && effectiveRisk !== "read-only" && effectiveRisk !== "sensitive-read";
+    let view: RunnerTaskView;
+    try {
+      view = await runner.getTask(taskId, clientId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isAction) return undefined;
+      if (message.startsWith("task not found")) {
+        throw new ToolErrorException(
+          "TASK_REQUIRED",
+          `Unknown task id "${taskId}": no such task exists. Create a task first with tasks.create (concise action-first title + description of the job) and include the returned task id in tool calls.`,
+        );
+      }
+      if (message.includes("belongs to a different client")) {
+        throw new ToolErrorException("PERMISSION_DENIED", message);
+      }
+      throw new ToolErrorException("INTERNAL", message);
+    }
+    if (TERMINAL_TASK_STATUSES.has(view.status)) {
+      if (!isAction) return undefined;
+      throw new ToolErrorException(
+        "INVALID_INPUT",
+        `Task "${taskId}" is ${view.status} and cannot accept new filings. Create a new task with tasks.create for further work and include its id in tool calls.`,
+      );
+    }
+    return taskId;
+  }
+
   private async onToolCall(message: Extract<BridgeClientMessage, { type: "tool.call" }>): Promise<void> {
     // Phase 0 task tools are dispatched to the task runner, not the
     // executor: the runner owns the task lifecycle and runs each step
@@ -794,6 +867,14 @@ export class HostProtocolHandler {
       const unifiedDef = this.deps.registry.get(message.tool);
       const unifiedParsed = unifiedDef?.input.safeParse(stripped ?? {});
       const resolved = resolveUnifiedToolCall(message.tool, unifiedParsed?.success ? unifiedParsed.data : stripped);
+      // Description-task filing: validate the claimed task id (when
+      // the tool is known) and pass it to the executor, which files
+      // the execution's activity row under that task. The executor's
+      // own TASK_REQUIRED gate still owns the missing-taskId case.
+      const filingClient = message.client ?? this.client;
+      const filingClientId = filingClient.id && filingClient.id !== "unknown" ? filingClient.id : filingClient.name;
+      const filingRisk = resolved ? this.deps.registry.get(resolved.tool)?.risk : unifiedDef?.risk;
+      const filingTaskId = await this.resolveFilingTaskId(asFilingTaskId(message.taskId), filingClientId, filingRisk);
       const result = await this.deps.executor.execute({
         tool: message.tool,
         input: stripped,
@@ -803,6 +884,7 @@ export class HostProtocolHandler {
         approvalId: message.approvalId,
         dryRun: message.dryRun,
         signal: controller.signal,
+        ...(filingTaskId !== undefined ? { taskId: filingTaskId } : {}),
         // Gateway-internal housekeeping arrives with no client: the
         // socket message only carries client when the gateway call had
         // one, and every real MCP call passes a client. A client-less
@@ -904,9 +986,13 @@ export class HostProtocolHandler {
           }
           const createInput: CreateTaskInput = {
             goal: String(input.goal),
+            // Description-based model: the todo-in-words crosses to
+            // the runner when present; steps stay optional (omit =
+            // description task, a record only, never the step loop).
+            ...(typeof input.description === "string" && input.description !== "" ? { description: input.description } : {}),
             clientId,
             browserSessionId,
-            steps: (input.steps as CreateTaskInput["steps"]) ?? [],
+            ...(input.steps !== undefined ? { steps: input.steps as CreateTaskInput["steps"] } : {}),
             ...(typeof input.totalBudgetMs === "number" ? { totalBudgetMs: input.totalBudgetMs } : {}),
             ...(typeof input.start === "boolean" ? { start: input.start } : {}),
             ...(input.bounds !== undefined ? { planBounds: input.bounds as PlanBounds } : {}),
@@ -932,20 +1018,18 @@ export class HostProtocolHandler {
           view = toContractTaskView(created);
           break;
         }
-        case "tasks.appendSteps": {
-          // Follow-up steps for an existing task: the runner validates
-          // the steps, rejects done/cancelled/partial tasks (a failed
-          // task reopens as paused for a retry), and queues the rest
-          // behind unexecuted steps — no new task record is created.
-          // No policy snapshot is needed: nothing executes here; the
-          // appended steps face the per-step gates when the loop runs
-          // them, exactly like created steps.
-          const appended = await runner.appendSteps(
-            String(input.taskId),
-            clientId,
-            (input.steps as CreateStepInput[]) ?? [],
+        case "tasks.complete": {
+          // The done signal for description tasks: the runner rejects
+          // step tasks and terminal tasks itself; ownership is checked
+          // there like every other task tool. No policy snapshot is
+          // needed: nothing executes here.
+          view = toContractTaskView(
+            await runner.completeTask(
+              String(input.taskId),
+              clientId,
+              typeof input.summary === "string" ? input.summary : undefined,
+            ),
           );
-          view = toContractTaskView(appended);
           break;
         }
         case "tasks.get":
@@ -1037,6 +1121,12 @@ export class HostProtocolHandler {
           continue;
         }
         try {
+          // Per-item filing: batch items are reads, so an invalid
+          // task id never rejects — the item runs standalone. A valid
+          // non-terminal id files the row under that task.
+          const batchClient = message.client ?? this.client;
+          const batchClientId = batchClient.id && batchClient.id !== "unknown" ? batchClient.id : batchClient.name;
+          const batchTaskId = await this.resolveFilingTaskId(asFilingTaskId(call.taskId), batchClientId, effRisk);
           const result = await this.deps.executor.execute({
             tool: call.tool,
             input: batchStripped,
@@ -1046,6 +1136,7 @@ export class HostProtocolHandler {
             approvalId: call.approvalId,
             dryRun: call.dryRun,
             signal: controller.signal,
+            ...(batchTaskId !== undefined ? { taskId: batchTaskId } : {}),
             // Same gateway-internal rule as a single call: a client-less
             // batch is housekeeping, not an AI client call, so its items
             // execute and return but emit no activity rows. silentActivity

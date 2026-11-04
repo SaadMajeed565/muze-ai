@@ -243,9 +243,23 @@ export interface CreateStepInput {
 
 export interface CreateTaskInput {
   goal: string;
+  /**
+   * Description-based model: plain words describing the job and the
+   * possible ways to do it (a todo list in words), NOT executable
+   * tool calls. The prompt mandates it for every new task; it is
+   * optional here only so pre-description callers keep compiling.
+   */
+  description?: string;
   clientId: string;
   browserSessionId: string;
-  steps: CreateStepInput[];
+  /**
+   * Optional: omit (or pass []) for a description task — a record
+   * only, never entered into the step loop. A task created WITH
+   * steps keeps the step-runner behaviour exactly (backward
+   * compatible; the runner is dormant for description tasks, kept
+   * for a future update covering common repeatable sites).
+   */
+  steps?: CreateStepInput[];
   totalBudgetMs?: number;
   start?: boolean;
   /** Plan bounds supplied at creation (data only; never pre-approval). */
@@ -542,12 +556,12 @@ export class TaskRunner {
         resultSummary: fresh.status === "cancelled" ? fresh.resultSummary : working.resultSummary,
       };
     }
-    // Steps appended while this step was executing (tasks.appendSteps
-    // only ever pushes at the end, with sequential indices) must
-    // survive this checkpoint: the working copy predates them, and a
-    // wholesale save would wipe the append. Carry the fresh tail over
-    // when the prefix matches by index; otherwise fall back to the
-    // working copy. The result summary is left to the next caller-side
+    // Fresh tail carried over when the prefix matches by index (the
+    // step-runner path only; there is no append API anymore, so this
+    // is dormant for description tasks and kept for step tasks):
+    // a working copy that predates steps added at the end must not
+    // wipe them on a wholesale save. The result summary is left to
+    // the next caller-side
     // refresh — recomputing here would drop the caller's extra lines
     // (e.g. a failure note) baked into working.resultSummary.
     if (fresh && fresh.steps.length > toSave.steps.length) {
@@ -649,15 +663,17 @@ export class TaskRunner {
     const goal = requireNonEmpty(input.goal, "goal");
     const clientId = requireNonEmpty(input.clientId, "clientId");
     const browserSessionId = requireNonEmpty(input.browserSessionId, "browserSessionId");
-    if (!Array.isArray(input.steps)) throw new Error("task creation rejected: steps must be an array");
-    if (input.steps.length > MAX_STEPS_PER_TASK) {
-      throw new Error(`task creation rejected: ${input.steps.length} steps exceeds the maximum of ${MAX_STEPS_PER_TASK}`);
+    // Description tasks carry no steps: steps are optional, 0 allowed.
+    const rawSteps = input.steps ?? [];
+    if (!Array.isArray(rawSteps)) throw new Error("task creation rejected: steps must be an array");
+    if (rawSteps.length > MAX_STEPS_PER_TASK) {
+      throw new Error(`task creation rejected: ${rawSteps.length} steps exceeds the maximum of ${MAX_STEPS_PER_TASK}`);
     }
     const totalBudgetMs = input.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS;
     if (!Number.isFinite(totalBudgetMs) || totalBudgetMs <= 0) {
       throw new Error(`task creation rejected: totalBudgetMs must be a positive number, got ${String(input.totalBudgetMs)}`);
     }
-    const boundsErrors = this.validateCreationBounds(input.steps, input.planBounds);
+    const boundsErrors = this.validateCreationBounds(rawSteps, input.planBounds);
     if (boundsErrors.length > 0) throw new Error(`task creation rejected: ${boundsErrors.join("; ")}`);
     // Phase B: mode is pinned at creation and validated, never guessed.
     const mode = input.mode === undefined ? "act" : parseAgentMode(input.mode);
@@ -667,7 +683,7 @@ export class TaskRunner {
 
     const now = this.now();
     const id = this.generateId();
-    const steps = await this.buildStepRecords(id, input.steps, 0, "task creation rejected");
+    const steps = await this.buildStepRecords(id, rawSteps, 0, "task creation rejected");
 
     // Pinned tabs: unique tabIds from step inputs, with the recorded url
     // from the first step that mentions that tab.
@@ -686,10 +702,17 @@ export class TaskRunner {
       // on the child record after creation (never on the parent).
       parentId: null,
       goal,
+      // A non-empty description is stored on the record and returned
+      // in the view; an absent/empty one stays absent (pre-description
+      // records read the same way).
+      ...(typeof input.description === "string" && input.description !== "" ? { description: input.description } : {}),
       clientId,
       browserSessionId,
       mode,
-      status: "created",
+      // Description tasks (zero steps) are records only: they start
+      // running — active, accepting filings — and never enter the
+      // step loop below. Step tasks keep the created-then-run path.
+      status: steps.length === 0 ? "running" : "created",
       steps,
       totalBudgetMs,
       correlationId: this.generateId(),
@@ -731,17 +754,21 @@ export class TaskRunner {
       decision: "created",
       outcome: "success",
     });
+    // A description task never enters the runner's step loop: with
+    // zero steps the loop would immediately mark it done (every step
+    // vacuously done), which would end the job before any filing.
+    // It stays running as a record until tasks.complete ends it.
+    if (steps.length === 0) return toTaskView(saved);
     if (input.start === true) return this.runTask(id, clientId);
     return toTaskView(saved);
   }
 
   /**
    * Validate raw step inputs and build stored step records, shared by
-   * createTask and appendSteps so appended steps are validated and
-   * shaped exactly like created ones. Indices start at startIndex and
-   * idempotency keys bind task id + final index, so appended steps
-   * never collide with existing ones. Throws with errorPrefix on the
-   * first malformed step; nothing is persisted by this helper.
+   * createTask (and child creation) so steps are validated and shaped
+   * exactly alike. Indices start at startIndex and idempotency keys
+   * bind task id + final index. Throws with errorPrefix on the first
+   * malformed step; nothing is persisted by this helper.
    */
   private async buildStepRecords(
     taskId: string,
@@ -820,81 +847,40 @@ export class TaskRunner {
   }
 
   /**
-   * Append steps to an existing task's plan (tasks.appendSteps): the
-   * follow-up path for a job that already has a task, so the AI never
-   * needs a second task for the same job. Appended steps queue behind
-   * unexecuted steps as pending records and run through the identical
-   * loop — same per-step executor/policy/approval gates, same taskId
-   * attribution into activity/history, same bounds handling — because
-   * the run loop reloads the record before every step and picks the
-   * next pending one, and step checkpoints merge (never wipe) steps
-   * appended while a step was executing. Status is never changed here,
-   * except for one revival: appending to a FAILED task reopens it as
-   * paused, so the existing resume path runs the new steps — append
-   * itself never starts execution, matching the invariant for paused
-   * tasks. The revival clears the stale completion markers
-   * (completedAt, finalReport) so the task presents as paused and
-   * resumable, not completed; prior steps keep their recorded states.
-   * Done, cancelled, and partial tasks still reject; the plan cap
-   * (MAX_STEPS_PER_TASK) and the task's own planBounds maxSteps, when
-   * set, reject an append that would overflow them.
+   * Complete a DESCRIPTION task (tasks.complete): the done signal for
+   * a zero-step task. This replaces "steps running out" as the done
+   * signal for description tasks — the AI calls it when the job is
+   * done, with an optional short summary stored in the result summary
+   * and a structured final report (empty step lists for a task with
+   * no steps). It REJECTS step tasks ("step tasks complete when their
+   * steps finish") and REJECTS terminal tasks: a failed description
+   * task is simply terminal, and a genuinely new attempt gets a new
+   * task (there is no append/revive path anymore). Ownership-checked
+   * like every other task tool.
    */
-  async appendSteps(id: string, clientId: string, rawSteps: CreateStepInput[]): Promise<TaskView> {
-    if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
-      throw new Error("task append rejected: steps must be a non-empty array");
-    }
+  async completeTask(id: string, clientId: string, summary?: string): Promise<TaskView> {
     const all = await this.loadAll();
     const task = this.findOrThrow(all, id);
     this.assertClient(task, clientId);
-    // Failed-task revival: a failed task is the one terminal state a
-    // retry can continue — the AI appends retry steps here instead of
-    // creating a second task for the same job. Done, cancelled, and
-    // partial tasks still reject below.
-    const reviving = task.status === "failed";
-    if (isTerminal(task.status) && !reviving) {
-      throw new Error(`task append rejected: task ${id} is ${task.status} and cannot accept new steps`);
+    if (isTerminal(task.status)) {
+      throw new Error(`task complete rejected: task ${id} is ${task.status} and cannot be completed`);
     }
-    if (task.steps.length + rawSteps.length > MAX_STEPS_PER_TASK) {
-      throw new Error(
-        `task append rejected: ${task.steps.length + rawSteps.length} steps would exceed the maximum of ${MAX_STEPS_PER_TASK}`,
-      );
+    if (task.steps.length > 0) {
+      throw new Error(`task complete rejected: task ${id} is a step task; step tasks complete when their steps finish`);
     }
-    if (task.planBounds?.maxSteps !== undefined && task.steps.length + rawSteps.length > task.planBounds.maxSteps) {
-      throw new Error(
-        `task append rejected: plan bounds maxSteps (${task.planBounds.maxSteps}) is smaller than the plan length (${task.steps.length + rawSteps.length})`,
-      );
-    }
-    const built = await this.buildStepRecords(id, rawSteps, task.steps.length, "task append rejected");
-    task.steps.push(...built);
-    // Pinned tabs: same rule as creation — a new tabId mentioned by an
-    // appended step joins the pinned set with its first recorded url.
-    for (const step of built) {
-      const tabId = (step.input as Record<string, unknown>).tabId;
-      if (typeof tabId === "number" && Number.isInteger(tabId) && !task.pinnedTabs.some((t) => t.tabId === tabId)) {
-        const url = (step.input as Record<string, unknown>).url;
-        task.pinnedTabs.push({ tabId, url: typeof url === "string" ? url : null });
-      }
-    }
-    if (reviving) {
-      // Reopen the failed task as paused: the resume path (which
-      // refuses terminal tasks) can now run the new steps, while the
-      // append itself starts nothing. Clear the stale completion
-      // markers so the record reads as paused/resumable, not finished;
-      // the failed steps themselves stay failed.
-      task.status = "paused";
-      task.pauseReason = null;
-      task.resumeAfterMs = null;
-      task.completedAt = null;
-      task.finalReport = null;
-    }
-    task.updatedAt = this.now();
-    this.refreshSummary(task);
+    task.status = "done";
+    task.pauseReason = null;
+    task.resumeAfterMs = null;
+    task.completedAt = this.now();
+    task.updatedAt = task.completedAt;
+    this.refreshSummary(task, summary !== undefined ? [summary] : ["Completed via tasks.complete."]);
+    this.setFinalReport(task);
     const saved = await this.persistOnly(all, task, {
-      kind: "task.steps-appended",
+      kind: "task.completed",
       taskId: id,
       stepIndex: -1,
       tool: "",
-      decision: "appended",
+      decision: "completed",
       outcome: "success",
     });
     return toTaskView(saved);
@@ -925,7 +911,7 @@ export class TaskRunner {
     if (typeof input.browserSessionId !== "string" || input.browserSessionId.trim() === "") {
       errors.push("task creation rejected: browserSessionId must be a non-empty string");
     }
-    if (!Array.isArray(input.steps)) errors.push("task creation rejected: steps must be an array");
+    if (input.steps !== undefined && !Array.isArray(input.steps)) errors.push("task creation rejected: steps must be an array");
     const rawSteps: CreateStepInput[] = Array.isArray(input.steps) ? input.steps : [];
     if (rawSteps.length > MAX_STEPS_PER_TASK) errors.push(`task creation rejected: ${rawSteps.length} steps exceeds the maximum of ${MAX_STEPS_PER_TASK}`);
     const totalBudgetMs = input.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS;
@@ -1477,6 +1463,31 @@ export class TaskRunner {
     // (Phase 0 behaviour for direct bridge clients).
     if (browserSessionId !== undefined && browserSessionId !== task.browserSessionId) {
       throw new Error(`task ${id} is bound to browser session ${task.browserSessionId} and cannot run on a different browser session`);
+    }
+    // Description tasks never enter the step loop — not even via
+    // resume: with zero steps the loop's "no pending step" branch
+    // would mark the task done (every step vacuously done), ending
+    // the job without any work. A resumed description task simply
+    // returns to running as a record; only tasks.complete ends it.
+    if (task.steps.length === 0) {
+      task.status = "running";
+      task.pauseReason = null;
+      task.resumeAfterMs = null;
+      task.updatedAt = this.now();
+      this.refreshSummary(task);
+      // saveList, not persistOnly: the checkpoint's pause-wins merge
+      // would revert this running copy to the fresh paused record
+      // (the normal start path below uses saveList for the same
+      // reason — this transition IS the resume, not a race with one).
+      const saved = await this.saveList(all, task, {
+        kind: "task.resumed",
+        taskId: id,
+        stepIndex: -1,
+        tool: "",
+        decision: "running",
+        outcome: "success",
+      });
+      return toTaskView(saved);
     }
     if (this.running.has(id)) throw new Error(`task ${id} is already running in this runner`);
 

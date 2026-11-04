@@ -516,10 +516,10 @@ describe("Host dispatch for dry-run", () => {
       pauseTask: async () => runnerView as never,
       resumeTask: async () => runnerView as never,
       cancelTask: async () => runnerView as never,
-      appendSteps: async () => runnerView as never,
+      completeTask: async () => runnerView as never,
       previewTask: async (input) => {
         seen.preview = input;
-        return { goal: input.goal, totalSteps: input.steps.length, totalBudgetMs: 60_000, domains: [], steps: [], approvalsNeeded: [], errors: [], valid: true };
+        return { goal: input.goal, totalSteps: (input.steps ?? []).length, totalBudgetMs: 60_000, domains: [], steps: [], approvalsNeeded: [], errors: [], valid: true };
       },
     };
     const handler = new HostProtocolHandler({

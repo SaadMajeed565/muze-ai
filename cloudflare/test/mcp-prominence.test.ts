@@ -11,7 +11,7 @@ import {
 } from "../src/mcp.js";
 import type { GatewayBridge } from "../src/bridge.js";
 
-const TASK_SEQUENCE = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
+const TASK_SEQUENCE = ["tasks.create", "tasks.complete", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
 
 function disconnectedBridge(): GatewayBridge {
   return {
@@ -43,13 +43,14 @@ describe("tasks prominence in initialize + ListTools", () => {
     expect(MCP_INSTRUCTIONS).toContain("single read-only observation");
     expect(MCP_INSTRUCTIONS).not.toContain("1-3 steps");
     expect(MCP_INSTRUCTIONS).not.toContain("Decide direct vs plan");
-    // Follow-up work appends to the existing task, never a second task;
-    // connection checks go through browsers.list, never probe reads.
-    expect(MCP_INSTRUCTIONS).toContain("append it with `tasks.appendSteps`");
+    // Follow-up work files into the existing task by id, never a
+    // second task; connection checks go through browsers.list, never
+    // probe reads.
+    expect(MCP_INSTRUCTIONS).toContain("include the returned task id in every subsequent tool call");
     expect(MCP_INSTRUCTIONS).toContain("never create a second task for the same job");
     expect(MCP_INSTRUCTIONS).toContain("To check the Muze connection itself, call `browsers.list`");
-    // The brief becomes the task's plan.
-    expect(MCP_INSTRUCTIONS).toContain("The brief becomes the task's plan");
+    // The brief becomes the task's description.
+    expect(MCP_INSTRUCTIONS).toContain("The brief becomes the task's description");
     // Assembled instructions carry the same weave, still starting with
     // the agent line rather than a banner.
     const assembled = buildLayeredInstructions({

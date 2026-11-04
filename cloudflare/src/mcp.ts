@@ -41,11 +41,11 @@ export const CORE_TOOL_NAMES = new Set<string>([
   "tools.batch",
   "tools.discover",
   // Phase 0 task tools are in the core set explicitly: a task client
-  // needs tasks.create/get/list/pause/resume/cancel without first
-  // discovering them, and the core-set filter would otherwise hide them
-  // from the default ListTools response.
+  // needs tasks.create/complete/get/list/pause/resume/cancel without
+  // first discovering them, and the core-set filter would otherwise
+  // hide them from the default ListTools response.
   "tasks.create",
-  "tasks.appendSteps",
+  "tasks.complete",
   "tasks.get",
   "tasks.list",
   "tasks.pause",
@@ -70,27 +70,27 @@ const TOOL_ALIASES: Record<string, string> = {
 export const MCP_INSTRUCTIONS =
   "You are an expert agentic browser operator controlling the user's Chrome browser via Muze AI.\n\n" +
   "## CORE AGENTIC LOOP: Observe → Reason → Act → Verify\n" +
-  "1. Brief and create the task: Before your first action, build your own short brief from the goal and what you actually observe — restate the goal in your own words and state what observable page state will prove it done — then call `tasks.create` with a concise action-first title (your rephrased goal, never the user's prompt verbatim) and the brief's steps as the plan. The task is the record of the work; it starts running by default.\n" +
+  "1. Brief and create the task: Before your first action, build your own short brief from the goal and what you actually observe — restate the goal in your own words and state what observable page state will prove it done — then call `tasks.create` with a concise action-first title (your rephrased goal, never the user's prompt verbatim) and the brief as the task's description: plain words describing the job and the possible ways to do it, like a todo list in words. Do NOT predefine tool+input steps. The task is the record of the work; it starts running by default. Include the returned task id in every subsequent tool call for the job — the extension files each execution into the task's timeline itself.\n" +
   "2. Ground: Always observe before acting. Call `observe` to inspect the page text, accessibility tree, form fields, and interactive element refs. To check the Muze connection itself, call `browsers.list` — never probe with `tabs.list` or `observe`; connection probes are not work and do not belong in the record.\n" +
-  "3. Interact: Call `act` with step(s) using the stable element `ref` (e.g. 'r1a2b') obtained from `observe`.\n" +
+  "3. Interact: Call `act` using the stable element `ref` (e.g. 'r1a2b') obtained from `observe`.\n" +
   "4. Settle: If an action triggers navigation or async data loading, synchronize with `navigate({ category: 'sync', for: 'network_idle' })`.\n" +
-  "5. Verify and report: Re-observe the page to confirm the expected change succeeded, verify each consequential step the same way, and report progress against the task, from the task result — not as loose actions.\n\n" +
+  "5. Verify, complete, and report: Re-observe the page to confirm the expected change succeeded, verify each consequential action the same way, and report progress against the task, from the task result — not as loose actions. When the job is done, call `tasks.complete` with a short summary; that call is the done signal for the task.\n\n" +
   "## EXECUTION DISCIPLINE\n" +
-  "- Never stop mid-task on a first failure. A missing element, a timeout, or a tool error means re-observe and try the next grounding method, not abandoning the task. Report a task as partial only when you have actually stopped, and say exactly which steps are done and which are not.\n" +
+  "- Never stop mid-task on a first failure. A missing element, a timeout, or a tool error means re-observe and try the next grounding method, not abandoning the task. Report a task as partial only when you have actually stopped, and say exactly what is done and what is not.\n" +
   "- Never assume an identity. Identify a file by id + name + size, a tab by id + URL, and an element by ref + role + name + bounding box. If two candidates match, re-observe and disambiguate; do not pick the similar one.\n" +
   "- Never claim success from `clicked: true` alone. A click only means the click was dispatched. Success is a post-action observe showing the expected state, such as a dialog title, a button label, or a confirmation message.\n" +
   "- Fallback ladder, in order, per step: re-observe, then ref, then role + name, then text, then selector, then screenshot coordinates as a last resort. Do not jump to screenshot coordinates before the earlier methods, and do not ask the user until they have actually been tried.\n" +
   "- A stale ref is never re-resolved to a different element. Re-observe and mint a fresh ref for the same element.\n" +
-  "- Multi-step work never runs as bare direct calls: a task record exists before multi-step or consequential execution. Create the task first, then let it carry the work.\n" +
+  "- Multi-step work never runs as bare direct calls: a task record exists before multi-step or consequential execution. Create the task first, then include its id in every tool call for the job, so the task carries the work.\n" +
   "- Never chain observe → act → navigate → act directly for a job when a task should carry it. Grounding reads and single one-shot observations are the only direct calls; everything else runs inside a task.\n" +
-  "- Report progress against the task, not as loose actions: status, step progress, and results come from the task record.\n" +
-  "- Direct action calls are rejected by the system with TASK_REQUIRED: that rejection is not a page failure — it means create the task first (tasks.create, concise action-first title, steps as the plan), then let it run. Reads stay free for grounding.\n\n" +
+  "- Report progress against the task, not as loose actions: status, progress, and results come from the task record.\n" +
+  "- Direct action calls are rejected by the system with TASK_REQUIRED: that rejection is not a page failure — it means create the task first (tasks.create, concise action-first title + description of the job), then include the returned task id in every tool call for the job. Reads stay free for grounding.\n\n" +
   "## HOW TO BUILD YOUR OWN TASK BRIEF — HOW, NOT WHAT\n" +
   "This initialize text teaches how to work, never what a specific task's steps are. Do not copy a prewritten procedure for a site or a task: interfaces change, and a copied procedure is a guess about a page you have not observed. For each new task, build your own short brief from the goal and what you actually observe, before your first action.\n" +
   "- Restate the goal in your own words, and state what observable page state will prove it done. Define that success signal yourself from the page you observe, not from a label or message you were given in advance.\n" +
   "- Gather context first: the current tab and URL, what is open (dialog, form, menu), and what inputs or files the goal actually supplies, each identified by id + name + size or by id + URL, never by similarity alone.\n" +
-  "- Decide direct vs task: direct is ONLY for a single read-only observation — one call, no state change, no follow-up action. Everything else is a task: any user request phrased as something to DO, any job needing 2 or more tool actions, anything with a consequential step. Create it with `tasks.create` first — concise action-first title, the brief's steps as the plan — then let it run. When you have follow-up work for a task you already created, append it with `tasks.appendSteps` using the id `tasks.create` returned — never create a second task for the same job. If a task failed and the job continues, append retry steps with `tasks.appendSteps` using the same id and then call `tasks.resume` — never create a second task for the same job just because the first attempt failed. Direct action calls are rejected by the system with TASK_REQUIRED — a rejection is not a failure of the page, it is the system telling you to create the task.\n" +
-  "- The brief becomes the task's plan: the brief's goal becomes the task's title (rephrased, action-first, never the prompt verbatim) and the brief's steps become the task's steps.\n" +
+  "- Decide direct vs task: direct is ONLY for a single read-only observation — one call, no state change, no follow-up action. Everything else is a task: any user request phrased as something to DO, any job needing 2 or more tool actions, anything with a consequential step. Create it with `tasks.create` first — concise action-first title + description of the job in words (a todo list in words, NO pre-defined tool+input steps) — then include the returned task id in every subsequent tool call for the job; never create a second task for the same job. When the job is done, call `tasks.complete` with a short summary. If a task failed, it is terminal: a genuinely new attempt gets a new task, never a revival of the old one. Direct action calls are rejected by the system with TASK_REQUIRED — a rejection is not a failure of the page, it is the system telling you to create the task.\n" +
+  "- The brief becomes the task's description: the brief's goal becomes the task's title (rephrased, action-first, never the prompt verbatim) and the brief's todo-in-words becomes the task's description. Never predefine tool+input steps.\n" +
   "- Choose tools by capability, not by name: discover tools for the capability the step needs, read the full schema of only the tools the plan actually uses, and ignore the rest.\n" +
   "- Work the fallback ladder per step, re-observe on any failure or unexpected state, and re-derive the brief when the page changes, a new dialog appears, or two candidates match.\n" +
   "- Stop and ask only after the ladder is exhausted, and report exactly what is done, what is not, and what you tried.\n\n" +
@@ -143,7 +143,7 @@ function isCoreTool(name: string): boolean {
  *
  * Phase 0 task tools fall out of this same risk mapping, with no
  * special case: tasks.get/tasks.list are read-only, so read:tools and
- * call:tools may call them; tasks.create/appendSteps/pause/resume/cancel are
+ * call:tools may call them; tasks.create/complete/pause/resume/cancel are
  * reversible, so only call:tools may call them and a read-only scope is
  * denied. The check runs before anything is forwarded to the bridge.
  *
@@ -816,7 +816,7 @@ function recoveryHint(code: string): string | undefined {
     case "APPROVAL_DENIED":
       return "The user declined this operation.";
     case "TASK_REQUIRED":
-      return "Create the task with tasks.create first (concise action-first title, steps as the plan), then let it run. Single read-only observations do not require a task.";
+      return "Create the task with tasks.create first (concise action-first title + description of the job), then include the returned task id in tool calls. Single read-only observations do not require a task.";
     default:
       return undefined;
   }
@@ -1410,7 +1410,7 @@ export function createGatewayMcpServer(
                 "",
                 "1. Brief: restate the goal in your own words and define, from the page you will observe, what observable state proves it done.",
                 "2. Context: observe first — current tab and URL, what is open, what inputs or files the goal supplies, each identified by id + name + size or id + URL, never by similarity alone.",
-                "3. Decide: direct only for 1-3 reversible or read-only steps that are already grounded with no ambiguity and no consequential step; otherwise make a plan with ordered steps, the capability each step needs, and a verify observation after each consequential step.",
+                "3. Decide: direct only for a single read-only observation; otherwise create exactly one task with tasks.create (concise action-first title + description of the job in words, NO pre-defined tool+input steps), include the returned task id in every tool call for the job, and call tasks.complete when the job is done.",
                 "4. Tools: choose by capability, not by name — discover tools for the capability the step needs and read full schemas only for the tools the plan uses.",
                 "5. Ground and act: resolve each target in order — ref, then role + name, then text, then selector, then coordinates as a last resort — and re-observe after each action.",
                 "6. Verify: a dispatched action is not success. Success is a post-action observe showing the state your brief defined. If a step fails, work the fallback ladder and re-observe instead of stopping; re-derive the brief when the page changes, a new dialog appears, or two candidates match.",
@@ -1483,10 +1483,15 @@ export function createGatewayMcpServer(
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const rawName = request.params.name;
     const rawInput = (request.params.arguments ?? {}) as Record<string, unknown>;
+    // Filing id from the RAW arguments: legacy adaptation rebuilds
+    // the input for adapted tools (tabs.list -> navigate, dom.click
+    // -> act) and would otherwise drop the taskId before the
+    // extraction below ever sees it.
+    const rawFilingTaskId = typeof rawInput.taskId === "string" && rawInput.taskId !== "" ? rawInput.taskId : undefined;
     const adapted = adaptLegacyToolCall(rawName, rawInput);
     const name = adapted.name;
     // Confirmation flags never count as approval and are never forwarded.
-    const input = stripConfirmationFlags(adapted.input);
+    let input = stripConfirmationFlags(adapted.input);
     try {
       // Gateway-native browsers tools: handled here, before the mode
       // backstop, the scope gate for bridge tools, and the bridge-connected
@@ -1522,6 +1527,25 @@ export function createGatewayMcpServer(
             note: "Selection is persisted for this OAuth client. This live transport still talks to the previous browser; re-initialize to move to the selected browser.",
           }),
         };
+      }
+      // Description-task filing id: for bridge tools (NOT tasks.*
+      // tools, whose taskId is a real schema field, and not the
+      // gateway-native browsers tools handled above), a non-empty
+      // string `taskId` argument is extracted BEFORE validation and
+      // forwarding and sent as the bridge message field; it is removed
+      // from the forwarded input so no tool schema has to change
+      // (extension schemas are strict and declare no taskId). Anything
+      // else counts as absent. Existence, ownership, and terminal
+      // validation happen per call at the extension; the gateway only
+      // carries the id.
+      const filingTaskId =
+        name.startsWith("tasks.")
+          ? undefined
+          : (rawFilingTaskId ?? (typeof input.taskId === "string" && input.taskId !== "" ? input.taskId : undefined));
+      if (filingTaskId !== undefined) {
+        const { taskId: _dropped, ...rest } = input;
+        void _dropped;
+        input = rest;
       }
       // Phase A mode backstop (visibility is not security): a tool hidden
       // in this session's mode is refused here too, so a client that
@@ -1592,6 +1616,9 @@ export function createGatewayMcpServer(
           if (!callInput || typeof callInput !== "object" || Array.isArray(callInput)) {
             throw new ToolErrorException("INVALID_INPUT", `tools.batch call ${index} needs an object input`);
           }
+          // Filing id from the RAW item arguments, before adaptation
+          // rebuilds the input (see the single-call extraction above).
+          const rawItemTaskId = typeof (callInput as Record<string, unknown>).taskId === "string" && (callInput as Record<string, unknown>).taskId !== "" ? ((callInput as Record<string, unknown>).taskId as string) : undefined;
           const adapted = adaptLegacyToolCall(rec.tool, callInput as Record<string, unknown>);
           // Gateway-native browsers tools are not bridge tools and cannot
           // be batched through the extension; call them directly.
@@ -1603,24 +1630,38 @@ export function createGatewayMcpServer(
           // is checked against the canonical granular tool; the batch's
           // read-only-only rule itself is still enforced per item by the
           // extension host, which refuses any non-read-only granular tool.
-          assertScopeAllows(oauthScope, adapted.name, stripConfirmationFlags(adapted.input));
+          // Per-item filing id, same rule as single calls: extracted
+          // from the item's arguments and removed from its forwarded
+          // input, so no tool schema has to change.
+          const itemInput = stripConfirmationFlags(adapted.input);
+          const itemTaskId = rawItemTaskId ?? (typeof itemInput.taskId === "string" && itemInput.taskId !== "" ? itemInput.taskId : undefined);
+          assertScopeAllows(oauthScope, adapted.name, itemInput);
+          const { taskId: _droppedItemTaskId, ...itemRest } = itemInput;
+          void _droppedItemTaskId;
           return {
             tool: adapted.name,
-            input: stripConfirmationFlags(adapted.input),
+            input: itemRest,
+            ...(itemTaskId !== undefined ? { taskId: itemTaskId } : {}),
           };
         });
         // Task-required gate, whole batch: if any item resolves to an
-        // action (reversible, consequential, restricted), the entire
-        // batch is rejected with TASK_REQUIRED — nothing is forwarded,
-        // nothing executes. Pure-read batches proceed to the extension,
-        // whose per-item read-only rule is the backstop. This mirrors
-        // the extension executor's gate (same risk rule, same message);
-        // single calls are NOT mirrored here — the extension gate is
-        // the enforcement point for those, and a disconnected bridge
-        // already fails with CONFLICT before anything can execute.
+        // action (reversible, consequential, restricted) WITHOUT a
+        // filing task id, the entire batch is rejected with
+        // TASK_REQUIRED — nothing is forwarded, nothing executes.
+        // An action item WITH a task id is forwarded instead: the new
+        // rule is presence-of-taskId for action items at the gateway,
+        // and existence/ownership/terminal validation happens per item
+        // at the extension — which also still refuses the action per
+        // item under the batch read-only-only rule, so forwarding one
+        // never executes it as a batch action. Pure-read batches
+        // proceed to the extension, whose per-item read-only rule is
+        // the backstop. Single calls are NOT mirrored here — the
+        // extension gate is the enforcement point for those, and a
+        // disconnected bridge already fails with CONFLICT before
+        // anything can execute.
         for (const item of calls) {
           const risk = batchItemTaskRisk(item.tool, item.input);
-          if (risk !== undefined && risk !== "read-only" && risk !== "sensitive-read") {
+          if (risk !== undefined && risk !== "read-only" && risk !== "sensitive-read" && item.taskId === undefined) {
             throw new ToolErrorException("TASK_REQUIRED", TASK_REQUIRED_MESSAGE, {
               details: { tool: item.tool, risk },
             });
@@ -1629,11 +1670,13 @@ export function createGatewayMcpServer(
         const results = await bridge.callToolBatch(calls, { client, signal: extra.signal });
         return { content: toMcpContent({ results }) };
       }
-      const outcome = await runWithApproval(server, bridge, name, input, client, extra.signal);
+      const outcome = await runWithApproval(server, bridge, name, input, client, extra.signal, filingTaskId);
       // Task-mode tool set (Phase 2): on successful task creation, discover
       // once the tools the plan needs and offer them as this session's task
-      // set (they appear in ListTools). Normal discovery remains available
-      // for anything else, and this never restricts or pre-approves a step.
+      // set (they appear in ListTools). Description tasks have no plan,
+      // so this discovers nothing for them. Normal discovery remains
+      // available for anything else, and this never restricts or
+      // pre-approves a step.
       if (name === "tasks.create") {
         const planNames = taskPlanToolNames((input as { steps?: unknown }).steps).filter((n) =>
           SEARCH_DESCRIPTORS.some((d) => d.name === n),
@@ -1685,11 +1728,14 @@ async function runWithApproval(
   input: Record<string, unknown>,
   client?: ClientIdentity,
   signal?: AbortSignal,
+  taskId?: string,
 ): Promise<{ result: unknown }> {
   // Defensive: strip again in case a future caller bypasses CallTool.
+  // The filing id is NOT part of the input: it travels as the bridge
+  // message field on every attempt, including approval retries.
   const cleanInput = stripConfirmationFlags(input);
   try {
-    const result = await bridge.callTool({ tool: name, input: cleanInput, client, signal });
+    const result = await bridge.callTool({ tool: name, input: cleanInput, client, signal, ...(taskId ? { taskId } : {}) });
     return { result: result.result };
   } catch (error) {
     if (!(ToolErrorException.is(error) && error.code === "APPROVAL_REQUIRED")) throw error;
@@ -1738,6 +1784,7 @@ async function runWithApproval(
             approvalId: approval.id,
             client,
             signal,
+            ...(taskId ? { taskId } : {}),
           });
           return { result: retried.result };
         } else {
@@ -1765,7 +1812,7 @@ async function runWithApproval(
         throw new ToolErrorException("APPROVAL_DENIED", "The user denied this operation");
       }
       await bridge.respondApproval(approval.id, true);
-      const retried = await bridge.callTool({ tool: name, input: cleanInput, approvalId: approval.id, client, signal });
+      const retried = await bridge.callTool({ tool: name, input: cleanInput, approvalId: approval.id, client, signal, ...(taskId ? { taskId } : {}) });
       return { result: retried.result };
     }
 

@@ -426,6 +426,6 @@ describe("integration: host dispatch + dashboard wiring", () => {
     const registry = createToolRegistry();
     expect(registry.names().filter((n) => n.startsWith("tasks."))).toHaveLength(7);
     expect(registry.get("tasks.create")).toBeDefined();
-    expect(registry.get("tasks.appendSteps")).toBeDefined();
+    expect(registry.get("tasks.complete")).toBeDefined();
   });
 });

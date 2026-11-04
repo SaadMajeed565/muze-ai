@@ -39,7 +39,7 @@ export const TOOL_SCHEMAS: ToolDefinition[] = [
 ];
 
 /**
- * Task tools (seven: create, appendSteps, get, list, pause, resume, cancel), as a convenience
+ * Task tools (seven: create, complete, get, list, pause, resume, cancel), as a convenience
  * alias for the task subset of TOOL_SCHEMAS. They are merged into
  * TOOL_SCHEMAS in 0.4.0 so registry consumers (including the gateway
  * core-list check) see them, but they are still runner-owned: host

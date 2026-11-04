@@ -11,7 +11,7 @@ import {
 } from "../libs/tool-contracts/index.js";
 import {
   TASK_TOOL_NAMES,
-  TasksAppendStepsInputSchema,
+  TasksCompleteInputSchema,
   TasksCreateInputSchema,
   TasksGetInputSchema,
   TaskViewSchema,
@@ -21,7 +21,7 @@ import type { PolicySnapshot, TaskView as RunnerTaskView } from "../libs/tasks/i
 import { HostProtocolHandler, type BridgeTransport, type TaskRunnerPort } from "../src/host-protocol.js";
 import type { TaskView } from "../libs/tool-contracts/schemas/tasks.js";
 
-const TASK_NAMES = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
+const TASK_NAMES = ["tasks.create", "tasks.complete", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
 
 const SNAPSHOT: PolicySnapshot = { policyVersion: 1, mode: "standard", clientId: "Test Client", scope: "call:tools" };
 
@@ -133,7 +133,7 @@ function stubRunner(overrides: Partial<TaskRunnerPort> = {}): TaskRunnerPort {
     pauseTask: async () => runnerView({ status: "paused" }),
     resumeTask: async () => runnerView({ status: "running" }),
     cancelTask: async () => runnerView({ status: "cancelled" }),
-    appendSteps: async () => runnerView(),
+    completeTask: async () => runnerView({ status: "done" }),
     previewTask: async () => ({
       goal: "preview",
       totalSteps: 0,
@@ -149,13 +149,16 @@ function stubRunner(overrides: Partial<TaskRunnerPort> = {}): TaskRunnerPort {
 }
 
 describe("tasks.* contracts", () => {
-  it("defines exactly the seven task tools (create, appendSteps, get, list, pause, resume, cancel), and no others", () => {
+  it("defines exactly the seven task tools (create, complete, get, list, pause, resume, cancel), and no others", () => {
     expect(TASK_NAMES).toEqual([...TASK_TOOL_NAMES]);
     expect(taskTools.map((t) => t.name)).toEqual(TASK_NAMES);
     expect(TASK_TOOL_SCHEMAS.map((t) => t.name)).toEqual(TASK_NAMES);
     // Dry-run is a tasks.create flag, not a separate tool, so no tool
     // name contains "dry"; and there is no tool for approving a plan.
-    expect(TASK_TOOL_NAMES).toContain("tasks.appendSteps");
+    expect(TASK_TOOL_NAMES).toContain("tasks.complete");
+    // tasks.appendSteps no longer exists: follow-ups file into the
+    // task by id, and description tasks end via tasks.complete.
+    expect(TASK_TOOL_NAMES).not.toContain("tasks.appendSteps");
     expect(TASK_TOOL_NAMES.some((name) => name.includes("dry"))).toBe(false);
   });
 
@@ -182,9 +185,12 @@ describe("tasks.* contracts", () => {
     }
   });
 
-  it("rejects an empty goal, 0 steps, and 101 steps", () => {
+  it("rejects an empty goal and 101 steps; 0 steps (or omitted steps) is a description task", () => {
     expect(() => TasksCreateInputSchema.parse({ goal: "", steps: [{ tool: "observe", input: {} }] })).toThrow();
-    expect(() => TasksCreateInputSchema.parse({ goal: "x", steps: [] })).toThrow();
+    // Description-based model: steps are optional, 0 allowed.
+    expect(() => TasksCreateInputSchema.parse({ goal: "x", steps: [] })).not.toThrow();
+    expect(() => TasksCreateInputSchema.parse({ goal: "x" })).not.toThrow();
+    expect(() => TasksCreateInputSchema.parse({ goal: "x", description: "Do it in words" })).not.toThrow();
     const many = Array.from({ length: 101 }, () => ({ tool: "observe", input: {} }));
     expect(() => TasksCreateInputSchema.parse({ goal: "x", steps: many })).toThrow();
   });
@@ -235,14 +241,14 @@ describe("tasks.* contracts", () => {
     expect(TasksCreateInputSchema.shape.goal).toBeDefined();
   });
 
-  it("describes tasks.create as a durable task whose steps still go through approval gates", () => {
+  it("describes tasks.create as a durable task whose filed executions still go through approval gates", () => {
     const byName = new Map(taskTools.map((t) => [t.name, t]));
     const description = byName.get("tasks.create")?.description ?? "";
     // The must-create banner is gone from the description: the rule now
     // lives woven into the session instructions, not as a lead sentence.
     expect(description.startsWith("IMPORTANT")).toBe(false);
-    expect(description.startsWith("Create a durable multi-step task")).toBe(true);
-    expect(description).toContain("start running it");
+    expect(description.startsWith("Create a durable task")).toBe(true);
+    expect(description).toContain("starts running by default");
     expect(description).toContain("reversible");
     expect(description).toContain("never pre-approves");
     // Title guidance intact alongside it.
@@ -260,33 +266,29 @@ describe("tasks.* contracts", () => {
     expect(description).toContain("Screenshot the Muze AI repo");
   });
 
-  it("defines tasks.appendSteps as a reversible mutation appending steps to an existing task", () => {
+  it("defines tasks.complete as a reversible completion for description tasks", () => {
     const byName = new Map(taskTools.map((t) => [t.name, t]));
-    const append = byName.get("tasks.appendSteps");
-    expect(append).toBeDefined();
-    expect(append?.category).toBe("workflows");
-    expect(append?.risk).toBe("reversible");
-    expect(append?.requiresApproval).toBe(false);
-    expect(append?.description).toContain("Append steps to an existing task");
-    expect(append?.description).toContain("same job");
-    // Input: taskId required, steps required and non-empty; output is
-    // the same TaskView the create call returns.
-    expect(TasksAppendStepsInputSchema.safeParse({ taskId: "task_1", steps: [] }).success).toBe(false);
-    expect(TasksAppendStepsInputSchema.safeParse({ steps: [{ tool: "observe", input: {} }] }).success).toBe(false);
-    const ok = TasksAppendStepsInputSchema.safeParse({
-      taskId: "task_1",
-      steps: [{ tool: "observe", input: { include: ["text"] } }],
-    });
-    expect(ok.success).toBe(true);
-    expect(append?.output).toBe(TaskViewSchema);
+    const complete = byName.get("tasks.complete");
+    expect(complete).toBeDefined();
+    expect(complete?.category).toBe("workflows");
+    expect(complete?.risk).toBe("reversible");
+    expect(complete?.requiresApproval).toBe(false);
+    expect(complete?.description).toContain("Complete a description task");
+    expect(complete?.description).toContain("step tasks complete when their steps finish");
+    // Input: taskId required, summary optional; output is the same
+    // TaskView the create call returns.
+    expect(TasksCompleteInputSchema.safeParse({}).success).toBe(false);
+    expect(TasksCompleteInputSchema.safeParse({ taskId: "task_1" }).success).toBe(true);
+    expect(TasksCompleteInputSchema.safeParse({ taskId: "task_1", summary: "Did it" }).success).toBe(true);
+    expect(complete?.output).toBe(TaskViewSchema);
   });
 
-  it("tells tasks.create callers the returned id is reused for appends, never a second task", () => {
+  it("tells tasks.create callers to include the returned id in tool calls and complete when done", () => {
     const byName = new Map(taskTools.map((t) => [t.name, t]));
     const description = byName.get("tasks.create")?.description ?? "";
-    expect(description).toContain("tasks.appendSteps");
+    expect(description).toContain("tasks.complete");
     expect(description).toContain("same job");
-    // Title rule intact alongside the append note.
+    // Title rule intact alongside the completion note.
     expect(description).toContain("rephrase");
     expect(description).toContain("verbatim");
   });
@@ -437,44 +439,44 @@ describe("tasks.* host dispatch", () => {
     expect(transport.last()?.type).toBe("tool.error");
   });
 
-  it("routes tasks.appendSteps to the runner with the task id, steps, and bridge client id", async () => {
-    const seen: { id?: unknown; clientId?: unknown; steps?: unknown } = {};
+  it("routes tasks.complete to the runner with the task id, summary, and bridge client id", async () => {
+    const seen: { id?: unknown; clientId?: unknown; summary?: unknown } = {};
     const runner = stubRunner({
-      appendSteps: async (id, clientId, steps) => {
+      completeTask: async (id, clientId, summary) => {
         seen.id = id;
         seen.clientId = clientId;
-        seen.steps = steps;
-        return runnerView({ status: "running" });
+        seen.summary = summary;
+        return runnerView({ status: "done" });
       },
     });
     const { transport, handler } = setup(runner);
     await handler.handle({
       type: "tool.call",
       id: "a1",
-      tool: "tasks.appendSteps",
-      input: { taskId: "task_1", steps: [{ tool: "observe", input: { include: ["text"] } }] },
+      tool: "tasks.complete",
+      input: { taskId: "task_1", summary: "Did it" },
       client: { id: "cli", name: "Test Client", transport: "remote" },
     });
     const result = transport.last() as { type: string; result: TaskView };
     expect(result.type).toBe("tool.result");
-    expect(result.result.status).toBe("running");
+    expect(result.result.status).toBe("done");
     expect(seen).toEqual({
       id: "task_1",
       clientId: "cli",
-      steps: [{ tool: "observe", input: { include: ["text"] } }],
+      summary: "Did it",
     });
   });
 
-  it("rejects tasks.appendSteps with invalid input as INVALID_INPUT without touching the runner", async () => {
+  it("rejects tasks.complete with invalid input as INVALID_INPUT without touching the runner", async () => {
     let runnerCalls = 0;
     const runner = stubRunner({
-      appendSteps: async () => {
+      completeTask: async () => {
         runnerCalls += 1;
         return runnerView();
       },
     });
     const { transport, handler } = setup(runner);
-    await handler.handle({ type: "tool.call", id: "a1", tool: "tasks.appendSteps", input: { taskId: "task_1", steps: [] } });
+    await handler.handle({ type: "tool.call", id: "a1", tool: "tasks.complete", input: {} });
     const error = transport.last() as { type: string; error: { code: string; message: string } };
     expect(error.type).toBe("tool.error");
     expect(error.error.code).toBe("INVALID_INPUT");

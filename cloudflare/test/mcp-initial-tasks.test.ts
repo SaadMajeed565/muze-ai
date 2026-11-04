@@ -8,7 +8,7 @@ import {
 } from "../src/mcp.js";
 import type { GatewayBridge } from "../src/bridge.js";
 
-const TASK_SEQUENCE = ["tasks.create", "tasks.appendSteps", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
+const TASK_SEQUENCE = ["tasks.create", "tasks.complete", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
 const MASTER_TOOLS = ["observe", "act", "navigate", "form", "data"];
 const SCOPE = "read:tools call:tools";
 

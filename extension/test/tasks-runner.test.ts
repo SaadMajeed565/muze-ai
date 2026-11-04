@@ -171,7 +171,9 @@ describe("createTask validation and views", () => {
     await store.save(all);
 
     const created = await runner.createTask({ goal: "after prune", clientId: CLIENT, browserSessionId: SESSION, steps: [] }, snapshot);
-    expect(created.status).toBe("created");
+    // Zero-step tasks are description tasks: they start running as a
+    // record, never "created" (there is no step loop to start).
+    expect(created.status).toBe("running");
     const remaining = store.snapshot();
     expect(remaining).toHaveLength(50);
     expect(remaining.some((t) => t.id === prunable.id)).toBe(false);

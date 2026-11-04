@@ -32,6 +32,12 @@ export interface GatewayBridge {
     dryRun?: boolean;
     client?: ClientIdentity;
     signal?: AbortSignal;
+    /**
+     * Description-task filing id, extracted by the MCP layer from the
+     * call's arguments (never part of a tool schema) and sent as the
+     * bridge message field. The extension validates and files by it.
+     */
+    taskId?: string;
   }): Promise<BridgeToolResult>;
   /** One round trip for several independent read-only calls. */
   callToolBatch(calls: ToolCallBatchItem[], options?: { client?: ClientIdentity; signal?: AbortSignal }): Promise<ToolBatchItemResult[]>;
@@ -132,6 +138,7 @@ export class DoBridge implements GatewayBridge {
       dryRun?: boolean;
       client?: ClientIdentity;
       signal?: AbortSignal;
+      taskId?: string;
     },
   ): Promise<BridgeToolResult> {
     await this.helloPromise;
@@ -143,6 +150,7 @@ export class DoBridge implements GatewayBridge {
       approvalId: call.approvalId,
       dryRun: call.dryRun,
       ...(call.client ? { client: call.client } : {}),
+      ...(call.taskId ? { taskId: call.taskId } : {}),
     };
     return (await this.request(message, call.signal)) as BridgeToolResult;
   }

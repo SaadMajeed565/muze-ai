@@ -215,6 +215,17 @@ export interface TaskRecord {
    */
   parentId?: string | null;
   goal: string;
+  /**
+   * Description-based task model: plain words describing the job and
+   * the possible ways to do it, like a todo list in words. It is
+   * intent/documentation, NOT executable tool calls — the AI never
+   * predefines tool+input steps for a description task. Optional for
+   * backward compatibility (pre-description records have none); the
+   * prompt mandates goal + description for every new task. A task
+   * with zero steps is a description task: a record only, never
+   * entered into the runner's step loop.
+   */
+  description?: string;
   clientId: string;
   browserSessionId: string;
   /**

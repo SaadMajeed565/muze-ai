@@ -209,6 +209,44 @@ describe("TasksPage drill-down", () => {
     expect(text).not.toContain("Old direct");
   });
 
+  it("a description task row shows filed-action count with indeterminate progress, never Step X of N; its detail shows the description", async () => {
+    taskFixtures = [
+      rawTask({
+        id: "t-desc",
+        goal: "Describe job",
+        description: "Open the repo page, look around, and report what you find.",
+        status: "running",
+        steps: [],
+        totalSteps: 0,
+        doneSteps: [],
+        undoneSteps: [],
+        createdAt: atLocal(0, 9),
+      }),
+    ];
+    historyFixtures = [
+      actionRow("d-1", "First filed", "done", atLocal(0, 10), "t-desc"),
+      actionRow("d-2", "Second filed", "done", atLocal(0, 11), "t-desc"),
+      actionRow("d-3", "Third filed", "done", atLocal(0, 12), "t-desc"),
+      actionRow("d-other", "Other task action", "done", atLocal(0, 11), "t-other"),
+    ];
+    const container = mount();
+    await flush();
+    await flush();
+    clickRow("Today");
+    await flush();
+    const dayText = container.textContent ?? "";
+    expect(dayText).toContain("Describe job");
+    expect(dayText).toContain("3 actions done so far");
+    expect(dayText).not.toContain("Step");
+    expect(dayText).not.toContain("Other task action");
+    clickRow("Describe job");
+    await flush();
+    const detailText = container.textContent ?? "";
+    expect(detailText).toContain("Open the repo page, look around, and report what you find.");
+    expect(detailText).toContain("3 actions done so far");
+    expect(detailText).toContain("Third filed");
+  });
+
   it("task detail shows exactly that task's executed steps, chronological, and no plan-only content", async () => {
     const container = mount();
     await flush();

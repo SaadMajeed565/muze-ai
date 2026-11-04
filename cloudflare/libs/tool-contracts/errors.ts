@@ -32,7 +32,7 @@ export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
  * budget; the message tells the caller the one fix: create the task.
  */
 export const TASK_REQUIRED_MESSAGE =
-  "Direct action calls are not accepted. Call tasks.create first with a concise action-first title and the steps as the plan, then let the task run. Single read-only observations do not require a task.";
+  "Direct action calls are not accepted. Call tasks.create first with a concise action-first title and a description of the job, then include the returned task id in every tool call for the job. Single read-only observations do not require a task.";
 
 export interface ToolError {
   code: ToolErrorCode;

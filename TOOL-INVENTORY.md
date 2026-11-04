@@ -153,8 +153,8 @@
 | tabs.search | tabs | read-only | no | search, tabs, read, find-tab | no |
 | tabs.setZoom | tabs | reversible | no | zoom, tabs, magnify, manage-tabs | no |
 | tabs.ungroup | tabs | reversible | no | ungroup, tabs, organize, manage-tabs | no |
-| tasks.appendSteps | workflows | reversible | no | task, append, follow-up, workflow | no |
 | tasks.cancel | workflows | reversible | no | task, cancel, stop-task | no |
+| tasks.complete | workflows | reversible | no | task, complete, finish, done, workflow | no |
 | tasks.create | workflows | reversible | no | task, create, multi-step, workflow | no |
 | tasks.get | workflows | read-only | no | task, get, read, status | no |
 | tasks.list | workflows | read-only | no | list, task, read, status | no |

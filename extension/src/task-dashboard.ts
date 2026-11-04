@@ -10,8 +10,9 @@
  *
  * Sanitisation rule (non-negotiable): the dashboard never sees step
  * inputs, tokens, passwords, page content, or screenshots. Only the
- * goal, status, progress, step tool + state + outputSummary, done/undone
- * lists, pauseReason, and resultSummary cross this boundary. The
+ * goal, description, status, progress, step tool + state +
+ * outputSummary, done/undone lists, pauseReason, and resultSummary
+ * cross this boundary. The
  * sanitiser below rebuilds every view from an allowlist of fields, so a
  * record that happens to carry an `input` (or any other extra field) can
  * never leak through, even if the port returns more than TaskView.
@@ -71,6 +72,8 @@ export interface TaskFinalReport {
 export interface TaskView {
   id: string;
   goal: string;
+  /** Description-based model: the todo-in-words, when the record carries one. */
+  description?: string;
   clientId: string;
   browserSessionId: string;
   status: TaskStatus;
@@ -214,6 +217,7 @@ export function sanitizeTaskView(value: unknown): TaskView {
     id: asString(record.id),
     goal: asString(record.goal),
     clientId: asString(record.clientId),
+    ...(typeof record.description === "string" && record.description !== "" ? { description: record.description } : {}),
     browserSessionId: asString(record.browserSessionId),
     status: TASK_STATUSES.has(status) ? (status as TaskStatus) : "created",
     steps,

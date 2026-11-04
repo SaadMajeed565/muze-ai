@@ -228,6 +228,7 @@ export function TasksPage({
     let result = needle
       ? list.filter((task) =>
           (task.goal || "").toLowerCase().includes(needle) ||
+          (task.description || "").toLowerCase().includes(needle) ||
           task.steps.some((step) => `${step.outputSummary ?? ""} ${step.inputSummary ?? ""}`.toLowerCase().includes(needle)),
         )
       : list;
@@ -250,8 +251,16 @@ export function TasksPage({
 
   const selected = tasks?.find((task) => task.id === selectedId) ?? null;
 
+  // Description tasks have no steps, so "Step X of N" would be a
+  // lie: their progress is the count of filed actions from history
+  // (the Tasks page already loads it), with indeterminate progress.
+  const progressFor = (task: TaskView): { text: string; percent: number; indeterminate: boolean } =>
+    task.totalSteps === 0
+      ? { text: `${taskExecutedSteps(history ?? [], task.id).length} actions done so far`, percent: 0, indeterminate: true }
+      : taskProgress(task.doneSteps.length, task.totalSteps, task.doneSteps.length);
+
   const renderTaskRow = (task: TaskView): preact.JSX.Element => {
-    const progress = taskProgress(task.doneSteps.length, task.totalSteps, task.doneSteps.length);
+    const progress = progressFor(task);
     return (
       <button type="button" class="row" key={task.id} onClick={() => select(task.id)} style={{ display: "block", borderBottom: "none" }}>
         <span class="between">
@@ -283,7 +292,7 @@ export function TasksPage({
     const taskBusy = busy || busyId === selected.id;
     const pause = plainPauseReason(selected.pauseReason);
     const name = browserName(selected.browserSessionId);
-    const progress = taskProgress(selected.doneSteps.length, selected.totalSteps, selected.doneSteps.length);
+    const progress = progressFor(selected);
     // Executed steps only, from the day history, chronological
     // oldest-first. A plan step that never executed has no history
     // row and never appears here; only taken steps show.
@@ -300,6 +309,8 @@ export function TasksPage({
             <i class={progress.indeterminate ? "indet" : ""} style={{ width: `${progress.percent}%` }} />
           </div>
         </div>
+
+        {selected.description ? <p class="detail-note">{selected.description}</p> : null}
 
         <div class="detail-actions">
           {canPause(selected.status) ? (

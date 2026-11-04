@@ -42,6 +42,16 @@ export interface ToolCallMessage {
   approvalId?: string;
   /** When true, side-effecting tools validate and describe but do not mutate. */
   dryRun?: boolean;
+  /**
+   * Description-task filing: the id of the task this call belongs to.
+   * The host validates it (exists, owned by the calling client,
+   * non-terminal for actions) and passes it to the executor, which
+   * files the execution's activity row under that task. A non-empty
+   * string is used; anything else counts as absent. The gateway
+   * extracts it from the call's arguments and removes it from the
+   * forwarded input, so no tool schema declares it.
+   */
+  taskId?: string;
 }
 
 /** One independent read in a batch. The host refuses anything not risked read-only. */
@@ -51,6 +61,8 @@ export interface ToolCallBatchItem {
   clientOpId?: string;
   approvalId?: string;
   dryRun?: boolean;
+  /** Per-item filing task id, same semantics as ToolCallMessage.taskId. */
+  taskId?: string;
 }
 
 export interface ToolCallBatchMessage {
