@@ -118,7 +118,7 @@ function setup(
 function validCreateInput() {
   return {
     goal: "Research and organise",
-    steps: [{ tool: "observe", input: { include: ["text"] }, timeoutMs: 5000 }],
+    description: "Research the topic, organise what you find, and report back.",
     totalBudgetMs: 120_000,
     browserSessionId: "input-session",
   };
@@ -185,21 +185,14 @@ describe("tasks.* contracts", () => {
     }
   });
 
-  it("rejects an empty goal and 101 steps; 0 steps (or omitted steps) is a description task", () => {
-    expect(() => TasksCreateInputSchema.parse({ goal: "", steps: [{ tool: "observe", input: {} }] })).toThrow();
-    // Description-based model: steps are optional, 0 allowed.
-    expect(() => TasksCreateInputSchema.parse({ goal: "x", steps: [] })).not.toThrow();
+  it("rejects an empty goal and any steps input; goal + description with no steps is a description task", () => {
+    expect(() => TasksCreateInputSchema.parse({ goal: "" })).toThrow();
+    // A task is goal + description only: any steps field — a 1-step
+    // array, a longer array, or even an empty array — is rejected.
+    expect(() => TasksCreateInputSchema.parse({ goal: "x", steps: [{ tool: "observe", input: {} }] })).toThrow();
+    expect(() => TasksCreateInputSchema.parse({ goal: "x", steps: [] })).toThrow();
     expect(() => TasksCreateInputSchema.parse({ goal: "x" })).not.toThrow();
     expect(() => TasksCreateInputSchema.parse({ goal: "x", description: "Do it in words" })).not.toThrow();
-    const many = Array.from({ length: 101 }, () => ({ tool: "observe", input: {} }));
-    expect(() => TasksCreateInputSchema.parse({ goal: "x", steps: many })).toThrow();
-  });
-
-  it("rejects out-of-range per-step timeoutMs", () => {
-    const base = { goal: "x", steps: [{ tool: "observe", input: {} }] };
-    expect(() => TasksCreateInputSchema.parse({ ...base, steps: [{ tool: "observe", input: {}, timeoutMs: 0 }] })).toThrow();
-    expect(() => TasksCreateInputSchema.parse({ ...base, steps: [{ tool: "observe", input: {}, timeoutMs: 60_001 }] })).toThrow();
-    expect(() => TasksCreateInputSchema.parse({ ...base, steps: [{ tool: "observe", input: {}, timeoutMs: 60_000 }] })).not.toThrow();
   });
 
   it("rejects client-supplied confirmation flags in task inputs", () => {
@@ -208,11 +201,9 @@ describe("tasks.* contracts", () => {
     expect(() => TasksGetInputSchema.parse({ taskId: "t1", approved: true } as never)).toThrow();
   });
 
-  it("defaults start to true and does not validate wrapped tool inputs at create time", () => {
-    const parsed = TasksCreateInputSchema.parse({ goal: "x", steps: [{ tool: "observe", input: { nonsense: [1, 2, 3] } }] });
+  it("defaults start to true", () => {
+    const parsed = TasksCreateInputSchema.parse({ goal: "x" });
     expect(parsed.start).toBe(true);
-    // The wrapped input is a generic record: the runner/executor, not
-    // this schema, validates it against the wrapped tool at execution.
   });
 
   it("carries the specified risk and approval flags", () => {
@@ -274,7 +265,7 @@ describe("tasks.* contracts", () => {
     expect(complete?.risk).toBe("reversible");
     expect(complete?.requiresApproval).toBe(false);
     expect(complete?.description).toContain("Complete a description task");
-    expect(complete?.description).toContain("step tasks complete when their steps finish");
+    expect(complete?.description).not.toMatch(/step/i);
     // Input: taskId required, summary optional; output is the same
     // TaskView the create call returns.
     expect(TasksCompleteInputSchema.safeParse({}).success).toBe(false);
@@ -419,6 +410,9 @@ describe("tasks.* host dispatch", () => {
     expect(transport.last()?.type).toBe("tool.error");
     await handler.handle({ type: "tool.call", id: "i", tool: "tasks.create", input: { goal: "", steps: [] } });
     expect(transport.last()?.type).toBe("tool.error");
+    // The steps rejection fires before goal validation, with the
+    // teachable message — and still touches no runner.
+    expect((transport.last() as { error: { message: string } }).error.message).toContain("goal + description only");
     expect(runnerCalls).toBe(0);
   });
 

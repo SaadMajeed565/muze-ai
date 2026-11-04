@@ -35,7 +35,7 @@ describe("tasks prominence in initialize + ListTools", () => {
     expect(MCP_INSTRUCTIONS).toContain("Brief and create the task");
     expect(MCP_INSTRUCTIONS).toContain("call `tasks.create`");
     // Execution discipline: no bare multi-step direct calls.
-    expect(MCP_INSTRUCTIONS).toContain("Multi-step work never runs as bare direct calls");
+    expect(MCP_INSTRUCTIONS).toContain("Work needing more than one action never runs as bare direct calls");
     expect(MCP_INSTRUCTIONS).toContain("Never chain observe → act → navigate → act directly");
     // Direct-vs-task: direct is ONLY a single read-only observation;
     // the old "1-3 steps" allowance is gone entirely.
@@ -43,6 +43,9 @@ describe("tasks prominence in initialize + ListTools", () => {
     expect(MCP_INSTRUCTIONS).toContain("single read-only observation");
     expect(MCP_INSTRUCTIONS).not.toContain("1-3 steps");
     expect(MCP_INSTRUCTIONS).not.toContain("Decide direct vs plan");
+    // Steps are not named at all — not even to forbid them — so the
+    // AI has no task-step concept to fall back on.
+    expect(MCP_INSTRUCTIONS).not.toMatch(/step/i);
     // Follow-up work files into the existing task by id, never a
     // second task; connection checks go through browsers.list, never
     // probe reads.

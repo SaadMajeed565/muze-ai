@@ -1,6 +1,7 @@
 import {
   PROTOCOL_VERSION,
   REGISTRY_VERSION,
+  TASKS_CREATE_STEPS_REJECTED_MESSAGE,
   ToolErrorException,
   toToolError,
   type ApprovalRequestInfo,
@@ -945,6 +946,20 @@ export class HostProtocolHandler {
         throw new ToolErrorException("TOOL_NOT_FOUND", `Unknown tool ${message.tool}`);
       }
       const sanitized = stripClientApprovalFlags(message.input) ?? {};
+      // A task is goal + description only: any steps input is rejected
+      // here, before schema parsing, so the AI gets the teachable
+      // error instead of a generic "unrecognized key" parse failure.
+      // This runs before the tasks.create case below, so it covers
+      // the dryRun preview path too. The runner's internal step
+      // machinery is untouched — this rejects AI-supplied steps only.
+      if (
+        message.tool === "tasks.create" &&
+        sanitized !== null &&
+        typeof sanitized === "object" &&
+        Object.prototype.hasOwnProperty.call(sanitized, "steps")
+      ) {
+        throw new ToolErrorException("INVALID_INPUT", TASKS_CREATE_STEPS_REJECTED_MESSAGE);
+      }
       const parsed = definition.input.safeParse(sanitized);
       if (!parsed.success) {
         throw new ToolErrorException("INVALID_INPUT", `Invalid input for ${message.tool}: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "(input)"}: ${issue.message}`).join("; ")}`);
@@ -987,12 +1002,12 @@ export class HostProtocolHandler {
           const createInput: CreateTaskInput = {
             goal: String(input.goal),
             // Description-based model: the todo-in-words crosses to
-            // the runner when present; steps stay optional (omit =
-            // description task, a record only, never the step loop).
+            // the runner when present. Steps are never accepted: any
+            // steps field was rejected above with the teaching error,
+            // so nothing step-shaped reaches the runner from the AI.
             ...(typeof input.description === "string" && input.description !== "" ? { description: input.description } : {}),
             clientId,
             browserSessionId,
-            ...(input.steps !== undefined ? { steps: input.steps as CreateTaskInput["steps"] } : {}),
             ...(typeof input.totalBudgetMs === "number" ? { totalBudgetMs: input.totalBudgetMs } : {}),
             ...(typeof input.start === "boolean" ? { start: input.start } : {}),
             ...(input.bounds !== undefined ? { planBounds: input.bounds as PlanBounds } : {}),

@@ -376,7 +376,7 @@ describe("integration g: cancel", () => {
 });
 
 describe("integration: host dispatch + dashboard wiring", () => {
-  it("creates a task through host dispatch and reads it through the dashboard handler, with no step inputs leaking", async () => {
+  it("rejects a tasks.create with steps through host dispatch, with no step inputs leaking and no task created", async () => {
     const { runner } = makeRunner();
     const rt = createTestRuntime({
       policy: {
@@ -403,23 +403,19 @@ describe("integration: host dispatch + dashboard wiring", () => {
       type: "tool.call",
       id: "c1",
       tool: "tasks.create",
-      input: { goal: "wired task", steps: [{ tool: "tabs.list", input: { secretMarker: "should-not-leak" } }], browserSessionId: SESSION },
+      input: { goal: "wired task", description: "Do the wired job.", steps: [{ tool: "tabs.list", input: { secretMarker: "should-not-leak" } }], browserSessionId: SESSION },
       client: { id: CLIENT, name: "Client A", transport: "remote" },
     });
-    const createdMsg = transport.last() as { type: string; result: { id: string; status: string; steps: { inputSummary: string }[] } };
-    expect(createdMsg.type).toBe("tool.result");
-    expect(createdMsg.result.status).toBe("done");
-    expect(JSON.stringify(createdMsg.result)).not.toContain("should-not-leak");
+    const rejected = transport.last() as { type: string; error: { code: string; message: string } };
+    expect(rejected.type).toBe("tool.error");
+    expect(rejected.error.code).toBe("INVALID_INPUT");
+    expect(rejected.error.message).toContain("goal + description only");
+    expect(JSON.stringify(transport.messages)).not.toContain("should-not-leak");
 
     const port = dashboardPort(runner);
     const listed = await handleTaskDashboardRequest({ type: "muze/tasks.list" }, port);
     expect(listed.ok).toBe(true);
-    expect(listed.tasks).toHaveLength(1);
-    expect(listed.tasks?.[0].goal).toBe("wired task");
-    expect(JSON.stringify(listed)).not.toContain("should-not-leak");
-    const got = await handleTaskDashboardRequest({ type: "muze/tasks.get", taskId: createdMsg.result.id }, port);
-    expect(got.ok).toBe(true);
-    expect(got.task?.status).toBe("done");
+    expect(listed.tasks).toHaveLength(0);
   });
 
   it("registry includes tasks.* with stub handlers that fail cleanly on direct executor calls", () => {

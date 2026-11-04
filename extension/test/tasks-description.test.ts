@@ -3,11 +3,13 @@
  * (plain words, a todo list in words), NOT predefined tool+input
  * steps. A task created with zero steps is a record only — it never
  * enters the runner's step loop, starts running, accepts filings by
- * task id, and ends only via tasks.complete. A task created WITH
- * steps keeps the step-runner behaviour exactly.
+ * task id, and ends only via tasks.complete. Step tasks can no longer
+ * be created through tasks.create: any steps input is rejected with a
+ * teachable error. The runner's step machinery stays dormant for old
+ * step-task records and a future common-sites update.
  */
 import { describe, expect, it } from "vitest";
-import { TASK_REQUIRED_MESSAGE, type ClientIdentity } from "../libs/tool-contracts/index.js";
+import { TASK_REQUIRED_MESSAGE, TASKS_CREATE_STEPS_REJECTED_MESSAGE, type ClientIdentity } from "../libs/tool-contracts/index.js";
 import { TASK_TOOL_NAMES, taskTools } from "../libs/tool-contracts/schemas/tasks.js";
 import { createTestRuntime } from "../libs/testing/index.js";
 import type { ActivityEvent } from "../libs/activity.js";
@@ -122,6 +124,54 @@ describe("description tasks (zero steps)", () => {
     );
     expect(done.status).toBe("done");
     expect(stepCalls).toEqual(["tabs.list"]);
+  });
+
+  it("tasks.create with any steps input is rejected with the teachable error and creates no task", async () => {
+    const { transport, handler } = makeHost();
+    // A 1-step array: the exact shape that used to split one job
+    // into a second step task.
+    await handler.handle({
+      type: "tool.call",
+      id: "s1",
+      tool: "tasks.create",
+      input: { goal: "Play something", description: "Play a video.", steps: [{ tool: "tabs.list", input: {} }] },
+      client: BRIDGE_CLIENT,
+    });
+    const oneStep = transport.last() as ToolError;
+    expect(oneStep.type).toBe("tool.error");
+    expect(oneStep.error.code).toBe("INVALID_INPUT");
+    expect(oneStep.error.message).toBe(TASKS_CREATE_STEPS_REJECTED_MESSAGE);
+    // An empty array is still a steps field, so it is rejected too.
+    await handler.handle({
+      type: "tool.call",
+      id: "s2",
+      tool: "tasks.create",
+      input: { goal: "Play something", description: "Play a video.", steps: [] },
+      client: BRIDGE_CLIENT,
+    });
+    const emptySteps = transport.last() as ToolError;
+    expect(emptySteps.type).toBe("tool.error");
+    expect(emptySteps.error.code).toBe("INVALID_INPUT");
+    expect(emptySteps.error.message).toBe(TASKS_CREATE_STEPS_REJECTED_MESSAGE);
+    // Nothing was created by either rejected call.
+    await handler.handle({ type: "tool.call", id: "l1", tool: "tasks.list", input: {}, client: BRIDGE_CLIENT });
+    expect(((transport.last() as ToolResult).result.tasks as unknown[])).toEqual([]);
+  });
+
+  it("a description task's timeline holds exactly its filed interactions, nothing else", async () => {
+    const { transport, handler, events } = makeHost();
+    const task = await createDescriptionTask(handler, transport);
+    const taskId = task.id as string;
+    events.length = 0;
+    await handler.handle({ type: "tool.call", id: "f1", tool: "clipboard.write", input: { text: "one" }, client: BRIDGE_CLIENT, taskId });
+    await handler.handle({ type: "tool.call", id: "f2", tool: "clipboard.write", input: { text: "two" }, client: BRIDGE_CLIENT, taskId });
+    // A standalone grounding read files nowhere.
+    await handler.handle({ type: "tool.call", id: "r1", tool: "tabs.list", input: {}, client: BRIDGE_CLIENT });
+    const rows = new Map(events.map((e) => [e.id, e]));
+    const taskRows = [...rows.values()].filter((row) => row.taskId === taskId);
+    expect(taskRows).toHaveLength(2);
+    expect(taskRows.every((row) => row.state === "done")).toBe(true);
+    expect([...rows.values()].filter((row) => row.taskId === undefined)).toHaveLength(1);
   });
 
   it("a tool call with a taskId executes, returns its result directly, and files exactly one timeline row under that task", async () => {

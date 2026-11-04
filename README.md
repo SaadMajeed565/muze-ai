@@ -76,9 +76,7 @@ validation; the unified output now accepts boolean or number.
   the existing step-approval flow (elicitation dialog or dashboard
   decision); a denied step ends the task `partial` (or `failed` when
   nothing succeeded), never `done`.
-- `tasks.create` with `dryRun: true` validates the whole plan (tool
-  existence, canonical parameters, risk, domains, approvals needed,
-  budget) and executes nothing, creating no task record.
+- `tasks.create` with `dryRun: true` validates the input and returns a preview, executing nothing and creating no task record.
 - Dashboard Tasks page shows progress (step X of Y), current step,
   done/failed lists, browser session, and a structured final report
   (done/undone/failed/compensations/manual cleanup); external submits
@@ -181,7 +179,7 @@ Permission levels: Restricted (read-only only), Balanced/default (read/reversibl
 
 ## Durable tasks (0.4.0, Phase 0)
 
-A task is a durable multi-step job owned by the extension, not by the MCP client's conversation. Create one with `tasks.create` (goal plus ordered steps, each step naming an existing tool and its input), poll it with `tasks.get` / `tasks.list`, and pause, resume, or cancel it. The runner executes steps sequentially through the existing executor, policy, and approval gates — creating a task never pre-approves its steps, and a client-supplied confirmation flag is still never approval.
+A task is a durable multi-step job owned by the extension, not by the MCP client's conversation. Create one with `tasks.create` (goal plus a description in words — never steps; the task's timeline is built in real time from the interactions filed with its task id), poll it with `tasks.get` / `tasks.list`, and pause, resume, cancel, or complete it. Filed interactions run through the existing executor, policy, and approval gates — creating a task never pre-approves anything, and a client-supplied confirmation flag is still never approval.
 
 - State lives in `chrome.storage.local` under `muze.tasks`, checkpointed after every step (record result, persist, audit, emit progress, then next step), so a task survives a service-worker restart and resumes from its last checkpoint with no duplicate consequential step (idempotency key per step).
 - Caps: 100 steps per task, 50 stored tasks, completed tasks pruned after 7 days unless pinned. Task records carry summaries only — never step inputs, full page content, screenshots, passwords, tokens, or file contents.

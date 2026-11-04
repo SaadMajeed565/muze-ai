@@ -544,7 +544,7 @@ describe("Host dispatch for dry-run", () => {
       type: "tool.call",
       id: "a3",
       tool: "tasks.create",
-      input: { goal: "dry", steps: [{ tool: "tabs.list", input: {} }], dryRun: true },
+      input: { goal: "dry", description: "Preview this job in words.", dryRun: true },
     });
     expect(seen.preview).toBeDefined();
     expect(seen.create).toBeUndefined();

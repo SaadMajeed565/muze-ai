@@ -254,11 +254,12 @@ export interface CreateTaskInput {
   clientId: string;
   browserSessionId: string;
   /**
-   * Optional: omit (or pass []) for a description task — a record
-   * only, never entered into the step loop. A task created WITH
-   * steps keeps the step-runner behaviour exactly (backward
-   * compatible; the runner is dormant for description tasks, kept
-   * for a future update covering common repeatable sites).
+   * Optional, INTERNAL ONLY: omit (or pass []) for a description task
+   * — a record only, never entered into the step loop. A task created
+   * WITH steps through this internal API keeps the step-runner
+   * behaviour exactly (the runner is dormant for description tasks,
+   * kept for a future update covering common repeatable sites).
+   * tasks.create never passes steps here — it rejects any steps input.
    */
   steps?: CreateStepInput[];
   totalBudgetMs?: number;

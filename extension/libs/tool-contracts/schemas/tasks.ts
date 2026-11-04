@@ -8,16 +8,17 @@ import type { ToolDefinition } from "../tools.js";
  * DESCRIPTION — plain words describing the job and the possible ways
  * to do it, like a todo list in words. The description is
  * intent/documentation, NOT executable tool calls: the AI never
- * predefines tool+input steps for a description task. Every tool call
- * the AI makes for the job carries the task id, and the extension
- * files that execution into the task's timeline itself; tasks.complete
- * ends a description task. A task created WITH steps keeps the old
- * step-runner behaviour exactly (backward compatible): the extension's
- * task runner executes the steps sequentially through the existing
- * executor/policy/approval path; the gateway never executes a step and
- * never synthesises a task view. The step runner is dormant for
- * description tasks, kept for a future update covering common
- * (repeatable) sites.
+ * predefines tool+input steps, and tasks.create rejects any steps
+ * input — a task is goal + description only, and its timeline is
+ * built in real time from the interactions filed with its task id.
+ * Every tool call the AI makes for the job carries the task id, and
+ * the extension files that execution into the task's timeline itself;
+ * tasks.complete ends a description task. The extension's step runner
+ * is dormant: it is kept intact for old step-task records (which
+ * still render in history) and for a future update covering common
+ * (repeatable) sites, but no new step task can be created through
+ * tasks.create. The gateway never executes a step and never
+ * synthesises a task view.
  *
  * Two deliberate boundaries, kept explicit so a later section does not
  * blur them:
@@ -76,7 +77,10 @@ export const TaskStepVerifySchema = z
   .strict();
 export type TaskStepVerify = z.infer<typeof TaskStepVerifySchema>;
 
-/** One planned step. `tool` must be a non-empty existing tool name; the
+/** One planned step (dormant: no longer referenced by
+ * TasksCreateInputSchema — tasks.create rejects any steps input. Kept
+ * for old step-task records and the future common-sites step feature).
+ * `tool` must be a non-empty existing tool name; the
  * wrapped `input` is validated by the runner/executor at execution time,
  * not here (see the header note). */
 export const TaskStepInputSchema = z
@@ -214,12 +218,11 @@ export type TaskView = z.infer<typeof TaskViewSchema>;
 export const TasksCreateInputSchema = z
   .object({
     goal: z.string().min(1).max(2000),
-    description: z.string().min(1).max(4000).optional().describe("Plain words describing the job and the possible ways to do it, like a todo list in words. The prompt mandates goal + description with no steps; steps are only for the backward-compatible step-runner path."),
-    steps: z.array(TaskStepInputSchema).min(0).max(100).optional().describe("Optional. Omit (or pass []) for a description task — a record only, never entered into the step loop. A task created WITH steps keeps the step-runner behaviour exactly."),
+    description: z.string().min(1).max(4000).optional().describe("Plain words describing the job and the possible ways to do it, like a todo list in words. The prompt mandates goal + description."),
     totalBudgetMs: z.number().int().positive().optional().describe("Total budget for the whole task in ms; omit for the runner default"),
     start: z.boolean().default(true).describe("Start running immediately; false leaves the task created but not started"),
     browserSessionId: z.string().min(1).max(256).optional().describe("Target browser session; a task never moves to a different browser on its own"),
-    bounds: PlanBoundsSchema.optional().describe("Plan bounds supplied at creation (data for dry-run previews; never pre-approval — consequential steps still go through per-step approval)"),
+    bounds: PlanBoundsSchema.optional().describe("Plan bounds supplied at creation (data for dry-run previews; never pre-approval — consequential actions still go through per-action approval)"),
     dryRun: z.boolean().optional().describe("When true, validate the whole plan and return a preview; execute nothing and create no task record"),
     mode: TaskAgentModeSchema.optional().describe("Phase B: agent mode pinned at creation (read/act/plan/explore/summary/compaction); omit for act. Never changes mid-task; this field never changes the caller's session mode"),
   })
@@ -258,7 +261,7 @@ export const tasksCreate: ToolDefinition = {
   name: "tasks.create",
   title: "Create task",
   description:
-    "Create a durable task in the extension: exactly ONE task per user request, with a goal plus a description — plain words describing the job and the possible ways to do it, like a todo list in words. Do NOT predefine tool+input steps: create the task with goal + description and no steps. The task is a record only; it starts running by default and accepts filings. Include the returned task id in every subsequent tool call for the job — the extension files each execution into the task's timeline itself — never create a second task for the same job, and call tasks.complete when the job is done. Creating the task is reversible (it can be paused or cancelled); each filed execution still goes through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves anything. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title. (A task created WITH steps keeps the backward-compatible step-runner behaviour: the runner executes those steps and the task ends when they finish.)",
+    "Create a durable task in the extension: exactly ONE task per user request, with a goal plus a description — plain words describing the job and the possible ways to do it, like a todo list in words. The task's timeline is built from the interactions filed with its task id. The task is a record only; it starts running by default and accepts filings. Include the returned task id in every subsequent tool call for the job — the extension files each execution into the task's timeline itself — never create a second task for the same job, and call tasks.complete when the job is done. Creating the task is reversible (it can be paused or cancelled); each filed execution still goes through the existing executor, policy, and approval gates at execution time, so creating a task never pre-approves anything. The task's title (goal) must be a short phrase you rephrase in concise, action-first words — never the user's prompt copied verbatim as the title. Good: a user prompt like \"open github.com/SaadMajeed565/muze-ai in a new tab, scroll down slowly, and take a screenshot\" becomes the title \"Screenshot the Muze AI repo\". Bad: using that prompt itself as the title.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,
@@ -269,7 +272,7 @@ export const tasksCreate: ToolDefinition = {
 export const tasksGet: ToolDefinition = {
   name: "tasks.get",
   title: "Get task",
-  description: "Read the current view of one task: goal, description, status, progress (step progress for step tasks, filed-action count for description tasks), and result summary. Read-only; returns the summary view, never step inputs or raw outputs.",
+  description: "Read the current view of one task: goal, description, status, progress (filed-action count), and result summary. Read-only; returns the summary view, never raw outputs.",
   category: "workflows",
   risk: "read-only",
   requiresApproval: false,
@@ -303,7 +306,7 @@ export const tasksResume: ToolDefinition = {
   name: "tasks.resume",
   title: "Resume task",
   description:
-    "Resume a paused task from its checkpoint. Reversible. Resume re-checks the client and scope in the runner; the gateway must not weaken this, and a resume never re-runs steps already recorded done.",
+    "Resume a paused task from its checkpoint. Reversible. Resume re-checks the client and scope in the runner; the gateway must not weaken this, and a resume never re-does work already recorded done.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,
@@ -315,7 +318,7 @@ export const tasksCancel: ToolDefinition = {
   name: "tasks.cancel",
   title: "Cancel task",
   description:
-    "Cancel a task. Steps already done stay done and are reported as such; remaining steps are reported undone, with best-effort compensations. Reversible in the sense that cancellation itself does not destroy the task record.",
+    "Cancel a task. Work already done stays done and is reported as such; remaining work is reported undone, with best-effort compensations. Reversible in the sense that cancellation itself does not destroy the task record.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,
@@ -327,7 +330,7 @@ export const tasksComplete: ToolDefinition = {
   name: "tasks.complete",
   title: "Complete task",
   description:
-    "Complete a description task (a task created with goal + description and no steps) when the job is done, optionally with a short summary of what was done, stored as the task's final report. This is the done signal for description tasks — call it when the job is done, never before. It rejects step tasks (step tasks complete when their steps finish) and rejects terminal tasks. A failed description task is terminal: a genuinely new attempt gets a new task, never a revival of the old one.",
+    "Complete a description task (a task created with goal + description) when the job is done, optionally with a short summary of what was done, stored as the task's final report. This is the done signal for description tasks — call it when the job is done, never before. It rejects terminal tasks. A failed description task is terminal: a genuinely new attempt gets a new task, never a revival of the old one.",
   category: "workflows",
   risk: "reversible",
   requiresApproval: false,

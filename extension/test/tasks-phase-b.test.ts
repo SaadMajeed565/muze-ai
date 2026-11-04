@@ -484,13 +484,13 @@ describe("Phase B: mode field contract", () => {
   it("tasks.create schema accepts a valid mode and rejects an unknown one; the view schema carries the pinned mode", () => {
     const parsed = TasksCreateInputSchema.safeParse({
       goal: "g",
-      steps: [{ tool: "tabs.list", input: {} }],
+      description: "Do the job in words.",
       mode: "read",
     });
     expect(parsed.success).toBe(true);
     const rejected = TasksCreateInputSchema.safeParse({
       goal: "g",
-      steps: [{ tool: "tabs.list", input: {} }],
+      description: "Do the job in words.",
       mode: "turbo",
     });
     expect(rejected.success).toBe(false);

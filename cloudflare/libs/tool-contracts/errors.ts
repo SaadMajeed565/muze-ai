@@ -34,6 +34,17 @@ export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
 export const TASK_REQUIRED_MESSAGE =
   "Direct action calls are not accepted. Call tasks.create first with a concise action-first title and a description of the job, then include the returned task id in every tool call for the job. Single read-only observations do not require a task.";
 
+/**
+ * The teachable steps-rejection message for tasks.create, shared by
+ * the extension handler (this file is synced into cloudflare/libs,
+ * so both sides use this exact sentence). A task is goal +
+ * description only: any steps input is rejected before anything is
+ * created, and the message tells the caller the one fix — drop steps
+ * and let the timeline build from filed interactions.
+ */
+export const TASKS_CREATE_STEPS_REJECTED_MESSAGE =
+  "tasks.create accepts goal + description only; steps are not used — the task's timeline is built from the interactions filed with its task id.";
+
 export interface ToolError {
   code: ToolErrorCode;
   message: string;
