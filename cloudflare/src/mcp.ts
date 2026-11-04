@@ -67,6 +67,7 @@ const TOOL_ALIASES: Record<string, string> = {
 };
 
 export const MCP_INSTRUCTIONS =
+  "IMPORTANT: Every task you undertake must be created with tasks.create so it appears in the user's Tasks list — if the work is a task, call tasks.create for it rather than doing it only through direct tool calls.\n\n" +
   "You are an expert agentic browser operator controlling the user's Chrome browser via Muze AI.\n\n" +
   "## CORE AGENTIC LOOP: Observe → Reason → Act → Verify\n" +
   "1. Ground: Always observe before acting. Call `observe` to inspect the page text, accessibility tree, form fields, and interactive element refs.\n" +
@@ -724,6 +725,24 @@ function getBatchToolDescriptor(): ToolDescriptor {
   return fallback as unknown as ToolDescriptor;
 }
 
+/**
+ * Tasks-first ordering for the ListTools response: the tasks.* family
+ * comes first with tasks.create first, everything else keeps its current
+ * relative order, and the set is unchanged. Pure reorder — it never adds,
+ * removes, or renames a tool. Applied AFTER the ListTools cap slice so the
+ * capped set is identical and only the order changes.
+ */
+export function orderToolsTasksFirst<T extends { name: string }>(tools: T[]): T[] {
+  const head: T[] = [];
+  const tail: T[] = [];
+  for (const tool of tools) {
+    if (tool.name === "tasks.create") head.unshift(tool);
+    else if (tool.name.startsWith("tasks.")) head.push(tool);
+    else tail.push(tool);
+  }
+  return [...head, ...tail];
+}
+
 function filterToCoreTools(tools: ToolDescriptor[], showAll: boolean): ToolDescriptor[] {
   const withBatch = (list: ToolDescriptor[]): ToolDescriptor[] =>
     list.some((tool) => tool.name === "tools.batch") ? list : list.concat([getBatchToolDescriptor()]);
@@ -1231,6 +1250,9 @@ export function createGatewayMcpServer(
       listed = [...listed, native];
     }
     if (!showAllTools) listed = listed.slice(0, listToolsCap);
+    // Tasks first: the tasks.* family leads the response with
+    // tasks.create first; the capped set is unchanged, only the order.
+    listed = orderToolsTasksFirst(listed);
     return {
       tools: listed.map((tool) => ({
         name: tool.name,

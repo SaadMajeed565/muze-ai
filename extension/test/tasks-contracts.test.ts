@@ -248,6 +248,17 @@ describe("tasks.* contracts", () => {
     expect(description).toContain("rephrase");
     expect(description).toContain("verbatim");
   });
+
+  it("leads the tasks.create description with an IMPORTANT must-create marker", () => {
+    const byName = new Map(taskTools.map((t) => [t.name, t]));
+    const description = byName.get("tasks.create")?.description ?? "";
+    // Prominence: the must-create rule is the first thing the client
+    // reads, marked IMPORTANT — title guidance still intact below it.
+    expect(description.startsWith("IMPORTANT: Every task you undertake must be created with tasks.create")).toBe(true);
+    expect(description).toContain("rephrase");
+    expect(description).toContain("verbatim");
+    expect(description).toContain("Screenshot the Muze AI repo");
+  });
 });
 
 describe("tasks.* host dispatch", () => {
