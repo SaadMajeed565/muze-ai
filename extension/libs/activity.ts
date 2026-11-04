@@ -28,8 +28,30 @@ export interface ActivityEvent extends ActivityRow {
   kind: "activity";
 }
 
-/** Visible cap: the feed keeps the most recent rows only. */
-export const ACTIVITY_FEED_CAP = 50;
+/** Visible cap: the feed keeps the most recent rows only (user's ask: last 20–25). */
+export const ACTIVITY_FEED_CAP = 25;
+
+/**
+ * Timeline geometry, measured from dashboard/styles.css (not guessed):
+ * - `.tl .verb` is 13px on the body line-height of 1.5, so one verb line
+ *   is 13 × 1.5 = 19.5px. The disc (28px) is absolutely positioned and
+ *   never drives row height; the state word (`.tmeta`, 11px) only appears
+ *   on running/failed rows, which are transient or rare.
+ * - `.tl .step` adds padding-bottom 18px (2px on the last child).
+ * So one standard (done) row is 19.5 + 18 = 37.5px, and the container
+ * height that shows exactly 5 of them is 5 × 37.5 = 187.5px. Five done
+ * rows actually occupy 171.5px (last child has 2px padding), so 187.5px
+ * shows 5 full rows with a little slack and never clips a 5th done row.
+ * Caveat, stated plainly: a running/failed row is 54px tall, so if one
+ * sits mid-list the 5th visible row's state word can clip by up to
+ * 16.5px until it resolves to done (rows are never lost — scroll
+ * recovers them). The height is applied inline from these constants so
+ * tests can assert the exact value (jsdom performs no layout).
+ */
+export const ACTIVITY_TIMELINE_VISIBLE_ROWS = 5;
+export const ACTIVITY_TIMELINE_ROW_HEIGHT_PX = 37.5;
+export const ACTIVITY_TIMELINE_HEIGHT_PX =
+  ACTIVITY_TIMELINE_VISIBLE_ROWS * ACTIVITY_TIMELINE_ROW_HEIGHT_PX;
 
 /** Precise verbs for the tools users see most; everything else falls back by family. */
 const EXACT_VERBS: Record<string, string> = {
@@ -175,4 +197,23 @@ export function applyActivityEvent(
   const index = rows.findIndex((r) => r.id === row.id);
   const next = index >= 0 ? rows.map((r, i) => (i === index ? row : r)) : [...rows, row];
   return next.length > cap ? next.slice(next.length - cap) : next;
+}
+
+/**
+ * Merge a persisted seed (from the service worker's stored feed) with
+ * rows already received live. Live rows win on id conflict — they are
+ * newer than any seed fetched before them — and the merged list is
+ * ordered by emission time and capped, so a live event that arrives
+ * while the seed fetch is in flight is never clobbered by the seed.
+ */
+export function mergeActivitySeed(
+  current: ActivityRow[],
+  seed: ActivityRow[],
+  cap: number = ACTIVITY_FEED_CAP,
+): ActivityRow[] {
+  const byId = new Map<string, ActivityRow>();
+  for (const row of seed) byId.set(row.id, row);
+  for (const row of current) byId.set(row.id, row);
+  const merged = [...byId.values()].sort((a, b) => a.at - b.at);
+  return merged.length > cap ? merged.slice(merged.length - cap) : merged;
 }

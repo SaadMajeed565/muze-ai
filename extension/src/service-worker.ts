@@ -1,5 +1,6 @@
 import { REGISTRY_VERSION, UNIFIED_TOOL_NAMES, type BridgeEvent, type ToolDescriptor } from "../libs/tool-contracts/index.js";
 import { AuditLog, ApprovalBroker, PolicyEngine, RateLimiter } from "../libs/security/index.js";
+import { chromeLocalActivityBackend, createActivityStore } from "../libs/activity-store.js";
 import { ChromeWorkingTabGroup, ToolExecutor, createToolRegistry } from "../libs/browser-engine/index.js";
 import { BridgeManager } from "./bridge-manager.js";
 import {
@@ -151,6 +152,7 @@ export const READ_ONLY_DASHBOARD_REQUEST_TYPES: ReadonlySet<string> = new Set([
   "muze/browsers/refresh",
   "muze/tasks.list",
   "muze/tasks.get",
+  "muze/activity.list",
 ]);
 
 export function isConsequentialDashboardRequestType(type: string): boolean {
@@ -204,6 +206,13 @@ let onboarding: OnboardingState = { completed: false, step: 1 };
 let gatewayAuthRequired = false;
 let gatewayAuthToken = "";
 
+/**
+ * Persisted live-activity feed (chrome.storage.local, key
+ * "muze.activityFeed"). The dashboard reads it only through the
+ * `muze/activity.list` route; this store is the single owner.
+ */
+const activityStore = createActivityStore(chromeLocalActivityBackend());
+
 const executor = new ToolExecutor({
   registry,
   policy,
@@ -215,6 +224,10 @@ const executor = new ToolExecutor({
     connectedClients: manager?.clientCount() ?? 0,
   }),
   onActivity: (event) => {
+    // Persist first (service worker owns the stored feed; the dashboard
+    // seeds from it on mount), then forward live. Both best-effort:
+    // neither may fail the tool call that produced the event.
+    void activityStore.record(event).catch(() => undefined);
     // Dashboard-only: activity never goes to gateway clients, so it is
     // sent straight to extension pages, not through broadcastEvent.
     chrome.runtime.sendMessage({ type: "muze/event", event }).catch(() => undefined);
@@ -1344,6 +1357,13 @@ async function handleRequest(request: DashboardRequest): Promise<DashboardRespon
       );
       if (!result.ok) return { ok: false, error: result.error ?? "task request failed" };
       return { ok: true, tasks: result.tasks, task: result.task };
+    }
+    case "muze/activity.list": {
+      // Read-only snapshot of the persisted live-activity feed (last 25
+      // rows). The dashboard seeds from this on mount, then appends live
+      // muze/event rows; it never touches storage directly.
+      const activity = await activityStore.list();
+      return { ok: true, activity };
     }
     default:
       return { ok: false, error: "unknown_message" };

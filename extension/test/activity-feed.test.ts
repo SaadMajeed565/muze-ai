@@ -5,7 +5,7 @@
  * inputs, outputs, URLs, or page content.
  */
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_FEED_CAP, activityVerb, applyActivityEvent, type ActivityEvent } from "../libs/activity.js";
+import { ACTIVITY_FEED_CAP, ACTIVITY_TIMELINE_HEIGHT_PX, ACTIVITY_TIMELINE_ROW_HEIGHT_PX, ACTIVITY_TIMELINE_VISIBLE_ROWS, activityVerb, applyActivityEvent, mergeActivitySeed, type ActivityEvent, type ActivityRow } from "../libs/activity.js";
 import { createTestRuntime } from "../libs/testing/index.js";
 import { TaskRunner, createMemoryTaskStore, type PolicySnapshot } from "../libs/tasks/index.js";
 import { ToolErrorException, type ClientIdentity } from "../libs/tool-contracts/index.js";
@@ -60,6 +60,9 @@ describe("activityVerb", () => {
 });
 
 describe("applyActivityEvent", () => {
+  it("keeps exactly the last 25 actions (user's ask: 20–25, top of range)", () => {
+    expect(ACTIVITY_FEED_CAP).toBe(25);
+  });
   it("appends rows in arrival order and resolves a start row by id", () => {
     let rows = applyActivityEvent([], event("dom.click", "running", "act_1"));
     rows = applyActivityEvent(rows, event("screenshots.viewport", "running", "act_2"));
@@ -85,6 +88,45 @@ describe("applyActivityEvent", () => {
     expect(rows).toHaveLength(ACTIVITY_FEED_CAP);
     expect(rows[0].id).toBe("act_10");
     expect(rows[rows.length - 1].id).toBe(`act_${ACTIVITY_FEED_CAP + 9}`);
+  });
+});
+
+describe("mergeActivitySeed", () => {
+  const row = (id: string, at: number, state: ActivityRow["state"] = "done"): ActivityRow => ({
+    id,
+    tool: "dom.click",
+    summary: `Action ${id}`,
+    state,
+    at,
+  });
+
+  it("unions seed and live rows by id, live wins, ordered by time, capped", () => {
+    const merged = mergeActivitySeed(
+      [row("act_live", 5, "running")],
+      [row("act_seed", 1), row("act_live", 2, "done")],
+    );
+    expect(merged.map((r) => r.id)).toEqual(["act_seed", "act_live"]);
+    // The live row wins the conflict: its newer state and time survive.
+    expect(merged[1].state).toBe("running");
+    expect(merged[1].at).toBe(5);
+  });
+
+  it("caps the merged list to the most recent rows", () => {
+    const seed = Array.from({ length: 30 }, (_, i) => row(`act_${i}`, i));
+    const merged = mergeActivitySeed([], seed);
+    expect(merged).toHaveLength(25);
+    expect(merged[0].id).toBe("act_5");
+    expect(merged[24].id).toBe("act_29");
+  });
+});
+
+describe("timeline geometry", () => {
+  it("container height is exactly 5 standard rows, from the stylesheet measurements", () => {
+    // Verb 13px × body line-height 1.5 = 19.5px + step padding-bottom 18px.
+    expect(ACTIVITY_TIMELINE_ROW_HEIGHT_PX).toBe(37.5);
+    expect(ACTIVITY_TIMELINE_VISIBLE_ROWS).toBe(5);
+    expect(ACTIVITY_TIMELINE_HEIGHT_PX).toBe(187.5);
+    expect(ACTIVITY_TIMELINE_HEIGHT_PX).toBe(ACTIVITY_TIMELINE_VISIBLE_ROWS * ACTIVITY_TIMELINE_ROW_HEIGHT_PX);
   });
 });
 

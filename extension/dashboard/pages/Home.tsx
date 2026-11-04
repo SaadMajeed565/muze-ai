@@ -6,7 +6,7 @@ import type { ApprovalRequestInfo } from "../../libs/tool-contracts/index.js";
 import type { TabId } from "../logic.js";
 import { sendRequest } from "../logic.js";
 import { dedupeAppsByName, plainStepState, resolveAppName, timelineIconForStep } from "../ui-logic.js";
-import { applyActivityEvent, type ActivityEvent, type ActivityRow } from "../../libs/activity.js";
+import { applyActivityEvent, mergeActivitySeed, ACTIVITY_TIMELINE_HEIGHT_PX, type ActivityEvent, type ActivityRow } from "../../libs/activity.js";
 import { currentBrowser, tabCountText } from "../browsers-logic.js";
 import { FAVICON_CACHE_KEY, domainOf, prefetchFaviconForTab } from "../../src/favicon-cache.js";
 import { Icon } from "../components/Icon.js";
@@ -45,8 +45,9 @@ export function HomePage({
   const [browsersData, setBrowsersData] = useState<BrowsersDashboard | null>(null);
   const [tasks, setTasks] = useState<TaskView[] | null>(null);
   // Live activity feed: real tool executions as they happen (direct calls
-  // and task steps alike). Live-only: events arriving while the panel is
-  // closed are not replayed, because activity is not persisted.
+  // and task steps alike). The feed is persisted by the service worker
+  // (last 25 rows), so navigating away and back keeps it: Home seeds
+  // from the stored feed on mount, then continues live-appending.
   const [activity, setActivity] = useState<ActivityRow[]>([]);
   const [addAppOpen, setAddAppOpen] = useState(false);
   const [favicon, setFavicon] = useState<string | null>(null);
@@ -221,7 +222,10 @@ export function HomePage({
   // Live activity feed: every tool execution in this browser arrives as a
   // muze/event with kind "activity" (direct calls and task steps alike,
   // in time order). The 5s tasks poll still feeds the card header; the
-  // feed itself is event-driven.
+  // feed itself is event-driven, seeded from the service worker's stored
+  // feed on mount. The listener attaches BEFORE the seed fetch, so an
+  // event arriving during the fetch is captured live and the seed merge
+  // (live rows win on id) can never clobber it.
   useEffect(() => {
     const onMessage = typeof chrome === "undefined" ? undefined : chrome?.runtime?.onMessage;
     if (!onMessage?.addListener) return undefined;
@@ -231,7 +235,19 @@ export function HomePage({
       setActivity((rows) => applyActivityEvent(rows, message.event as ActivityEvent));
     };
     onMessage.addListener(listener);
+    let cancelled = false;
+    void sendRequest({ type: "muze/activity.list" }).then((response) => {
+      if (cancelled) return;
+      const wire = response as unknown as { activity?: unknown };
+      if (response.ok && Array.isArray(wire.activity)) {
+        const seed = (wire.activity as ActivityRow[]).filter(
+          (row) => row && typeof row.id === "string" && typeof row.tool === "string" && typeof row.summary === "string",
+        );
+        setActivity((rows) => mergeActivitySeed(rows, seed));
+      }
+    });
     return () => {
+      cancelled = true;
       if (onMessage.removeListener) onMessage.removeListener(listener);
     };
   }, []);
@@ -287,11 +303,17 @@ export function HomePage({
           </span>
         </summary>
         <div style={{ position: "relative" }}>
-          {activity.length === 0 ? (
-            <div class="muted mt12" style={{ fontSize: "13px" }}>Actions will appear here as Muze works</div>
-          ) : (
-            <div id="browserTimeline" class="tl mt12" ref={timelineRef} onScroll={onTimelineScroll}>
-              {activity.map((row) => {
+          <div
+            id="browserTimeline"
+            class="tl mt12"
+            style={{ height: `${ACTIVITY_TIMELINE_HEIGHT_PX}px` }}
+            ref={timelineRef}
+            onScroll={onTimelineScroll}
+          >
+            {activity.length === 0 ? (
+              <div class="muted" style={{ fontSize: "13px" }}>Actions will appear here as Muze works</div>
+            ) : (
+              activity.map((row) => {
                 const stateWord = row.state === "done" ? "" : plainStepState(row.state);
                 return (
                   <div class="step" key={row.id}>
@@ -302,9 +324,9 @@ export function HomePage({
                     {stateWord ? <div class="tmeta">{stateWord}</div> : null}
                   </div>
                 );
-              })}
-            </div>
-          )}
+              })
+            )}
+          </div>
           {showLatest ? (
             <button type="button" id="toLatestBtn" onClick={() => scrollToLatest(true)}>
               ↓ Latest

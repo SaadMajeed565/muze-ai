@@ -1,5 +1,6 @@
 import type { AuditEvent, PermissionMode, PolicyConfig } from "../libs/security/index.js";
 import type { ApprovalRequestInfo, ClientIdentity, ToolDescriptor } from "../libs/tool-contracts/index.js";
+import type { ActivityRow } from "../libs/activity.js";
 import type { BridgeSettings, OnboardingState } from "./storage.js";
 import type { TaskView } from "./task-dashboard.js";
 
@@ -97,6 +98,7 @@ export type DashboardRequest =
   | { type: "muze/tasks.resume"; taskId: string }
   | { type: "muze/tasks.cancel"; taskId: string }
   | { type: "muze/tasks.approvePlan"; taskId: string; bounds?: unknown }
+  | { type: "muze/activity.list" }
   | { type: "muze/browsers/list" }
   | { type: "muze/browsers/refresh" }
   | { type: "muze/browsers/set-default"; sessionId: string }
@@ -155,6 +157,8 @@ export interface DashboardResponse {
   /** Task progress views, present ONLY in response to "muze/tasks.*". Sanitised views only, never step inputs. */
   tasks?: TaskView[];
   task?: TaskView;
+  /** Persisted live-activity rows, present ONLY in response to "muze/activity.list". Tool-name-only summaries, never inputs/outputs. */
+  activity?: ActivityRow[];
   /** Present ONLY in response to "muze/browsers/list". */
   browsers?: BrowsersDashboard;
   /**

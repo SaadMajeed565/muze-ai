@@ -180,7 +180,11 @@ h2.sec:first-child{margin-top:0}
 .tl .node{position:absolute;left:-41px;top:0;width:28px;height:28px;border-radius:50%;background:rgba(128,128,128,.14);border:none;display:grid;place-items:center;color:var(--fg)}
 .tl .verb{font-weight:600;font-size:13px}
 .tl .tmeta{font-size:11px;color:var(--muted)}
-#browserTimeline,.browser-timeline{max-height:200px;overflow-y:auto;scrollbar-width:thin}
+#browserTimeline,.browser-timeline{overflow-y:auto;scrollbar-width:thin}
+/* NOTE: #browserTimeline's height is fixed inline from
+   ACTIVITY_TIMELINE_HEIGHT_PX (libs/activity.ts) — exactly 5 rows —
+   so the container never shrinks when fewer than 5 actions exist. Do
+   not re-add a max-height here; it would fight the fixed height. */
 #fileList{max-height:max(280px, calc(100vh - 430px));max-height:max(280px, calc(100dvh - 430px));overflow-y:scroll;scrollbar-width:thin;scrollbar-color:var(--muted2) transparent}
 #fileList::-webkit-scrollbar{width:6px}
 #fileList::-webkit-scrollbar-track{background:transparent}
