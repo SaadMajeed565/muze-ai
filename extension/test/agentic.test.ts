@@ -22,7 +22,7 @@ describe("agentic observe/act loop", () => {
   it("returns interactive nodes and viewport without capturing the screen", async () => {
     document.body.innerHTML = `<button aria-label="Go">Go</button><canvas id="board" width="40" height="40"></canvas>`;
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "page.snapshot",
       input: { maxNodes: 50 },
       client,
@@ -43,7 +43,7 @@ describe("agentic observe/act loop", () => {
   it("includes a JPEG screenshot in the same snapshot when requested", async () => {
     document.body.innerHTML = `<button aria-label="Go">Go</button>`;
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "page.snapshot",
       input: { maxNodes: 50, includeScreenshot: true },
       client,
@@ -66,7 +66,7 @@ describe("agentic observe/act loop", () => {
     const original = document.elementFromPoint;
     document.elementFromPoint = () => canvas;
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "act",
       input: { steps: [{ do: "click", target: { x: 50, y: 50, coordinateSpace: "css" } }] },
         client,
@@ -82,7 +82,7 @@ describe("agentic observe/act loop", () => {
     document.body.appendChild(host);
     host.attachShadow({ mode: "open" }).innerHTML = `<form action="/save"><input name="email" /></form>`;
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({ tool: "forms.inspect", input: {}, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "forms.inspect", input: {}, client, ctx: rt.ctx });
     const forms = (result.result as { forms: { fields: unknown[] }[] }).forms;
     expect(forms.length).toBe(1);
     expect(forms[0].fields.length).toBe(1);
@@ -94,7 +94,7 @@ describe("agentic observe/act loop", () => {
     // the new button: the caller must re-find and get a fresh ref.
     document.body.innerHTML = `<button id="one">Continue</button>`;
     const rt = createTestRuntime({ policy: open });
-    const found = await rt.executor.execute({
+    const found = await rt.executor.execute({ taskId: "task_step", 
       tool: "dom.find",
       input: { by: "text", value: "Continue" },
       client,
@@ -103,7 +103,7 @@ describe("agentic observe/act loop", () => {
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
     document.body.innerHTML = `<button id="two">Continue</button>`;
     await expect(
-      rt.executor.execute({ tool: "dom.click", input: { ref }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "dom.click", input: { ref }, client, ctx: rt.ctx }),
     ).rejects.toMatchObject({ code: "STALE_ELEMENT" });
   });
 
@@ -112,7 +112,7 @@ describe("agentic observe/act loop", () => {
     const a = rt.ctx.addTab({ url: "https://a.test/", active: true });
     const b = rt.ctx.addTab({ url: "https://b.test/" });
     document.body.innerHTML = `<a href="https://shared.test/x">Same</a><a href="https://a.test/only">A</a>`;
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "workflows.collectLinks",
       input: { tabIds: [a.id, b.id], limitPerTab: 20 },
       client,
@@ -128,7 +128,7 @@ describe("unified observe", () => {
   it("reads metadata, text, and ast in one call", async () => {
     document.body.innerHTML = `<main><h1>Title</h1><p>Hello world</p></main>`;
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "observe",
       input: { include: ["metadata", "text", "ast"], maxNodes: 50 },
       client,
@@ -147,10 +147,10 @@ describe("act approval gating", () => {
     const original = document.elementFromPoint;
     document.elementFromPoint = () => document.querySelector("button")!;
     const rt = createTestRuntime();
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "text", value: "Save" }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "text", value: "Save" }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
     await expect(
-      rt.executor.execute({ tool: "act", input: { steps: [{ do: "click", target: { ref } }] }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "act", input: { steps: [{ do: "click", target: { ref } }] }, client, ctx: rt.ctx }),
     ).rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
     document.elementFromPoint = original;
   });
@@ -160,9 +160,9 @@ describe("act approval gating", () => {
     const original = document.elementFromPoint;
     document.elementFromPoint = () => document.querySelector("button")!;
     const rt = createTestRuntime();
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "text", value: "Just a button" }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "text", value: "Just a button" }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
-    const result = await rt.executor.execute({ tool: "act", input: { steps: [{ do: "click", target: { ref } }] }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "act", input: { steps: [{ do: "click", target: { ref } }] }, client, ctx: rt.ctx });
     expect((result.result as { results: { ok: boolean }[] }).results[0].ok).toBe(true);
     document.elementFromPoint = original;
   });
@@ -172,10 +172,10 @@ describe("act approval gating", () => {
     const original = document.elementFromPoint;
     document.elementFromPoint = () => document.querySelector('input[name="q"]')!;
     const rt = createTestRuntime();
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: 'input[name="q"]' }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "selector", value: 'input[name="q"]' }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
     await expect(
-      rt.executor.execute({ tool: "act", input: { steps: [{ do: "press", target: { ref }, key: "Enter" }] }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "act", input: { steps: [{ do: "press", target: { ref }, key: "Enter" }] }, client, ctx: rt.ctx }),
     ).rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
     document.elementFromPoint = original;
   });
@@ -185,9 +185,9 @@ describe("act approval gating", () => {
     const original = document.elementFromPoint;
     document.elementFromPoint = () => document.querySelector("canvas")!;
     const rt = createTestRuntime();
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#board" }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "selector", value: "#board" }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
-    const result = await rt.executor.execute({ tool: "act", input: { steps: [{ do: "click", target: { ref } }] }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "act", input: { steps: [{ do: "click", target: { ref } }] }, client, ctx: rt.ctx });
     expect((result.result as { results: { ok: boolean }[] }).results[0].ok).toBe(true);
     document.elementFromPoint = original;
   });
@@ -198,7 +198,7 @@ describe("act approval gating", () => {
     document.elementFromPoint = () => document.querySelector("button")!;
     const rt = createTestRuntime();
     await expect(
-      rt.executor.execute({
+      rt.executor.execute({ taskId: "task_step", 
         tool: "act",
         input: { steps: [{ do: "click", target: { x: 50, y: 10, coordinateSpace: "css" } }] },
         client,
@@ -213,7 +213,7 @@ describe("act approval gating", () => {
     const original = document.elementFromPoint;
     document.elementFromPoint = () => document.querySelector("canvas")!;
     const rt = createTestRuntime();
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "act",
       input: { steps: [{ do: "click", target: { x: 50, y: 50, coordinateSpace: "css" } }] },
       client,
@@ -227,14 +227,14 @@ describe("act approval gating", () => {
   it("re-renders: act click succeeds after DOM re-renders between observe and act", async () => {
     document.body.innerHTML = `<button id="btn">Click me</button>`;
     const rt = createTestRuntime({ policy: open });
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "text", value: "Click me" }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "text", value: "Click me" }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
     // Re-render the DOM (simulates a page update between observe and act)
     document.body.innerHTML = `<button id="btn">Click me again</button>`;
-    const foundAgain = await rt.executor.execute({ tool: "dom.find", input: { by: "text", value: "Click me again" }, client, ctx: rt.ctx });
+    const foundAgain = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "text", value: "Click me again" }, client, ctx: rt.ctx });
     const refAgain = (foundAgain.result as { elements: { ref: string }[] }).elements[0].ref;
     expect(refAgain).not.toBe(ref);
-    const result = await rt.executor.execute({ tool: "act", input: { steps: [{ do: "click", target: { ref: refAgain } }] }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "act", input: { steps: [{ do: "click", target: { ref: refAgain } }] }, client, ctx: rt.ctx });
     expect((result.result as { results: { ok: boolean }[] }).results[0].ok).toBe(true);
   });
 });
@@ -253,7 +253,7 @@ describe("workflow partial-failure fixes", () => {
     const handler = rt.registry.require(tool).handler as unknown as (input: unknown, exec: unknown) => Promise<unknown>;
     const execInvoke =
       invoke ??
-      (async (name: string, payload: unknown) => (await rt.executor.execute({ tool: name, input: payload, client, ctx: rt.ctx })).result);
+      (async (name: string, payload: unknown) => (await rt.executor.execute({ taskId: "task_step",  tool: name, input: payload, client, ctx: rt.ctx })).result);
     return handler(input, {
       ctx: rt.ctx,
       client,
@@ -284,7 +284,7 @@ describe("workflow partial-failure fixes", () => {
         creates += 1;
         if (creates > 1) throw new Error("boom creating tab");
       }
-      return (await rt.executor.execute({ tool: name, input: payload, client, ctx: rt.ctx })).result;
+      return (await rt.executor.execute({ taskId: "task_step",  tool: name, input: payload, client, ctx: rt.ctx })).result;
     };
     const result = (await runWorkflow(rt, "workflows.openSequence", { urls: ["https://a.test/", "https://b.test/"], delayMs: 0, active: false }, invoke)) as {
       opened: { url: string }[];

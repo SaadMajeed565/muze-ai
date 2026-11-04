@@ -20,7 +20,7 @@ describe("retest fixes: unified actions and schemas", () => {
 
   it("tabs reload is a unified action", async () => {
     const rt = createTestRuntime({ context: { tabs: [{ url: "https://a.test/", title: "A", active: true }] } });
-    const result = await rt.executor.execute({ tool: "tabs", input: { action: "reload", tabId: 1 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "tabs", input: { action: "reload", tabId: 1 }, client, ctx: rt.ctx });
     expect(result.result).toBeDefined();
   });
 
@@ -28,7 +28,7 @@ describe("retest fixes: unified actions and schemas", () => {
     // approvalMode never: the point here is dispatch, not the policy gate
     // (history.search is sensitive-read and otherwise needs approval).
     const rt = createTestRuntime({ policy: { approvalMode: "never" } });
-    const result = await rt.executor.execute({ tool: "data", input: { domain: "history", action: "list" }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "data", input: { domain: "history", action: "list" }, client, ctx: rt.ctx });
     expect(result.result).toBeDefined();
     expect(JSON.stringify(result.result)).not.toContain("Unknown history action");
   });
@@ -37,7 +37,7 @@ describe("retest fixes: unified actions and schemas", () => {
     const rt = createTestRuntime({ context: { tabs: [{ url: "https://a.test/", title: "A", active: true }] } });
     rt.ctx.attachObserver(1);
     const result = await rt.executor.execute(
-      { tool: "wait", input: { for: "networkIdle", timeoutMs: 1000, quietMs: 100 }, client, ctx: rt.ctx },
+      { taskId: "task_step",  tool: "wait", input: { for: "networkIdle", timeoutMs: 1000, quietMs: 100 }, client, ctx: rt.ctx },
     );
     expect(result.result).toBeDefined();
   });
@@ -45,13 +45,13 @@ describe("retest fixes: unified actions and schemas", () => {
   it("dom.select on a non-select element fails clearly, never 'undefined is not iterable'", async () => {
     document.body.innerHTML = `<input id="q" type="text" />`;
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#q" }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "selector", value: "#q" }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
     await expect(
-      rt.executor.execute({ tool: "dom.select", input: { ref, value: "x" }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "dom.select", input: { ref, value: "x" }, client, ctx: rt.ctx }),
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
     try {
-      await rt.executor.execute({ tool: "dom.select", input: { ref, value: "x" }, client, ctx: rt.ctx });
+      await rt.executor.execute({ taskId: "task_step",  tool: "dom.select", input: { ref, value: "x" }, client, ctx: rt.ctx });
       throw new Error("expected dom.select to throw");
     } catch (error) {
       expect(String((error as Error).message)).toContain("only works on a <select> element");
@@ -62,7 +62,7 @@ describe("retest fixes: unified actions and schemas", () => {
   it("forms.fill reports a stale ref as a re-observe instruction, never silently re-resolving it", async () => {
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
     const result = await rt.executor.execute(
-      { tool: "forms.fill", input: { fields: [{ ref: "rDoesNotExist", value: "x" }] }, client, ctx: rt.ctx },
+      { taskId: "task_step",  tool: "forms.fill", input: { fields: [{ ref: "rDoesNotExist", value: "x" }] }, client, ctx: rt.ctx },
     );
     const skipped = (result.result as { skipped: { field: string; reason: string }[] }).skipped;
     expect(skipped).toHaveLength(1);

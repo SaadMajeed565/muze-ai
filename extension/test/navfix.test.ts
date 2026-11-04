@@ -24,7 +24,7 @@ function runtime() {
 }
 
 async function exec(rt: ReturnType<typeof runtime>, tool: string, input: Record<string, unknown>) {
-  return rt.executor.execute({ tool, input, client, ctx: rt.ctx });
+  return rt.executor.execute({ taskId: "task_step",  tool, input, client, ctx: rt.ctx });
 }
 
 describe("navfix: tabId is never forwarded into strict navigation schemas", () => {

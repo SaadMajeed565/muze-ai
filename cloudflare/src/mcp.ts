@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   REGISTRY_VERSION,
+  TASK_REQUIRED_MESSAGE,
   ToolErrorException,
   toToolDescriptor,
   toToolError,
@@ -82,12 +83,13 @@ export const MCP_INSTRUCTIONS =
   "- A stale ref is never re-resolved to a different element. Re-observe and mint a fresh ref for the same element.\n" +
   "- Multi-step work never runs as bare direct calls: a task record exists before multi-step or consequential execution. Create the task first, then let it carry the work.\n" +
   "- Never chain observe → act → navigate → act directly for a job when a task should carry it. Grounding reads and single one-shot observations are the only direct calls; everything else runs inside a task.\n" +
-  "- Report progress against the task, not as loose actions: status, step progress, and results come from the task record.\n\n" +
+  "- Report progress against the task, not as loose actions: status, step progress, and results come from the task record.\n" +
+  "- Direct action calls are rejected by the system with TASK_REQUIRED: that rejection is not a page failure — it means create the task first (tasks.create, concise action-first title, steps as the plan), then let it run. Reads stay free for grounding.\n\n" +
   "## HOW TO BUILD YOUR OWN TASK BRIEF — HOW, NOT WHAT\n" +
   "This initialize text teaches how to work, never what a specific task's steps are. Do not copy a prewritten procedure for a site or a task: interfaces change, and a copied procedure is a guess about a page you have not observed. For each new task, build your own short brief from the goal and what you actually observe, before your first action.\n" +
   "- Restate the goal in your own words, and state what observable page state will prove it done. Define that success signal yourself from the page you observe, not from a label or message you were given in advance.\n" +
   "- Gather context first: the current tab and URL, what is open (dialog, form, menu), and what inputs or files the goal actually supplies, each identified by id + name + size or by id + URL, never by similarity alone.\n" +
-  "- Decide direct vs task: direct is ONLY for a single read-only observation — one call, no state change, no follow-up action. Everything else is a task: any user request phrased as something to DO, any job needing 2 or more tool actions, anything with a consequential step. Create it with `tasks.create` first — concise action-first title, the brief's steps as the plan — then let it run.\n" +
+  "- Decide direct vs task: direct is ONLY for a single read-only observation — one call, no state change, no follow-up action. Everything else is a task: any user request phrased as something to DO, any job needing 2 or more tool actions, anything with a consequential step. Create it with `tasks.create` first — concise action-first title, the brief's steps as the plan — then let it run. Direct action calls are rejected by the system with TASK_REQUIRED — a rejection is not a failure of the page, it is the system telling you to create the task.\n" +
   "- The brief becomes the task's plan: the brief's goal becomes the task's title (rephrased, action-first, never the prompt verbatim) and the brief's steps become the task's steps.\n" +
   "- Choose tools by capability, not by name: discover tools for the capability the step needs, read the full schema of only the tools the plan actually uses, and ignore the rest.\n" +
   "- Work the fallback ladder per step, re-observe on any failure or unexpected state, and re-derive the brief when the page changes, a new dialog appears, or two candidates match.\n" +
@@ -303,6 +305,26 @@ export function resolveUnifiedToolForScope(name: string, input: unknown): Unifie
       // granular target: scope is checked against their own descriptor.
       return null;
   }
+}
+
+/**
+ * Effective risk for the task-required batch gate, using the same
+ * per-action resolution as the scope check. A resolved unified call is
+ * judged by its granular risk; delay waits (no granular target, marked
+ * restricted in the action-risk table) are detected from the input;
+ * tasks.* items are exempt (management calls, not page actions — the
+ * batch transport cannot run them anyway, and they fail per item
+ * downstream as before); anything unresolvable falls back to the
+ * descriptor's own risk. An unknown tool returns undefined and passes
+ * through to the extension, which rejects it per item as NOT_FOUND —
+ * the gate must not mislabel a not-found tool as TASK_REQUIRED.
+ */
+function batchItemTaskRisk(name: string, input: Record<string, unknown>): string | undefined {
+  if (name.startsWith("tasks.")) return undefined;
+  const resolved = resolveUnifiedToolForScope(name, input);
+  if (resolved) return GRANULAR_RISK.get(resolved.granular);
+  if (input.for === "delay" && (name === "wait" || name === "navigate")) return "restricted";
+  return descriptorForTool(name)?.risk;
 }
 
 function assertScopeAllows(scope: string | undefined, name: string, input?: Record<string, unknown>): void {
@@ -793,6 +815,8 @@ function recoveryHint(code: string): string | undefined {
       return "This action requires user approval. Ask the user in chat (elicitation) or wait for a dashboard decision, then re-call this tool with no confirmation flag; the gateway will re-request approval. A 'confirmed' flag in input is stripped and never counts as approval.";
     case "APPROVAL_DENIED":
       return "The user declined this operation.";
+    case "TASK_REQUIRED":
+      return "Create the task with tasks.create first (concise action-first title, steps as the plan), then let it run. Single read-only observations do not require a task.";
     default:
       return undefined;
   }
@@ -1585,6 +1609,23 @@ export function createGatewayMcpServer(
             input: stripConfirmationFlags(adapted.input),
           };
         });
+        // Task-required gate, whole batch: if any item resolves to an
+        // action (reversible, consequential, restricted), the entire
+        // batch is rejected with TASK_REQUIRED — nothing is forwarded,
+        // nothing executes. Pure-read batches proceed to the extension,
+        // whose per-item read-only rule is the backstop. This mirrors
+        // the extension executor's gate (same risk rule, same message);
+        // single calls are NOT mirrored here — the extension gate is
+        // the enforcement point for those, and a disconnected bridge
+        // already fails with CONFLICT before anything can execute.
+        for (const item of calls) {
+          const risk = batchItemTaskRisk(item.tool, item.input);
+          if (risk !== undefined && risk !== "read-only" && risk !== "sensitive-read") {
+            throw new ToolErrorException("TASK_REQUIRED", TASK_REQUIRED_MESSAGE, {
+              details: { tool: item.tool, risk },
+            });
+          }
+        }
         const results = await bridge.callToolBatch(calls, { client, signal: extra.signal });
         return { content: toMcpContent({ results }) };
       }

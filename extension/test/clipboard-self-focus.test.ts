@@ -71,7 +71,7 @@ describe("clipboard self-focus: read", () => {
       return { text: "hello-self-focus", truncated: false };
     };
 
-    const result = await rt.executor.execute({ tool: "clipboard.read", input: {}, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "clipboard.read", input: {}, client, ctx: rt.ctx });
     expect(result.result).toEqual({ text: "hello-self-focus", truncated: false });
     // Focus was attempted before the first fallback read, and the read
     // was retried after a focus attempt (first read failed, second passed).
@@ -87,7 +87,7 @@ describe("clipboard self-focus: read", () => {
       throw new Error("Document is not focused");
     };
     const message = await expectErrorMessage(
-      rt.executor.execute({ tool: "clipboard.read", input: {}, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "clipboard.read", input: {}, client, ctx: rt.ctx }),
     );
     expect(message).toContain("own attempt to focus");
     expect(message).toContain("did not make");
@@ -107,7 +107,7 @@ describe("clipboard self-focus: read", () => {
       return originalUpdateWindow(windowId, properties);
     };
     const message = await expectErrorMessage(
-      rt.executor.execute({ tool: "clipboard.read", input: {}, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "clipboard.read", input: {}, client, ctx: rt.ctx }),
     );
     expect(message).toContain("restricted page");
     expect(focusCalls).toBe(0);
@@ -137,7 +137,7 @@ describe("clipboard self-focus: write", () => {
       return { written: true };
     };
 
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "clipboard.write",
       input: { text: "write-via-page" },
       client,
@@ -160,7 +160,7 @@ describe("clipboard self-focus: write", () => {
       throw new Error("Document is not focused");
     };
     const message = await expectErrorMessage(
-      rt.executor.execute({ tool: "clipboard.write", input: { text: "must-not-write" }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "clipboard.write", input: { text: "must-not-write" }, client, ctx: rt.ctx }),
     );
     expect(message).toContain("own attempt to focus");
     // The page write was attempted (and failed on focus), but no write
@@ -178,7 +178,7 @@ describe("clipboard self-focus: write", () => {
       return originalUpdateWindow(windowId, properties);
     };
     const message = await expectErrorMessage(
-      rt.executor.execute({ tool: "clipboard.write", input: { text: "x" }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "clipboard.write", input: { text: "x" }, client, ctx: rt.ctx }),
     );
     expect(message).toContain("restricted page");
     expect(focusCalls).toBe(0);

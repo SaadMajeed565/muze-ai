@@ -94,7 +94,7 @@ describe("Unified Tools & Approval Summaries", () => {
     `;
 
     const rt = createTestRuntime();
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "observe",
       input: { include: ["metadata", "text", "a11y"] },
       client,
@@ -121,7 +121,7 @@ describe("Unified Tools & Approval Summaries", () => {
       },
     });
 
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "act",
       input: {
         steps: [
@@ -182,7 +182,7 @@ describe("Unified Tools & Approval Summaries", () => {
     });
 
     // 1. Navigate with category 'tab'
-    const tabResult = await rt.executor.execute({
+    const tabResult = await rt.executor.execute({ taskId: "task_step", 
       tool: "navigate",
       input: { category: "tab", action: "active" },
       client,
@@ -191,7 +191,7 @@ describe("Unified Tools & Approval Summaries", () => {
     expect(tabResult.result).toBeDefined();
 
     // 2. Navigate with category 'sync'
-    const syncResult = await rt.executor.execute({
+    const syncResult = await rt.executor.execute({ taskId: "task_step", 
       tool: "navigate",
       input: { category: "sync", for: "delay", timeoutMs: 500 },
       client,
@@ -200,7 +200,7 @@ describe("Unified Tools & Approval Summaries", () => {
     expect((syncResult.result as any)?.waited).toBe(true);
 
     // 3. Form with phase 'inspect'
-    const formInspect = await rt.executor.execute({
+    const formInspect = await rt.executor.execute({ taskId: "task_step", 
       tool: "form",
       input: { phase: "inspect" },
       client,
@@ -209,7 +209,7 @@ describe("Unified Tools & Approval Summaries", () => {
     expect((formInspect.result as any)?.forms).toBeDefined();
 
     // 4. Data with domain 'history'
-    const histResult = await rt.executor.execute({
+    const histResult = await rt.executor.execute({ taskId: "task_step", 
       tool: "data",
       input: { domain: "history", action: "search", query: "example" },
       client,
@@ -230,7 +230,7 @@ describe("unified regression fixes", () => {
     });
     const tab = await rt.ctx.getActiveTab();
     // move with a single tabId: windowId is derived from the tab itself.
-    const moved = await rt.executor.execute({
+    const moved = await rt.executor.execute({ taskId: "task_step", 
       tool: "tabs",
       input: { action: "move", tabId: tab!.id, index: 0 },
       client,
@@ -238,7 +238,7 @@ describe("unified regression fixes", () => {
     });
     expect((moved.result as { moved: number[] }).moved).toEqual([tab!.id]);
     // zoom uses the canonical zoom param (granular tabs.setZoom).
-    await rt.executor.execute({
+    await rt.executor.execute({ taskId: "task_step", 
       tool: "tabs",
       input: { action: "zoom", tabId: tab!.id, zoom: 1.5 },
       client,
@@ -248,7 +248,7 @@ describe("unified regression fixes", () => {
     // The old level spelling still works at handler level as an alias.
     const tabsHandler = rt.registry.require("tabs").handler as unknown as (input: unknown, exec: unknown) => Promise<unknown>;
     const invoke = async (name: string, payload: unknown) =>
-      (await rt.executor.execute({ tool: name, input: payload, client, ctx: rt.ctx })).result;
+      (await rt.executor.execute({ taskId: "task_step",  tool: name, input: payload, client, ctx: rt.ctx })).result;
     await tabsHandler(
       { action: "zoom", tabId: tab!.id, level: 2 },
       { ctx: rt.ctx, client, approvalValidated: true, signal: new AbortController().signal, runtime: {}, invoke },
@@ -268,7 +268,7 @@ describe("unified regression fixes", () => {
         bookmarks: [{ id: "b1", title: "Example bookmark", url: "https://example.com/bm", folder: "Bar" }],
       },
     });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "browser",
       input: { action: "search", query: "example" },
       client,
@@ -285,7 +285,7 @@ describe("unified regression fixes", () => {
     const rt = createTestRuntime();
     // screenshot needs approval in the default level, so that include fails
     // while metadata/text still succeed — and observe must not throw.
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "observe",
       input: { include: ["metadata", "text", "screenshot"] },
       client,
@@ -298,7 +298,7 @@ describe("unified regression fixes", () => {
     // executor strips it until the contracts delta lands.
     const handler = rt.registry.require("observe").handler as unknown as (input: unknown, exec: unknown) => Promise<unknown>;
     const invoke = async (name: string, payload: unknown) =>
-      (await rt.executor.execute({ tool: name, input: payload, client, ctx: rt.ctx })).result;
+      (await rt.executor.execute({ taskId: "task_step",  tool: name, input: payload, client, ctx: rt.ctx })).result;
     const direct = (await handler(
       { include: ["metadata", "text", "screenshot"], screenshotFormat: "jpeg", screenshotQuality: 60, maxChars: 8000, maxNodes: 200, maxDepth: 8, maxRows: 50, limit: 100, interactiveOnly: true, sameOriginOnly: false, attributes: [], includeScreenshot: false },
       { ctx: rt.ctx, client, approvalValidated: false, signal: new AbortController().signal, runtime: {}, invoke },
@@ -319,21 +319,21 @@ describe("unified regression fixes", () => {
         allowByRisk: { "read-only": true, reversible: true, "sensitive-read": true, consequential: true, restricted: false },
       },
     });
-    const coord = await rt.executor.execute({
+    const coord = await rt.executor.execute({ taskId: "task_step", 
       tool: "act",
       input: { steps: [{ do: "scroll", target: { x: 0, y: 100 } }] },
       client,
       ctx: rt.ctx,
     });
     expect((coord.result as { results: { ok: boolean }[] }).results[0].ok).toBe(true);
-    const direction = await rt.executor.execute({
+    const direction = await rt.executor.execute({ taskId: "task_step", 
       tool: "act",
       input: { steps: [{ do: "scroll", direction: "down", amount: 600, target: { selector: "body" } }] },
       client,
       ctx: rt.ctx,
     });
     expect((direction.result as { results: { ok: boolean }[] }).results[0].ok).toBe(true);
-    const intoView = await rt.executor.execute({
+    const intoView = await rt.executor.execute({ taskId: "task_step", 
       tool: "act",
       input: { steps: [{ do: "scroll_into_view", target: { selector: "#far" } }] },
       client,
@@ -356,7 +356,7 @@ describe("unified regression fixes", () => {
         ],
       },
     });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "navigate",
       input: { category: "tab", action: "organize", strategy: "titlePrefix" },
       client,
@@ -374,7 +374,7 @@ describe("unified regression fixes", () => {
       },
     });
     await expect(
-      rt.executor.execute({
+      rt.executor.execute({ taskId: "task_step", 
         tool: "form",
         input: {
           phase: "upload",

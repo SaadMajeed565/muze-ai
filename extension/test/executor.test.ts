@@ -89,7 +89,7 @@ describe("ToolExecutor pipeline", () => {
     const approval = rt.approvals.create({ tool: "clipboard.write", risk: "consequential", summary: "write", client: readClient, input: { text: "a" } });
     rt.approvals.approve(approval.id);
     await expectCode(
-      rt.executor.execute({ tool: "clipboard.write", input: { text: "b" }, client: readClient, ctx: rt.ctx, approvalId: approval.id }),
+      rt.executor.execute({ tool: "clipboard.write", input: { text: "b" }, client: readClient, ctx: rt.ctx, approvalId: approval.id, taskId: "task_step" }),
       "APPROVAL_DENIED",
     );
   });
@@ -147,15 +147,23 @@ describe("ToolExecutor pipeline", () => {
 
   it("rejects javascript: navigation before touching the browser", async () => {
     const rt = createTestRuntime();
-    await expectCode(rt.executor.execute({ tool: "tabs.navigate", input: { tabId: 1, url: "javascript:alert(1)" }, client: readClient, ctx: rt.ctx }), "INVALID_URL");
+    await expectCode(rt.executor.execute({ tool: "tabs.navigate", input: { tabId: 1, url: "javascript:alert(1)" }, client: readClient, ctx: rt.ctx, taskId: "task_step" }), "INVALID_URL");
   });
 
   it("dry-run describes without mutating", async () => {
     const rt = createTestRuntime({ policy: { allowByRisk: { "read-only": true, reversible: true, "sensitive-read": true, consequential: true, restricted: false } } });
     const before = rt.ctx.tabs.size;
-    const result = await rt.executor.execute({ tool: "tabs.create", input: { url: "https://example.org" }, client: readClient, ctx: rt.ctx, dryRun: true });
+    // A read dry run still describes without mutating…
+    const result = await rt.executor.execute({ tool: "tabs.list", input: {}, client: readClient, ctx: rt.ctx, dryRun: true });
     expect(result.dryRun).toBe(true);
     expect(rt.ctx.tabs.size).toBe(before);
+    // …but a dry-run action is still a direct action call, so the gate
+    // rejects it with TASK_REQUIRED instead of previewing it. Plan
+    // validation still has its dry-run path via tasks.create dryRun.
+    await expectCode(
+      rt.executor.execute({ tool: "tabs.create", input: { url: "https://example.org" }, client: readClient, ctx: rt.ctx, dryRun: true }),
+      "TASK_REQUIRED",
+    );
   });
 
   it("audits denials and executions", async () => {
@@ -188,10 +196,13 @@ describe("executor regression fixes", () => {
     // broker token (tabs.close is reversible and needs no approval under
     // the default policy, so it cannot prove this; form submit can).
     // The invoke wrapper forwards dryRun so requireLegacyApproval's probe
-    // stays a probe instead of executing the granular tool.
+    // stays a probe instead of executing the granular tool. It also
+    // carries nested, exactly like the executor's own invoke: probe
+    // calls are nested invokes, so the task-required gate (which
+    // exempts nested calls) does not reject them.
     const handler = rt.registry.require("form").handler as unknown as (input: unknown, exec: unknown) => Promise<unknown>;
     const invoke = async (name: string, payload: unknown, options?: { dryRun?: boolean }) =>
-      (await rt.executor.execute({ tool: name, input: payload, client: readClient, ctx: rt.ctx, dryRun: options?.dryRun })).result;
+      (await rt.executor.execute({ tool: name, input: payload, client: readClient, ctx: rt.ctx, dryRun: options?.dryRun, nested: true })).result;
     const exec = { ctx: rt.ctx, client: readClient, approvalValidated: false, signal: new AbortController().signal, runtime: {}, invoke };
     await expectCode(
       handler({ phase: "submit", formRef: "r1", confirmed: true }, exec),

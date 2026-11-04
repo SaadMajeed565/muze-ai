@@ -144,35 +144,34 @@ describe("timeline geometry", () => {
 });
 
 describe("executor activity emission", () => {
-  it("a direct tool call emits start + done with a redacted shape", async () => {
+  it("a direct action call is rejected with TASK_REQUIRED and emits nothing, leaking no input", async () => {
     const SECRET = "activity-secret-7f3a9c";
     const events: ActivityEvent[] = [];
     const rt = createTestRuntime({
       policy: { mode: "unrestricted" },
       onActivity: (e) => events.push(e),
     });
-    const result = await rt.executor.execute({
-      tool: "clipboard.write",
-      input: { text: SECRET },
-      client: readClient,
-      ctx: rt.ctx,
-    });
-    expect(result.dryRun).toBe(false);
-    expect(events).toHaveLength(2);
-    expect(events[0].state).toBe("running");
-    expect(events[1].state).toBe("done");
-    expect(events[0].id).toBe(events[1].id);
-    expect(events[0].tool).toBe("clipboard.write");
-    expect(events[0].summary).toBe("Used the clipboard");
-    // Exact event shape: nothing but what a timeline row needs.
-    for (const e of events) {
-      expect(Object.keys(e).sort()).toEqual(["at", "id", "kind", "state", "summary", "tool"]);
+    // Direct actions no longer execute at all, so there is no start +
+    // done pair to redact: the gate rejects before anything runs, and
+    // the rejection carries no input data. Emission shape for real
+    // executions is covered by the task-step test below.
+    let caught: unknown;
+    try {
+      await rt.executor.execute({
+        tool: "clipboard.write",
+        input: { text: SECRET },
+        client: readClient,
+        ctx: rt.ctx,
+      });
+      throw new Error("expected rejection");
+    } catch (error) {
+      caught = error;
     }
-    expect(events[0].kind).toBe("activity");
-    // No input or output data anywhere in the events.
-    expect(JSON.stringify(events)).not.toContain(SECRET);
-    expect(JSON.stringify(events)).not.toContain("input");
-    expect(JSON.stringify(events)).not.toContain("output");
+    expect(ToolErrorException.is(caught)).toBe(true);
+    expect((caught as ToolErrorException).code).toBe("TASK_REQUIRED");
+    expect(events).toHaveLength(0);
+    expect((caught as ToolErrorException).message).not.toContain(SECRET);
+    expect(JSON.stringify((caught as ToolErrorException).details ?? {})).not.toContain(SECRET);
   });
 
   it("a failed tool call resolves the same row to failed", async () => {

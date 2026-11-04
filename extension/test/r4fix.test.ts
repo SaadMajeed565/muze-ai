@@ -102,7 +102,7 @@ describe("r4fix: dom.dragAt falls back to synthetic only on CDP TIMEOUT", () => 
     cdp.drag = async () => {
       throw new ToolErrorException("TIMEOUT", "CDP input sequence did not complete within 15000ms");
     };
-    const result = await rt.executor.execute({ tool: "dom.dragAt", input: { x1: 1, y1: 2, x2: 30, y2: 40 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "dom.dragAt", input: { x1: 1, y1: 2, x2: 30, y2: 40 }, client, ctx: rt.ctx });
     expect(result.result).toEqual({ dragged: true, x1: 1, y1: 2, x2: 30, y2: 40, method: "synthetic" });
   });
 
@@ -113,7 +113,7 @@ describe("r4fix: dom.dragAt falls back to synthetic only on CDP TIMEOUT", () => 
       throw new ToolErrorException("NOT_FOUND", "No such tab");
     };
     await expect(
-      rt.executor.execute({ tool: "dom.dragAt", input: { x1: 1, y1: 2, x2: 30, y2: 40 }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "dom.dragAt", input: { x1: 1, y1: 2, x2: 30, y2: 40 }, client, ctx: rt.ctx }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });
@@ -153,7 +153,7 @@ describe("r4fix: WindowInfo tabCount", () => {
       { id: 1, index: 0, windowId: 42, active: true, pinned: false, highlighted: true, title: "A", url: "https://a.test/", status: "complete", groupId: -1, audible: false, discarded: false, incognito: false },
       { id: 2, index: 1, windowId: 42, active: false, pinned: false, highlighted: false, title: "B", url: "https://b.test/", status: "complete", groupId: -1, audible: false, discarded: false, incognito: false },
     ];
-    const result = await rt.executor.execute({ tool: "windows.list", input: {}, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "windows.list", input: {}, client, ctx: rt.ctx });
     expect((result.result as { windows: { tabCount: number }[] }).windows[0].tabCount).toBe(2);
   });
 });
@@ -172,7 +172,7 @@ describe("r4fix: clipboard restricted active tab gets its own error", () => {
     };
     let message = "";
     try {
-      await rt.executor.execute({ tool: "clipboard.read", input: {}, client, ctx: rt.ctx });
+      await rt.executor.execute({ taskId: "task_step",  tool: "clipboard.read", input: {}, client, ctx: rt.ctx });
       throw new Error("expected clipboard.read to throw");
     } catch (error) {
       message = String((error as Error).message);

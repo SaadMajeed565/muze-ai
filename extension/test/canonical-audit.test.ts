@@ -101,7 +101,7 @@ describe("canonical resolution (Tool Management Phase 1, section B)", () => {
       context: { tabs: [{ url: "https://a.test/", title: "A", active: true }, { url: "https://b.test/", title: "B" }] },
     });
     // One unified tabs.list call exhausts the tabs.list bucket (capacity 1).
-    await rt.executor.execute({
+    await rt.executor.execute({ taskId: "task_step", 
       tool: "tabs",
       input: { action: "list" },
       canonical: { tool: "tabs.list", input: {}, calledAs: "tabs" },
@@ -109,7 +109,7 @@ describe("canonical resolution (Tool Management Phase 1, section B)", () => {
       ctx: rt.ctx,
     });
     await expect(
-      rt.executor.execute({
+      rt.executor.execute({ taskId: "task_step", 
         tool: "tabs",
         input: { action: "list" },
         canonical: { tool: "tabs.list", input: {}, calledAs: "tabs" },
@@ -119,7 +119,7 @@ describe("canonical resolution (Tool Management Phase 1, section B)", () => {
     ).rejects.toMatchObject({ code: "RATE_LIMITED" });
     // tabs.close still has its own untouched bucket. The mock context's
     // first tab id is 1; closing it succeeds through the unified handler.
-    const closed = await rt.executor.execute({
+    const closed = await rt.executor.execute({ taskId: "task_step", 
       tool: "tabs",
       input: { action: "close", tabId: 1 },
       canonical: { tool: "tabs.close", input: { tabId: 1 }, calledAs: "tabs" },
@@ -130,19 +130,20 @@ describe("canonical resolution (Tool Management Phase 1, section B)", () => {
   });
 
   it("canonical audit: navigate.close, tabs.close, and granular tabs.close all record as tabs.close", async () => {
-    const calls: { tool: string; input: unknown }[] = [
-      { tool: "navigate", input: { category: "tab", action: "close", tabId: 1 } },
-      { tool: "tabs", input: { action: "close", tabId: 1 } },
+    // Direct bridge action calls are rejected by the task-required gate,
+    // so canonical audit naming is pinned at the executor level with
+    // the same canonical values the bridge used to resolve — this is
+    // the path a task step takes.
+    const calls: { tool: string; input: unknown; canonical?: { tool: string; input: unknown; calledAs: string } }[] = [
+      { tool: "navigate", input: { category: "tab", action: "close", tabId: 1 }, canonical: { tool: "tabs.close", input: { tabId: 1 }, calledAs: "navigate" } },
+      { tool: "tabs", input: { action: "close", tabId: 1 }, canonical: { tool: "tabs.close", input: { tabId: 1 }, calledAs: "tabs" } },
       { tool: "tabs.close", input: { tabId: 1 } },
     ];
     for (const call of calls) {
       // Fresh runtime per call (closing consumes the tab); the default
       // mock context has one tab with id 1, which is the tab closed here.
-      const { rt, transport, handler } = setup();
-      await handler.handle({ type: "hello", id: "h", protocolVersion: PROTOCOL_VERSION, client: TEST_CLIENT });
-      await handler.handle({ type: "tool.call", id: "t1", tool: call.tool, input: call.input });
-      const result = transport.lastOf("tool.result");
-      expect(result).toBeTruthy();
+      const { rt } = setup();
+      await rt.executor.execute({ tool: call.tool, input: call.input, canonical: call.canonical, client: TEST_CLIENT, ctx: rt.ctx, taskId: "task_step" });
       const tools = rt.audit.list(100).map((e) => e.tool);
       expect(tools.length).toBeGreaterThan(0);
       // Every audit event for this call names the canonical tool; the
@@ -160,15 +161,23 @@ describe("canonical resolution (Tool Management Phase 1, section B)", () => {
   });
 
   it("canonical audit: data.delete on bookmarks audits as bookmarks.delete, not data", async () => {
-    const { rt, transport, handler } = setup({
+    // Same executor-level conversion as above: the bridge action path
+    // is gated, so the canonical audit assertions run as a task step.
+    const { rt } = setup({
       bookmarks: [{ id: "b1", title: "Example bookmark", url: "https://example.com/bm", folder: "Bar" }],
     });
-    await handler.handle({ type: "hello", id: "h", protocolVersion: PROTOCOL_VERSION, client: TEST_CLIENT });
     // Without approval the unified data.delete call is refused, and even
     // the refusal is audited under the canonical tool.
-    await handler.handle({ type: "tool.call", id: "t1", tool: "data", input: { domain: "bookmarks", action: "delete", id: "b1" } });
-    const error = transport.lastOf("tool.error") as { error: { code: string } };
-    expect(error.error.code).toBe("APPROVAL_REQUIRED");
+    await expect(
+      rt.executor.execute({
+        tool: "data",
+        input: { domain: "bookmarks", action: "delete", id: "b1" },
+        canonical: { tool: "bookmarks.delete", input: { id: "b1" }, calledAs: "data" },
+        client: TEST_CLIENT,
+        ctx: rt.ctx,
+        taskId: "task_step",
+      }),
+    ).rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
     const tools = rt.audit.list(100).map((e) => e.tool);
     expect(tools).not.toContain("data");
     expect(tools).toContain("bookmarks.delete");
@@ -181,45 +190,81 @@ describe("canonical resolution (Tool Management Phase 1, section B)", () => {
     // `{ deleted: true, id }`, which made this call fail output validation
     // even though the bookmark was deleted; Phase 1 integration fixed the
     // unified output to accept boolean or number, so the call now
-    // returns tool.result as well.
-    const approvalId = await requestApproval(handler, transport, "data", { domain: "bookmarks", action: "delete", id: "b1" });
-    const requested = transport.lastOf("approval.requested") as { approval: { tool: string; calledAs?: string } };
-    expect(requested.approval.tool).toBe("bookmarks.delete");
-    expect(requested.approval.calledAs).toBe("data");
-    await handler.handle({ type: "approval.respond", id: "a2", approvalId, approved: true });
-    await handler.handle({ type: "tool.call", id: "t2", tool: "data", input: { domain: "bookmarks", action: "delete", id: "b1" }, approvalId });
-    const finalResult = transport.lastOf("tool.result") as { result?: { deleted?: unknown; id?: unknown } };
-    expect(finalResult.result?.deleted).toBe(true);
-    expect(finalResult.result?.id).toBe("b1");
+    // returns a result as well.
+    const approval = rt.approvals.create({ tool: "bookmarks.delete", risk: "consequential", summary: "delete bookmark", client: TEST_CLIENT, input: { id: "b1" } });
+    rt.approvals.approve(approval.id);
+    const finalResult = await rt.executor.execute({
+      tool: "data",
+      input: { domain: "bookmarks", action: "delete", id: "b1" },
+      canonical: { tool: "bookmarks.delete", input: { id: "b1" }, calledAs: "data" },
+      client: TEST_CLIENT,
+      ctx: rt.ctx,
+      taskId: "task_step",
+      approvalId: approval.id,
+    });
+    expect((finalResult.result as { deleted?: unknown; id?: unknown }).deleted).toBe(true);
+    expect((finalResult.result as { deleted?: unknown; id?: unknown }).id).toBe("b1");
     expect(rt.ctx.bookmarksStore.find((b) => b.id === "b1")).toBeUndefined();
     expect(rt.audit.list(100).map((e) => e.tool)).not.toContain("data");
     expect(rt.audit.list(100).some((e) => e.tool === "bookmarks.delete" && e.decision === "executed")).toBe(true);
   });
 
   it("approval isolation: an approval granted for tabs.list does not authorise tabs.close, and vice versa", async () => {
-    const { transport, handler } = setup();
-    await handler.handle({ type: "hello", id: "h", protocolVersion: PROTOCOL_VERSION, client: TEST_CLIENT });
+    // Execution assertions converted to the executor level (bridge
+    // action calls are gated); the approval-request canonicalization
+    // (tool + calledAs) is pinned separately at the bridge level below,
+    // because approval requests do not execute and the gate does not
+    // apply to them.
+    const { rt } = setup();
 
-    // Approval for the list action, created through the unified name.
-    const listApproval = await requestApproval(handler, transport, "tabs", { action: "list" });
-    const listRequested = transport.lastOf("approval.requested") as { approval: { tool: string; calledAs?: string } };
-    expect(listRequested.approval.tool).toBe("tabs.list");
-    expect(listRequested.approval.calledAs).toBe("tabs");
-    await handler.handle({ type: "approval.respond", id: "a2", approvalId: listApproval, approved: true });
+    // Approval for the list action.
+    const listApproval = rt.approvals.create({ tool: "tabs.list", risk: "read-only", summary: "list tabs", client: TEST_CLIENT, input: {} });
+    rt.approvals.approve(listApproval.id);
 
     // Presenting the list approval on a close call must fail: the broker
     // fingerprint binds granular tool + canonical input + client, and
     // tabs.close + {tabId: 1} is not tabs.list + {}.
-    await handler.handle({ type: "tool.call", id: "t-close", tool: "tabs", input: { action: "close", tabId: 1 }, approvalId: listApproval });
-    const closeError = transport.lastOf("tool.error") as { error: { code: string } };
-    expect(closeError.error.code).toBe("APPROVAL_DENIED");
+    await expect(
+      rt.executor.execute({
+        tool: "tabs",
+        input: { action: "close", tabId: 1 },
+        canonical: { tool: "tabs.close", input: { tabId: 1 }, calledAs: "tabs" },
+        client: TEST_CLIENT,
+        ctx: rt.ctx,
+        taskId: "task_step",
+        approvalId: listApproval.id,
+      }),
+    ).rejects.toMatchObject({ code: "APPROVAL_DENIED" });
 
     // And the reverse: a close approval does not authorise a list call.
-    const closeApproval = await requestApproval(handler, transport, "tabs", { action: "close", tabId: 1 });
-    await handler.handle({ type: "approval.respond", id: "a3", approvalId: closeApproval, approved: true });
-    await handler.handle({ type: "tool.call", id: "t-list", tool: "tabs", input: { action: "list" }, approvalId: closeApproval });
-    const listError = transport.lastOf("tool.error") as { error: { code: string } };
-    expect(listError.error.code).toBe("APPROVAL_DENIED");
+    const closeApproval = rt.approvals.create({ tool: "tabs.close", risk: "reversible", summary: "close tab", client: TEST_CLIENT, input: { tabId: 1 } });
+    rt.approvals.approve(closeApproval.id);
+    await expect(
+      rt.executor.execute({
+        tool: "tabs",
+        input: { action: "list" },
+        canonical: { tool: "tabs.list", input: {}, calledAs: "tabs" },
+        client: TEST_CLIENT,
+        ctx: rt.ctx,
+        taskId: "task_step",
+        approvalId: closeApproval.id,
+      }),
+    ).rejects.toMatchObject({ code: "APPROVAL_DENIED" });
+  });
+
+  it("bridge approval requests canonicalize unified names without executing", async () => {
+    const { transport, handler } = setup();
+    await handler.handle({ type: "hello", id: "h", protocolVersion: PROTOCOL_VERSION, client: TEST_CLIENT });
+
+    await requestApproval(handler, transport, "tabs", { action: "list" });
+    const listRequested = transport.lastOf("approval.requested") as { approval: { tool: string; calledAs?: string } };
+    expect(listRequested.approval.tool).toBe("tabs.list");
+    expect(listRequested.approval.calledAs).toBe("tabs");
+
+    await requestApproval(handler, transport, "tabs", { action: "close", tabId: 1 });
+    const closeRequested = transport.lastOf("approval.requested") as { approval: { tool: string; calledAs?: string } };
+    expect(closeRequested.approval.tool).toBe("tabs.close");
+    expect(closeRequested.approval.calledAs).toBe("tabs");
   });
 
   it("batch: a unified read item is allowed and a unified non-read item is refused as before", async () => {

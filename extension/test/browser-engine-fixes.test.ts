@@ -252,7 +252,7 @@ describe("coordinate typing (dom.typeAt / dom.pressAt)", () => {
   it("types into the visible element at the point and verifies the text landed", async () => {
     const input = seedInput();
     const rt = createTestRuntime();
-    const result = await rt.executor.execute({ tool: "dom.typeAt", input: { x: 20, y: 30, text: "hello" }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "dom.typeAt", input: { x: 20, y: 30, text: "hello" }, client, ctx: rt.ctx });
     expect(result.result).toMatchObject({ typed: true, method: "synthetic" });
     expect(input.value).toBe("hello");
   });
@@ -261,14 +261,14 @@ describe("coordinate typing (dom.typeAt / dom.pressAt)", () => {
     seedInput(true);
     const rt = createTestRuntime();
     await expect(
-      rt.executor.execute({ tool: "dom.typeAt", input: { x: 20, y: 30, text: "hello" }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "dom.typeAt", input: { x: 20, y: 30, text: "hello" }, client, ctx: rt.ctx }),
     ).rejects.toThrow("target is hidden");
   });
 
   it("presses a key on the element at the point without a ref", async () => {
     seedInput();
     const rt = createTestRuntime();
-    const result = await rt.executor.execute({ tool: "dom.pressAt", input: { x: 20, y: 30, key: "Escape" }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "dom.pressAt", input: { x: 20, y: 30, key: "Escape" }, client, ctx: rt.ctx });
     expect(result.result).toMatchObject({ pressed: true, method: "synthetic" });
   });
 });
@@ -285,25 +285,25 @@ describe("dom.click TIMEOUT-only synthetic fallback", () => {
   it("falls back to synthetic on a CDP TIMEOUT and reports method synthetic", async () => {
     seedButton();
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#b" }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "selector", value: "#b" }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
     (rt.ctx.cdp as unknown as Record<string, unknown>).click = async () => {
       throw new ToolErrorException("TIMEOUT", "CDP input sequence did not complete within 15000ms");
     };
-    const result = await rt.executor.execute({ tool: "dom.click", input: { ref, button: "left" }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "dom.click", input: { ref, button: "left" }, client, ctx: rt.ctx });
     expect(result.result).toMatchObject({ clicked: true, method: "synthetic" });
   });
 
   it("still throws non-timeout CDP failures instead of masking them", async () => {
     seedButton();
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
-    const found = await rt.executor.execute({ tool: "dom.find", input: { by: "selector", value: "#b" }, client, ctx: rt.ctx });
+    const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "selector", value: "#b" }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
     (rt.ctx.cdp as unknown as Record<string, unknown>).click = async () => {
       throw new ToolErrorException("INTERNAL", "debugger detached");
     };
     await expect(
-      rt.executor.execute({ tool: "dom.click", input: { ref, button: "left" }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "dom.click", input: { ref, button: "left" }, client, ctx: rt.ctx }),
     ).rejects.toThrow("debugger detached");
   });
 });

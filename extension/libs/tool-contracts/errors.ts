@@ -18,10 +18,21 @@ export const TOOL_ERROR_CODES = [
   "UNSUPPORTED",
   "CONFLICT",
   "KILL_SWITCH",
+  "TASK_REQUIRED",
   "INTERNAL",
 ] as const;
 
 export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
+
+/**
+ * The single teachable task-required message, shared by the extension
+ * executor gate and the gateway batch gate (this file is synced into
+ * cloudflare/libs, so both sides use this exact sentence). A rejected
+ * call never executes, emits no activity row, and consumes no approval
+ * budget; the message tells the caller the one fix: create the task.
+ */
+export const TASK_REQUIRED_MESSAGE =
+  "Direct action calls are not accepted. Call tasks.create first with a concise action-first title and the steps as the plan, then let the task run. Single read-only observations do not require a task.";
 
 export interface ToolError {
   code: ToolErrorCode;

@@ -64,7 +64,7 @@ describe("tab and window tools", () => {
     const b = rt.ctx.addTab({ url: "https://b.test/" });
     await rt.ctx.groupTabs([a.id!, b.id!], { title: "Work" });
 
-    const result = await rt.executor.execute({ tool: "tabs.ungroup", input: { tabIds: [a.id!] }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "tabs.ungroup", input: { tabIds: [a.id!] }, client, ctx: rt.ctx });
     expect(result.result).toEqual({ ungrouped: [a.id] });
     expect((await rt.ctx.getTab(a.id!)).groupId).toBe(-1);
   });
@@ -72,14 +72,14 @@ describe("tab and window tools", () => {
   it("mutes and unmutes a tab", async () => {
     const rt = createTestRuntime({ policy: open });
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    await rt.executor.execute({ tool: "tabs.mute", input: { tabId: tab.id!, muted: true }, client, ctx: rt.ctx });
+    await rt.executor.execute({ taskId: "task_step",  tool: "tabs.mute", input: { tabId: tab.id!, muted: true }, client, ctx: rt.ctx });
     expect((await rt.ctx.getTab(tab.id!)).audible).toBe(false);
   });
 
   it("sets the zoom level of a tab", async () => {
     const rt = createTestRuntime({ policy: open });
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    const result = await rt.executor.execute({ tool: "tabs.setZoom", input: { tabId: tab.id!, zoom: 1.5 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "tabs.setZoom", input: { tabId: tab.id!, zoom: 1.5 }, client, ctx: rt.ctx });
     expect(result.result).toEqual({ tabId: tab.id!, zoom: 1.5 });
     expect((await rt.ctx.getTab(tab.id!)).zoom).toBe(1.5);
   });
@@ -87,7 +87,7 @@ describe("tab and window tools", () => {
   it("discards a tab", async () => {
     const rt = createTestRuntime({ policy: open });
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    const result = await rt.executor.execute({ tool: "tabs.discard", input: { tabId: tab.id! }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "tabs.discard", input: { tabId: tab.id! }, client, ctx: rt.ctx });
     expect(result.result).toEqual({ discarded: true, tabId: tab.id! });
     expect((await rt.ctx.getTab(tab.id!)).discarded).toBe(true);
   });
@@ -95,7 +95,7 @@ describe("tab and window tools", () => {
   it("closes a window and its tabs", async () => {
     const rt = createTestRuntime({ policy: open });
     const tab = rt.ctx.addTab({ url: "https://a.test/", windowId: 1 });
-    const result = await rt.executor.execute({ tool: "windows.close", input: { windowId: 1 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "windows.close", input: { windowId: 1 }, client, ctx: rt.ctx });
     expect(result.result).toEqual({ closed: true, windowId: 1 });
     expect(rt.ctx.tabs.has(tab.id!)).toBe(false);
   });
@@ -107,20 +107,20 @@ describe("bookmark and history tools", () => {
       policy: open,
       context: { bookmarks: [{ id: "bm1", title: "Doc", url: "https://x.test/", folder: "Bookmarks bar" }] },
     });
-    const result = await rt.executor.execute({ tool: "bookmarks.move", input: { id: "bm1", parentId: "folder2" }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "bookmarks.move", input: { id: "bm1", parentId: "folder2" }, client, ctx: rt.ctx });
     expect((result.result as { bookmark: { parentId?: string } }).bookmark.parentId).toBe("folder2");
   });
 
   it("creates a bookmark folder", async () => {
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({ tool: "bookmarks.createFolder", input: { title: "Reading" }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "bookmarks.createFolder", input: { title: "Reading" }, client, ctx: rt.ctx });
     expect((result.result as { folder: { title: string } }).folder.title).toBe("Reading");
     expect(rt.ctx.createdFolders).toHaveLength(1);
   });
 
   it("adds a history entry", async () => {
     const rt = createTestRuntime({ policy: open });
-    await rt.executor.execute({ tool: "history.add", input: { url: "https://x.test/", title: "X" }, client, ctx: rt.ctx });
+    await rt.executor.execute({ taskId: "task_step",  tool: "history.add", input: { url: "https://x.test/", title: "X" }, client, ctx: rt.ctx });
     expect(rt.ctx.historyStore).toHaveLength(1);
     expect(rt.ctx.historyStore[0].url).toBe("https://x.test/");
   });
@@ -135,7 +135,7 @@ describe("bookmark and history tools", () => {
         ],
       },
     });
-    const result = await rt.executor.execute({ tool: "downloads.erase", input: { ids: [1] }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "downloads.erase", input: { ids: [1] }, client, ctx: rt.ctx });
     expect(result.result).toEqual({ erased: 1 });
     expect(rt.ctx.downloadsStore).toHaveLength(1);
   });
@@ -151,7 +151,7 @@ describe("browser search", () => {
         tabs: [{ url: "https://tab.test/", title: "Tab hit" }],
       },
     });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "browser.search",
       input: { query: "hit", includeHistory: true, includeBookmarks: true, includeTabs: true },
       client,
@@ -169,7 +169,7 @@ describe("browser search", () => {
         bookmarks: [{ id: "bm1", title: "Bookmark hit", url: "https://bookmark.test/", folder: "Bookmarks bar" }],
       },
     });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "browser.search",
       input: { query: "hit", includeHistory: true, includeBookmarks: true, includeTabs: false },
       client,
@@ -189,14 +189,14 @@ describe("page and dom tools", () => {
     host.attachShadow({ mode: "open" }).innerHTML = "<span>x</span>";
 
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({ tool: "dom.shadow", input: { maxDepth: 3 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "dom.shadow", input: { maxDepth: 3 }, client, ctx: rt.ctx });
     expect(JSON.stringify(result.result)).toContain("host");
   });
 
   it("builds an accessibility tree of the page", async () => {
     document.body.innerHTML = `<button aria-label="Send">Send</button><a href="https://x.test/">Link</a>`;
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "page.accessibilityTree",
       input: { maxNodes: 50, maxDepth: 5, interactiveOnly: true },
       client,
@@ -223,7 +223,7 @@ describe("page and dom tools", () => {
       { frameId: 2, result: { url: "https://grandchild.test/", title: "Grandchild" } },
     ]) as unknown as typeof rt.ctx.executeInFrames;
 
-    const result = await rt.executor.execute({ tool: "frames.list", input: { tabId: tab.id }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "frames.list", input: { tabId: tab.id }, client, ctx: rt.ctx });
     const frames = (result.result as { frames: { frameId: number; parentFrameId: number; depth: number }[] }).frames;
     expect(frames.map((f) => f.depth)).toEqual([0, 1, 2]);
     expect(frames.map((f) => f.parentFrameId)).toEqual([-1, 0, 1]);
@@ -231,7 +231,7 @@ describe("page and dom tools", () => {
 
   it("reports the browser capabilities that are available", async () => {
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({ tool: "browser.capabilities", input: {}, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "browser.capabilities", input: {}, client, ctx: rt.ctx });
     const capabilities = (result.result as { capabilities: string[] }).capabilities;
     expect(capabilities).toContain("tabs");
     expect(capabilities).toContain("downloads");
@@ -240,7 +240,7 @@ describe("page and dom tools", () => {
 
   it("reports the browser version and locale", async () => {
     const rt = createTestRuntime({ policy: open });
-    const result = await rt.executor.execute({ tool: "browser.info", input: {}, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "browser.info", input: {}, client, ctx: rt.ctx });
     const info = result.result as { browserVersion: string; locale: string; timeZone: string };
     expect(info.browserVersion).toBe("120.0.0");
     expect(info.locale).toBe("en-GB");
@@ -249,7 +249,7 @@ describe("page and dom tools", () => {
   it("keeps a download inside the download folder", async () => {
     const rt = createTestRuntime({ policy: open });
     const result = await rt.executor.execute(
-      { tool: "downloads.start", input: { url: "https://x.test/a.zip", filename: "report.zip", directory: "reports" }, client, ctx: rt.ctx },
+      { taskId: "task_step",  tool: "downloads.start", input: { url: "https://x.test/a.zip", filename: "report.zip", directory: "reports" }, client, ctx: rt.ctx },
     );
     expect(result.result).toMatchObject({ filename: "reports/report.zip" });
   });
@@ -258,7 +258,7 @@ describe("page and dom tools", () => {
     const rt = createTestRuntime({ policy: open });
     await expect(
       rt.executor.execute(
-        { tool: "downloads.start", input: { url: "https://x.test/a.zip", filename: "../escape.zip" }, client, ctx: rt.ctx },
+        { taskId: "task_step",  tool: "downloads.start", input: { url: "https://x.test/a.zip", filename: "../escape.zip" }, client, ctx: rt.ctx },
       ),
     ).rejects.toThrow(/download folder/);
   });
@@ -267,7 +267,7 @@ describe("page and dom tools", () => {
     const rt = createTestRuntime({ policy: open });
     await expect(
       rt.executor.execute(
-        { tool: "downloads.start", input: { url: "https://x.test/a.zip", filename: "/etc/passwd" }, client, ctx: rt.ctx },
+        { taskId: "task_step",  tool: "downloads.start", input: { url: "https://x.test/a.zip", filename: "/etc/passwd" }, client, ctx: rt.ctx },
       ),
     ).rejects.toThrow(/download folder/);
   });
@@ -279,7 +279,7 @@ describe("page and dom tools", () => {
       dialogs: [{ id: "d1", type: "confirm", message: "Delete it?", at: new Date().toISOString(), answered: "dismiss" }],
     });
 
-    const result = await rt.executor.execute({ tool: "page.dialogs", input: { tabId: tab.id, limit: 5 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "page.dialogs", input: { tabId: tab.id, limit: 5 }, client, ctx: rt.ctx });
     const out = result.result as { attached: boolean; dialogs: { id: string; message: string }[] };
     expect(out.attached).toBe(true);
     expect(out.dialogs).toHaveLength(1);
@@ -294,7 +294,7 @@ describe("page and dom tools", () => {
     });
 
     const result = await rt.executor.execute(
-      { tool: "page.respondDialog", input: { tabId: tab.id, response: "accept" }, client, ctx: rt.ctx },
+      { taskId: "task_step",  tool: "page.respondDialog", input: { tabId: tab.id, response: "accept" }, client, ctx: rt.ctx },
     );
     expect(result.result).toMatchObject({ applied: true, response: "accept" });
     expect(rt.ctx.observerStore.get(tab.id!)!.dialogs[0].answered).toBe("accept");
@@ -315,7 +315,7 @@ describe("browser search and file cap regressions", () => {
     const handler = rt.registry.require("browser.search").handler as unknown as (input: unknown, exec: unknown) => Promise<unknown>;
     const invoke = async (name: string, payload: unknown) => {
       if (name === "history.search") throw new Error("history denied");
-      return (await rt.executor.execute({ tool: name, input: payload, client, ctx: rt.ctx })).result;
+      return (await rt.executor.execute({ taskId: "task_step",  tool: name, input: payload, client, ctx: rt.ctx })).result;
     };
     const result = (await handler(
       { query: "example", limit: 20, includeHistory: true, includeBookmarks: true, includeTabs: true },
@@ -329,7 +329,7 @@ describe("browser search and file cap regressions", () => {
   it("states the forms.upload cap in base64 characters, not a mismatched MB figure", async () => {
     const rt = createTestRuntime({ policy: open });
     await expect(
-      rt.executor.execute({
+      rt.executor.execute({ taskId: "task_step", 
         tool: "forms.upload",
         input: {
           ref: "r1",

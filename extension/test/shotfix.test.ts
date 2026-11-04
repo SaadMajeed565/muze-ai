@@ -46,7 +46,7 @@ describe("shotfix: forms.setFile target (selector vs ref)", () => {
     const seen: unknown[] = [];
     stubPageOps(rt, seen);
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    const result = await rt.executor.execute({ tool: "forms.setFile", input: { tabId: tab.id, ref: "r1", files: INLINE }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "forms.setFile", input: { tabId: tab.id, ref: "r1", files: INLINE }, client, ctx: rt.ctx });
     expect((result.result as { set: boolean }).set).toBe(true);
     const op = seen.find((o) => (o as { op?: string }).op === "setFileByRef") as { op: string; ref: string } | undefined;
     expect(op).toBeDefined();
@@ -59,7 +59,7 @@ describe("shotfix: forms.setFile target (selector vs ref)", () => {
     const seen: unknown[] = [];
     stubPageOps(rt, seen);
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    await rt.executor.execute({ tool: "forms.setFile", input: { tabId: tab.id, selector: "input[type=file]", files: INLINE }, client, ctx: rt.ctx });
+    await rt.executor.execute({ taskId: "task_step",  tool: "forms.setFile", input: { tabId: tab.id, selector: "input[type=file]", files: INLINE }, client, ctx: rt.ctx });
     const op = seen.find((o) => (o as { op?: string }).op === "setFile") as { selector: string } | undefined;
     expect(op?.selector).toBe("input[type=file]");
   });
@@ -70,7 +70,7 @@ describe("shotfix: forms.setFile target (selector vs ref)", () => {
     stubPageOps(rt, seen);
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
     await expect(
-      rt.executor.execute({ tool: "forms.setFile", input: { tabId: tab.id, ref: "r-gone", files: INLINE }, client, ctx: rt.ctx }),
+      rt.executor.execute({ taskId: "task_step",  tool: "forms.setFile", input: { tabId: tab.id, ref: "r-gone", files: INLINE }, client, ctx: rt.ctx }),
     ).rejects.toThrow(/STALE_ELEMENT/);
     // The stale ref was presented as-is to the registry lookup; it was
     // never rewritten into a selector query for a different element.
@@ -84,7 +84,7 @@ describe("shotfix: inline files through unified form / submit (the dropped-files
     const seen: unknown[] = [];
     stubPageOps(rt, seen);
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "form",
       input: { phase: "set_file", tabId: tab.id, selector: "input[type=file]", files: INLINE },
       client,
@@ -101,7 +101,7 @@ describe("shotfix: inline files through unified form / submit (the dropped-files
     // No planApproved token: the handler's dry-run approval gate must run
     // (this is the live path for auto-approved sessions), and it must not
     // fail validation on the inline files it is supposed to gate.
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "submit",
       input: { action: "set_file", tabId: tab.id, ref: "r1", files: INLINE },
       client,
@@ -120,7 +120,7 @@ describe("shotfix: inline files through unified form / submit (the dropped-files
     const seen: unknown[] = [];
     stubPageOps(rt, seen);
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    const result = await rt.executor.execute({
+    const result = await rt.executor.execute({ taskId: "task_step", 
       tool: "submit",
       input: { action: "set_file", tabId: tab.id, selector: "input[type=file]", files: INLINE },
       client,
@@ -136,7 +136,7 @@ describe("shotfix: screenshots.visible uses one CDP clip path for active and bac
     const seen: unknown[] = [];
     stubPageOps(rt, seen);
     const tab = rt.ctx.addTab({ url: "https://a.test/" });
-    const result = await rt.executor.execute({ tool: "screenshots.visible", input: { tabId: tab.id, format: "png", quality: 80 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "screenshots.visible", input: { tabId: tab.id, format: "png", quality: 80 }, client, ctx: rt.ctx });
     expect((result.result as { dataUrl: string }).dataUrl).toContain("mockcdp");
     expect(result.result).toMatchObject({ width: 1600, height: 1200 });
     const clipCall = rt.ctx.cdpCalls.find((c) => c.method === "captureScreenshot");
@@ -152,7 +152,7 @@ describe("shotfix: screenshots.visible uses one CDP clip path for active and bac
     (rt.ctx.cdp as unknown as Record<string, unknown>).captureScreenshot = async () => {
       throw new ToolErrorException("TIMEOUT", "CDP input sequence did not complete within 15000ms");
     };
-    const fallback = await rt.executor.execute({ tool: "screenshots.visible", input: { tabId: tab.id, format: "png", quality: 80 }, client, ctx: rt.ctx });
+    const fallback = await rt.executor.execute({ taskId: "task_step",  tool: "screenshots.visible", input: { tabId: tab.id, format: "png", quality: 80 }, client, ctx: rt.ctx });
     expect((fallback.result as { dataUrl: string }).dataUrl).toContain("AAAA");
     expect(rt.ctx.capturedScreenshots).toBe(1);
 
@@ -163,7 +163,7 @@ describe("shotfix: screenshots.visible uses one CDP clip path for active and bac
       throw new Error("debugger attach failed");
     };
     await expect(
-      rt2.executor.execute({ tool: "screenshots.visible", input: { tabId: tab2.id, format: "png", quality: 80 }, client, ctx: rt2.ctx }),
+      rt2.executor.execute({ taskId: "task_step",  tool: "screenshots.visible", input: { tabId: tab2.id, format: "png", quality: 80 }, client, ctx: rt2.ctx }),
     ).rejects.toThrow(/debugger attach failed/);
     expect(rt2.ctx.capturedScreenshots).toBe(0);
   });
@@ -203,7 +203,7 @@ describe("shotfix: full-page capture is bounded before any slice is taken", () =
       partial: true,
       partialReason: "Full-page capture capped at 6400 of 30000 CSS px",
     });
-    const result = await rt.executor.execute({ tool: "screenshots.fullPage", input: { tabId: tab.id, maxHeight: 12_000, format: "png", quality: 80 }, client, ctx: rt.ctx });
+    const result = await rt.executor.execute({ taskId: "task_step",  tool: "screenshots.fullPage", input: { tabId: tab.id, maxHeight: 12_000, format: "png", quality: 80 }, client, ctx: rt.ctx });
     expect(result.result).toMatchObject({ partial: true, pages: 10 });
     expect((result.result as { partialReason: string }).partialReason).toMatch(/capped/);
   });

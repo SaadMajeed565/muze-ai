@@ -1,4 +1,4 @@
-import { ToolErrorException, deprecatedUnifiedAction, toToolError, toolRequiresApproval, type ClientIdentity, type ToolDefinition } from "../tool-contracts/index.js";
+import { TASK_REQUIRED_MESSAGE, ToolErrorException, deprecatedUnifiedAction, toToolError, toolRequiresApproval, type ClientIdentity, type ToolDefinition } from "../tool-contracts/index.js";
 import { activityVerb, type ActivityEvent, type ActivityState } from "../activity.js";
 import { validateNavigableUrl, type ApprovalBroker, type AuditLog, type PolicyEngine, type PolicyTarget, type RateLimiter } from "../security/index.js";
 import type { BrowserContext } from "./context.js";
@@ -144,6 +144,26 @@ export class ToolExecutor {
   }
 
   /**
+   * Effective risk for the task-required gate. A resolved unified call
+   * is judged by its granular tool's risk — the same canonicalisation
+   * the approval path uses — so a unified read (navigate list) passes
+   * while the same unified name's action (navigate create) is
+   * rejected. Delay waits have no granular target (local:abortableDelay
+   * in the action-risk table, marked restricted), so they are detected
+   * from the parsed input instead. Anything unresolvable falls back to
+   * the called tool's own risk, which can only deny, never widen.
+   */
+  private taskGateRisk(tool: { name: string; risk: string }, options: ExecuteOptions, input: unknown): string {
+    if (options.canonical) {
+      const granular = this.deps.registry.get(options.canonical.tool);
+      if (granular) return granular.risk;
+    }
+    const rec = (input ?? {}) as Record<string, unknown>;
+    if (rec.for === "delay" && (tool.name === "wait" || tool.name === "navigate")) return "restricted";
+    return tool.risk;
+  }
+
+  /**
    * Policy version key for the runtime cache. Prefer PolicyEngine.getVersion()
    * when another section adds it (it increments on every mutation); until
    * then fall back to a hash of the full policy config JSON, which changes
@@ -223,6 +243,36 @@ export class ToolExecutor {
         details: withCalledAs({ reason: decision.reason }),
       });
       throw new ToolErrorException("PERMISSION_DENIED", decision.reason, { details: { tool: auditTool } });
+    }
+
+    // 3b. Task-required gate (enforcement): a direct call is ONLY a
+    // single read-only observation. A top-level call with no owning
+    // task (no taskId), that is not an internal housekeeping call and
+    // not a nested invoke, may only execute read-only or
+    // sensitive-read tools. Anything else — reversible, consequential,
+    // restricted — is rejected here with TASK_REQUIRED, before dry
+    // runs, approval, rate limiting, activity, or execution, so a
+    // rejected call consumes no approval budget and leaves no row.
+    // Task-runner steps carry taskId, internal observes carry
+    // internal, and handler sub-invokes carry nested, so all three
+    // bypass this gate; their parent call was already gated or is
+    // itself a task step. A rejected call is audited as denied, like
+    // every other pre-execution rejection.
+    if (options.taskId === undefined && !options.internal && !options.nested) {
+      const effectiveRisk = this.taskGateRisk(tool, options, input);
+      if (effectiveRisk !== "read-only" && effectiveRisk !== "sensitive-read") {
+        this.deps.audit.record({
+          kind: "tool.call",
+          tool: auditTool,
+          client: options.client,
+          risk: tool.risk,
+          decision: "denied",
+          details: withCalledAs({ reason: "task_required" }),
+        });
+        throw new ToolErrorException("TASK_REQUIRED", TASK_REQUIRED_MESSAGE, {
+          details: { tool: auditTool, risk: effectiveRisk, ...(calledAs ? { calledAs } : {}) },
+        });
+      }
     }
 
     // 4. Dry run: describe without mutating.
