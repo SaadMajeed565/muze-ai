@@ -552,9 +552,18 @@ export function searchTools(
     taskType: options.taskType,
     health: options.health,
   });
+  // Bare "tasks" browse queries tie on score and fall to alphabetical
+  // order, which buries tasks.create third (and the default limit 6 cuts
+  // tasks.resume entirely). The tasks entry point leads for this query;
+  // other queries are untouched.
+  const terms = query.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const orderedResults =
+    terms.length === 1 && terms[0] === "tasks" && results.some((r) => r.name === "tasks.create")
+      ? [results.find((r) => r.name === "tasks.create")!, ...results.filter((r) => r.name !== "tasks.create")]
+      : results;
   void totalAvailable;
   void grouped;
-  return results.map((result) => {
+  return orderedResults.map((result) => {
     const descriptor = SEARCH_DESCRIPTORS.find((d) => d.name === result.name);
     return {
       name: result.name,
@@ -1219,7 +1228,30 @@ export function createGatewayMcpServer(
     // the current list (extension authority preserved), then apply the
     // documented conservative ListTools cap (core first) unless show-all
     // was explicitly requested.
+    //
+    // Tasks union: the live extension list structurally cannot contain
+    // tasks tools — registry.list returns unified tools only
+    // (legacyTools: false in production), and tasks.* are host-protocol
+    // tools, not ToolRegistry entries. Without this union, a connected
+    // session's first ListTools has no tasks tools at all: the AI reads
+    // "use tasks.create" in the instructions but never sees tasks.create
+    // unless it discovers it. Union the tasks family from the static
+    // registry descriptors, in registry order (orderToolsTasksFirst below
+    // puts tasks.create first). Fail closed like the discovered append:
+    // when the live list is empty (permission level allows nothing),
+    // advertise nothing extra. Mode visibility still applies (read mode
+    // keeps only get/list; plan mode keeps only create/approvePlan).
+    // ListTools stays an offer — call-time scope still gates every call,
+    // and task creation itself is not permission-level gated (the runner
+    // validates shape/bounds/mode only; execution gates per step).
     let listed = coreTools;
+    if (tools.length > 0) {
+      const present = new Set(coreTools.map((t) => t.name));
+      const tasksToAdd = SEARCH_DESCRIPTORS.filter(
+        (d) => d.name.startsWith("tasks.") && !present.has(d.name) && isModeVisibleTool(sessionMode, d),
+      );
+      if (tasksToAdd.length > 0) listed = [...tasksToAdd, ...coreTools];
+    }
     if (!showAllTools && discoveredTools.length > 0 && tools.length > 0) {
       // Fail closed: when the live list is empty (permission level allows
       // nothing), discovered tools must not leak past it — the tools.length
@@ -1228,7 +1260,7 @@ export function createGatewayMcpServer(
       // scope in the extension still gate the actual call, so ListTools
       // here is an offer, not a permission.
       const byName = new Map(SEARCH_DESCRIPTORS.map((t) => [t.name, t]));
-      const coreNames = new Set(coreTools.map((t) => t.name));
+      const coreNames = new Set(listed.map((t) => t.name));
       for (const name of discoveredTools) {
         if (coreNames.has(name)) continue;
         const descriptor = byName.get(name);
