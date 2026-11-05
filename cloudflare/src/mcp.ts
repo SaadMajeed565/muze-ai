@@ -1222,6 +1222,59 @@ export function createGatewayMcpServer(
     if (changed) emitSessionState();
   };
 
+  /**
+   * Advertise the filing taskId on a bridge tool's input schema.
+   *
+   * The gateway extracts a top-level `taskId` argument before validation and
+   * files the execution into that task's timeline, but the tool contracts
+   * deliberately do not declare it — and their zod `.strict()` inputs convert
+   * to JSON Schema with `additionalProperties: false`. A client that enforces
+   * the advertised schema (ChatGPT) therefore cannot send `taskId` at all,
+   * even though the prompt tells it to and the gateway would accept it.
+   * Declaring it here — presentation only, at serve time — makes the
+   * advertised schema match what the gateway already accepts. Validation is
+   * unchanged: the gateway still strips taskId before zod validation, and
+   * the extension never sees it in the forwarded input.
+   *
+   * Excluded: tasks.* already declare taskId as a real schema field; the
+   * gateway-native browsers tools never file; tools.batch takes its filing
+   * ids per item (a batch-level taskId is stripped and dropped), and
+   * tools.discover is a gateway-native read with no filing.
+   */
+  function withFilingTaskId(tool: ToolDescriptor): { type: "object"; [key: string]: unknown } {
+    const raw = tool.inputSchema as
+      | { type?: unknown; properties?: Record<string, unknown>; [key: string]: unknown }
+      | undefined;
+    if (
+      tool.name.startsWith("tasks.") ||
+      tool.name.startsWith("browsers.") ||
+      tool.name === "tools.batch" ||
+      tool.name === "tools.discover" ||
+      !raw ||
+      typeof raw !== "object" ||
+      raw.type !== "object"
+    ) {
+      return raw as { type: "object"; [key: string]: unknown };
+    }
+    const properties = (raw.properties ?? {}) as Record<string, unknown>;
+    if ("taskId" in properties) return raw as { type: "object"; [key: string]: unknown };
+    // Clone: never mutate the cached/static descriptor — the same object is
+    // served on every ListTools call.
+    const cloned = JSON.parse(JSON.stringify(raw)) as {
+      properties?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+    cloned.properties = {
+      ...cloned.properties,
+      taskId: {
+        type: "string",
+        description:
+          "Filing id from tasks.create for the task this call belongs to. Send it on every call for a job; the gateway reads it before validation and files the execution into the task's timeline. It is not part of the tool's own input.",
+      },
+    };
+    return cloned as { type: "object"; [key: string]: unknown };
+  }
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     // The extension is the authority on what may run right now: its reply is
     // already filtered by the user's permission level. When no browser is
@@ -1323,7 +1376,7 @@ export function createGatewayMcpServer(
             : tool.name === "data"
               ? `${tool.description} [Deprecated domains: data devtools/clipboard — use devtools.* / clipboard.* instead; still working in 2.x, removed in registry 3.0.]`
               : tool.description,
-        inputSchema: tool.inputSchema as { type: "object"; [key: string]: unknown },
+        inputSchema: withFilingTaskId(tool),
         annotations: {
           title: tool.title,
           readOnlyHint: tool.annotations?.readOnlyHint ?? false,

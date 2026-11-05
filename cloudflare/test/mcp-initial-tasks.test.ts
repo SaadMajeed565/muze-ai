@@ -60,6 +60,23 @@ async function listToolNames(
   }
 }
 
+async function listToolsFull(
+  bridge: GatewayBridge,
+  options?: { initialMode?: "read" | "act" | "plan" | "explore" | "summary" | "compaction" },
+): Promise<Array<{ name: string; inputSchema?: { properties?: Record<string, unknown>; required?: string[] } }>> {
+  const server = createGatewayMcpServer(bridge, undefined, undefined, SCOPE, options);
+  const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: {} });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const { tools } = await client.listTools();
+    return tools as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown>; required?: string[] } }>;
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
 describe("initial ListTools includes tasks tools (connected live list)", () => {
   test("connected session with unified-only live list still lists tasks.* first with tasks.create first", async () => {
     const names = await listToolNames(connectedBridge(liveUnifiedOnly()));
@@ -108,5 +125,53 @@ describe("tasks discovery ordering", () => {
   test("promotion never injects tasks.create into unrelated queries", () => {
     const found = searchTools("tabs", 6, { scope: SCOPE, mode: "act" });
     expect(found.map((f) => f.name)).not.toContain("tasks.create");
+  });
+});
+
+describe("ListTools advertises the filing taskId (schema wall)", () => {
+  test("every bridge tool advertises optional taskId; tasks.* keep their real field; batch has no batch-level taskId", async () => {
+    const tools = await listToolsFull(disconnectedBridge());
+    expect(tools.length).toBeGreaterThan(0);
+    for (const tool of tools) {
+      const properties = tool.inputSchema?.properties ?? {};
+      const required = tool.inputSchema?.required ?? [];
+      if (tool.name.startsWith("tasks.")) {
+        // Real schema fields, declared by the tasks tools themselves:
+        // get/complete/pause/resume/cancel take a taskId; create returns
+        // one and list takes none.
+        if (["tasks.get", "tasks.complete", "tasks.pause", "tasks.resume", "tasks.cancel"].includes(tool.name)) {
+          expect(properties).toHaveProperty("taskId");
+        } else {
+          expect(properties).not.toHaveProperty("taskId");
+        }
+        continue;
+      }
+      if (tool.name.startsWith("browsers.") || tool.name === "tools.batch" || tool.name === "tools.discover") {
+        expect(properties).not.toHaveProperty("taskId");
+        continue;
+      }
+      // A schema-enforcing client (ChatGPT) can only send what the
+      // advertised schema allows: the strict zod inputs convert to
+      // additionalProperties: false, so taskId must be declared here.
+      expect(properties).toHaveProperty("taskId");
+      expect(properties.taskId).toMatchObject({ type: "string" });
+      expect(required).not.toContain("taskId");
+    }
+    // The core bridge tools ChatGPT calls first are covered.
+    for (const name of ["observe", "act", "navigate", "form", "data"]) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool?.inputSchema?.properties).toHaveProperty("taskId");
+    }
+  });
+
+  test("advertising taskId never mutates the shared registry descriptors", async () => {
+    await listToolsFull(disconnectedBridge());
+    const navigate = SEARCH_DESCRIPTORS.find((d) => d.name === "navigate");
+    const properties = (navigate?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {};
+    expect(properties).not.toHaveProperty("taskId");
+    // A second listing still advertises it exactly once.
+    const tools = await listToolsFull(disconnectedBridge());
+    const listed = tools.find((t) => t.name === "navigate");
+    expect(Object.keys(listed?.inputSchema?.properties ?? {}).filter((k) => k === "taskId")).toHaveLength(1);
   });
 });
