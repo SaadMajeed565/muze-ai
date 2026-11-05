@@ -2,7 +2,8 @@ import { describe, expect, test } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { TOOL_SCHEMAS } from "../libs/tool-contracts/index.js";
-import { CORE_TOOL_NAMES, GENERATED_TOOL_SELECTION, MCP_INSTRUCTIONS, SEARCH_DESCRIPTORS, buildLayeredInstructions, createGatewayMcpServer, filterDescriptorsByMode, measureInitializePayloads, scopeAllowsTool, stripConfirmationFlags, toMcpContent } from "../src/mcp.js";
+import { CORE_TOOL_NAMES, GENERATED_TOOL_SELECTION, MCP_INSTRUCTIONS, SEARCH_DESCRIPTORS, buildLayeredInstructions, createGatewayMcpServer, filterDescriptorsByMode, measureInitializePayloads, scopeAllowsTool, toMcpContent } from "../src/mcp.js";
+import { stripConfirmationFlags } from "../libs/tool-contracts/index.js";
 import type { GatewayBridge } from "../src/bridge.js";
 
 describe("MCP core toolset", () => {
@@ -119,10 +120,10 @@ describe("MCP core toolset", () => {
   });
 
   test("initialize instructions carry execution discipline, not the master-tools lists", () => {
-    expect(MCP_INSTRUCTIONS).toContain("EXECUTION DISCIPLINE");
-    expect(MCP_INSTRUCTIONS).toContain("Observe → Reason → Act → Verify");
+    expect(MCP_INSTRUCTIONS).toContain("## Grounding and acting");
+    expect(MCP_INSTRUCTIONS).toContain("Work in a loop: observe, act, verify");
     expect(MCP_INSTRUCTIONS).not.toContain("THE 5 MASTER TOOLS");
-    expect(MCP_INSTRUCTIONS).toContain("HOW TO BUILD YOUR OWN TASK BRIEF");
+    expect(MCP_INSTRUCTIONS).toContain("How to build your own task brief");
     expect(MCP_INSTRUCTIONS).not.toContain("Instagram");
     expect(MCP_INSTRUCTIONS).not.toContain("Post shared");
   });

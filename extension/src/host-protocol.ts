@@ -3,6 +3,8 @@ import {
   REGISTRY_VERSION,
   TASKS_CREATE_STEPS_REJECTED_MESSAGE,
   ToolErrorException,
+  asFilingTaskId,
+  stripConfirmationFlags,
   toToolError,
   type ApprovalRequestInfo,
   type BridgeClientMessage,
@@ -11,6 +13,7 @@ import {
   type ClientIdentity,
   type ToolBatchItemResult,
   type ToolCallBatchMessage,
+  type ToolDefinition,
   type ToolDescriptor,
   UNIFIED_TOOL_NAMES,
 } from "../libs/tool-contracts/index.js";
@@ -141,11 +144,6 @@ function toContractDryRunPreview(preview: RunnerDryRunPreview): DryRunPreview {
 /** Terminal task statuses: a filing into one of these is rejected for actions, filed standalone for reads. */
 const TERMINAL_TASK_STATUSES = new Set(["done", "cancelled", "partial", "failed"]);
 
-/** A filing task id: a non-empty string is used; anything else counts as absent. */
-function asFilingTaskId(value: unknown): string | undefined {
-  return typeof value === "string" && value !== "" ? value : undefined;
-}
-
 export interface BridgeTransport {
   post(message: BridgeHostMessage): void;
 }
@@ -183,32 +181,6 @@ export interface HostProtocolDeps {
 }
 
 const UNKNOWN_CLIENT: ClientIdentity = { id: "unknown", name: "Unknown client", transport: "remote" };
-
-/**
- * Client-supplied confirmation flags that must NEVER count as approval.
- *
- * A bridge client may set `confirmed`, `userApproved` or `approved` on a
- * tool input (unified schemas no longer declare them in 0.3.0, and strict
- * schemas reject them; this strip is defence in depth). Those flags are
- * assertions by the caller, not a user
- * decision, so they are stripped at the bridge boundary before the input
- * reaches the executor or the approval fingerprint. The ONLY things that
- * approve a call are a broker approval token (approvalId, consumed once by
- * the approval broker), a dashboard decision, or a verified elicitation
- * decision relayed as an `approval.respond` message — never a flag on the
- * tool input itself.
- *
- * This strip is boundary defence in addition to the executor, which in
- * 0.3.0 also ignores (never approves on) those flags.
- */
-const CLIENT_APPROVAL_FLAGS = ["confirmed", "userApproved", "approved"] as const;
-
-export function stripClientApprovalFlags(input: unknown): unknown {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) return input;
-  const copy = { ...(input as Record<string, unknown>) };
-  for (const flag of CLIENT_APPROVAL_FLAGS) delete copy[flag];
-  return copy;
-}
 
 /**
  * Phase 1 canonical resolution (Tool Management Plan section 2.2). The
@@ -679,6 +651,43 @@ export class HostProtocolHandler {
     });
   }
 
+  /**
+   * Shared strip → parse → resolve core for the three call paths that
+   * handle a unified tool call (approval-request, single call, batch
+   * item). All three must agree exactly on the canonical granular tool
+   * and input — the approval fingerprint is built from this output on
+   * the approval path and consumed against it at call time — so the
+   * core lives here, not copied per path.
+   */
+  private resolveCall(
+    tool: string,
+    rawInput: unknown,
+    definition: ToolDefinition | undefined,
+  ): {
+    stripped: unknown;
+    resolved: UnifiedResolution | null;
+    effTool: string;
+    effInput: unknown;
+    effDefinition: ToolDefinition | undefined;
+    canonical: { tool: string; input: unknown; calledAs: string } | undefined;
+  } {
+    const stripped = stripConfirmationFlags(rawInput) ?? {};
+    const parsed = definition?.input.safeParse(stripped);
+    const unifiedInput = parsed?.success ? parsed.data : stripped;
+    const resolved = resolveUnifiedToolCall(tool, unifiedInput);
+    const effTool = resolved?.tool ?? tool;
+    const effInput = resolved?.input ?? unifiedInput;
+    const effDefinition = resolved ? this.deps.registry.get(resolved.tool) : definition;
+    return {
+      stripped,
+      resolved,
+      effTool,
+      effInput,
+      effDefinition,
+      canonical: resolved ? { tool: resolved.tool, input: resolved.input, calledAs: tool } : undefined,
+    };
+  }
+
   private onApprovalRequest(id: string, tool: string, input: unknown, overrideClient?: ClientIdentity): void {
     let definition;
     try {
@@ -699,20 +708,11 @@ export class HostProtocolHandler {
     // canonical input + client, and the executor consumes against exactly
     // those values. The unified name is kept only as a debug `calledAs`
     // field on the approval info, never used for any security decision.
-    const sanitized = stripClientApprovalFlags(input) ?? {};
-    const parsed = definition.input.safeParse(sanitized);
-    const unifiedInput = parsed.success ? parsed.data : sanitized;
-    const resolved = resolveUnifiedToolCall(tool, unifiedInput);
-    const effTool = resolved?.tool ?? tool;
-    const effInput = resolved?.input ?? unifiedInput;
-    let effDefinition = definition;
-    try {
-      effDefinition = this.deps.registry.require(effTool);
-    } catch {
-      // Resolved granular tool missing from the registry: keep the unified
-      // definition for title/risk rather than failing the approval request;
-      // the executor will still refuse the unknown tool at call time.
-    }
+    const { resolved, effTool, effInput, effDefinition: resolvedDefinition } = this.resolveCall(tool, input, definition);
+    // Resolved granular tool missing from the registry: keep the unified
+    // definition for title/risk rather than failing the approval request;
+    // the executor will still refuse the unknown tool at call time.
+    const effDefinition = resolvedDefinition ?? definition;
     const client = overrideClient ?? this.client;
     const risk = effTool === "act" || effTool === "submit" ? "consequential" : effDefinition.risk;
     const record = this.deps.approvals.create({
@@ -864,22 +864,20 @@ export class HostProtocolHandler {
       // see the granular tool + canonical input. The unified handler
       // still executes (tool stays the unified name); only the
       // security/audit identity is canonical.
-      const stripped = stripClientApprovalFlags(message.input);
       const unifiedDef = this.deps.registry.get(message.tool);
-      const unifiedParsed = unifiedDef?.input.safeParse(stripped ?? {});
-      const resolved = resolveUnifiedToolCall(message.tool, unifiedParsed?.success ? unifiedParsed.data : stripped);
+      const { stripped, effDefinition, canonical } = this.resolveCall(message.tool, message.input, unifiedDef);
       // Description-task filing: validate the claimed task id (when
       // the tool is known) and pass it to the executor, which files
       // the execution's activity row under that task. The executor's
       // own TASK_REQUIRED gate still owns the missing-taskId case.
       const filingClient = message.client ?? this.client;
       const filingClientId = filingClient.id && filingClient.id !== "unknown" ? filingClient.id : filingClient.name;
-      const filingRisk = resolved ? this.deps.registry.get(resolved.tool)?.risk : unifiedDef?.risk;
+      const filingRisk = effDefinition?.risk;
       const filingTaskId = await this.resolveFilingTaskId(asFilingTaskId(message.taskId), filingClientId, filingRisk);
       const result = await this.deps.executor.execute({
         tool: message.tool,
         input: stripped,
-        canonical: resolved ? { tool: resolved.tool, input: resolved.input, calledAs: message.tool } : undefined,
+        canonical,
         client: message.client ?? this.client,
         ctx: this.deps.getContext(),
         approvalId: message.approvalId,
@@ -945,7 +943,7 @@ export class HostProtocolHandler {
       if (!definition) {
         throw new ToolErrorException("TOOL_NOT_FOUND", `Unknown tool ${message.tool}`);
       }
-      const sanitized = stripClientApprovalFlags(message.input) ?? {};
+      const sanitized = stripConfirmationFlags(message.input) ?? {};
       // A task is goal + description only: any steps input is rejected
       // here, before schema parsing, so the AI gets the teachable
       // error instead of a generic "unrecognized key" parse failure.
@@ -1088,41 +1086,52 @@ export class HostProtocolHandler {
    * A batch is one bridge round trip for several independent reads. The host is
    * still the authority: every item goes through the executor, and anything
    * above read-only risk is refused even if the gateway asks.
+   *
+   * Items run concurrently (Promise.all, results kept in input order):
+   * the batch exists to ground the AI in one round trip, and running its
+   * reads one after another made N reads cost the sum of all N. Only
+   * read-only items are admitted, the per-item filing check for reads is
+   * a read-only task lookup, and the executor's shared state (activity
+   * counter, audit appends, rate-limiter take) is synchronous between
+   * awaits, so concurrent reads do not race each other. Captures still
+   * serialise inside chrome-context when two items screenshot at once.
+   *
+   * Cancellation trade-off: a cancel used to stop the items not yet
+   * started; now all items start together, so a cancel only reaches
+   * in-flight work through the per-item signal passed to the executor.
    */
   private async onToolCallBatch(message: ToolCallBatchMessage): Promise<void> {
     const controller = new AbortController();
     this.inflight.set(message.id, controller);
-    const results: ToolBatchItemResult[] = [];
     try {
-      for (const call of message.calls) {
+      const runItem = async (call: ToolCallBatchMessage["calls"][number]): Promise<ToolBatchItemResult> => {
         if (controller.signal.aborted) {
-          results.push({
+          return {
             tool: call.tool,
             ok: false,
             error: toToolError(new ToolErrorException("CANCELLED", "Operation cancelled")),
-          });
-          continue;
+          };
         }
         const definition = this.deps.registry.get(call.tool);
         if (!definition) {
-          results.push({
+          return {
             tool: call.tool,
             ok: false,
             error: toToolError(new ToolErrorException("NOT_FOUND", `Unknown tool ${call.tool}`)),
-          });
-          continue;
+          };
         }
         // Resolve each batch item canonically, exactly as a single call
         // is resolved: the read-only-only rule is judged on the GRANULAR
         // risk, so a unified tabs.list item is allowed while a unified
         // tabs.close item is refused, as before for granular tools.
-        const batchStripped = stripClientApprovalFlags(call.input);
-        const batchParsed = definition.input.safeParse(batchStripped ?? {});
-        const batchResolved = resolveUnifiedToolCall(call.tool, batchParsed.success ? batchParsed.data : batchStripped);
-        const effDefinition = batchResolved ? this.deps.registry.get(batchResolved.tool) : definition;
+        const { stripped: batchStripped, resolved: batchResolved, effDefinition, canonical: batchCanonical } = this.resolveCall(
+          call.tool,
+          call.input,
+          definition,
+        );
         const effRisk = effDefinition?.risk;
         if (!effDefinition || effRisk !== "read-only") {
-          results.push({
+          return {
             tool: call.tool,
             ok: false,
             error: toToolError(
@@ -1132,8 +1141,7 @@ export class HostProtocolHandler {
                   : { risk: definition.risk },
               }),
             ),
-          });
-          continue;
+          };
         }
         try {
           // Per-item filing: batch items are reads, so an invalid
@@ -1145,7 +1153,7 @@ export class HostProtocolHandler {
           const result = await this.deps.executor.execute({
             tool: call.tool,
             input: batchStripped,
-            canonical: batchResolved ? { tool: batchResolved.tool, input: batchResolved.input, calledAs: call.tool } : undefined,
+            canonical: batchCanonical,
             client: message.client ?? this.client,
             ctx: this.deps.getContext(),
             approvalId: call.approvalId,
@@ -1158,17 +1166,18 @@ export class HostProtocolHandler {
             // (not internal) so the TASK_REQUIRED gate still applies.
             ...(message.client === undefined ? { silentActivity: true } : {}),
           });
-          results.push({
+          return {
             tool: call.tool,
             ok: true,
             result: result.result,
             dryRun: result.dryRun,
             durationMs: result.durationMs,
-          });
+          };
         } catch (error) {
-          results.push({ tool: call.tool, ok: false, error: toToolError(error) });
+          return { tool: call.tool, ok: false, error: toToolError(error) };
         }
-      }
+      };
+      const results = await Promise.all(message.calls.map(runItem));
       this.deps.transport.post({ type: "tool.batch.result", id: message.id, results });
     } finally {
       this.inflight.delete(message.id);

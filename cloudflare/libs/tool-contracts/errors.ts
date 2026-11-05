@@ -32,7 +32,7 @@ export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
  * budget; the message tells the caller the one fix: create the task.
  */
 export const TASK_REQUIRED_MESSAGE =
-  "Direct action calls are not accepted. Call tasks.create first with a concise action-first title and a description of the job, then include the returned task id in every tool call for the job, as a top-level argument named `taskId` next to that tool's normal input — it does not appear in any tool's input schema, send it anyway. Single read-only observations do not require a task.";
+  "Direct action calls are not accepted. Call tasks.create first with a concise action-first title and a description of the job, then include the returned task id in every tool call for the job, as a top-level argument named `taskId` next to that tool's normal input — the gateway reads it before validation (for `tools.batch`, put it on each item). Single read-only observations do not require a task.";
 
 /**
  * The teachable steps-rejection message for tasks.create, shared by

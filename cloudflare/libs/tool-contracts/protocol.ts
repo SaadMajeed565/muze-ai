@@ -176,3 +176,34 @@ export type BridgeEvent =
       stepIndex: number;
       totalSteps: number;
     };
+
+/**
+ * Client-supplied confirmation flags that must NEVER count as approval.
+ *
+ * A caller may set `confirmed`, `userApproved` or `approved` on a tool
+ * input; those flags are assertions by the caller, not a user decision,
+ * so they are stripped at every boundary before the input reaches the
+ * executor or an approval fingerprint. The ONLY things that approve a
+ * call are a broker approval token (approvalId, consumed once), a
+ * dashboard decision, or a verified elicitation decision relayed as an
+ * `approval.respond` message — never a flag on the tool input itself.
+ * One shared strip: the gateway and the host used to delete this same
+ * set with two copies of this function.
+ */
+export const CONFIRMATION_FLAGS = ["confirmed", "userApproved", "approved"] as const;
+
+export function stripConfirmationFlags<T>(input: T): T {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return input;
+  const copy = { ...(input as Record<string, unknown>) };
+  for (const flag of CONFIRMATION_FLAGS) delete copy[flag];
+  return copy as T;
+}
+
+/**
+ * A filing task id: a non-empty string is used; anything else counts as
+ * absent. Shared by the gateway (which reads it from call arguments
+ * before validation) and the host (which validates the claimed id).
+ */
+export function asFilingTaskId(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}

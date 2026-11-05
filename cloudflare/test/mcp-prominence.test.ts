@@ -9,6 +9,7 @@ import {
   filterDescriptorsByMode,
   orderToolsTasksFirst,
 } from "../src/mcp.js";
+import { TASK_REQUIRED_MESSAGE } from "../libs/tool-contracts/index.js";
 import type { GatewayBridge } from "../src/bridge.js";
 
 const TASK_SEQUENCE = ["tasks.create", "tasks.complete", "tasks.get", "tasks.list", "tasks.pause", "tasks.resume", "tasks.cancel"];
@@ -36,11 +37,12 @@ describe("tasks prominence in initialize + ListTools", () => {
     expect(MCP_INSTRUCTIONS).toContain("call `tasks.create`");
     // Execution discipline: no bare multi-step direct calls.
     expect(MCP_INSTRUCTIONS).toContain("Work needing more than one action never runs as bare direct calls");
-    expect(MCP_INSTRUCTIONS).toContain("Never chain observe → act → navigate → act directly");
-    // Direct-vs-task: direct is ONLY a single read-only observation;
-    // the old "1-3 steps" allowance is gone entirely.
-    expect(MCP_INSTRUCTIONS).toContain("Decide direct vs task");
-    expect(MCP_INSTRUCTIONS).toContain("single read-only observation");
+    // Direct-vs-task: direct calls are for read-only work, at most two
+    // grounding reads before the task exists; the old "single read-only
+    // observation" and "Decide direct vs task" lines are gone.
+    expect(MCP_INSTRUCTIONS).toContain("at most two grounding reads before the task exists");
+    expect(MCP_INSTRUCTIONS).toContain("Direct calls are for read-only work");
+    expect(MCP_INSTRUCTIONS).not.toContain("Decide direct vs task");
     expect(MCP_INSTRUCTIONS).not.toContain("1-3 steps");
     expect(MCP_INSTRUCTIONS).not.toContain("Decide direct vs plan");
     // Steps are not named at all — not even to forbid them — so the
@@ -65,7 +67,23 @@ describe("tasks prominence in initialize + ListTools", () => {
     expect(assembled.startsWith("You are an expert agentic browser operator")).toBe(true);
     expect(assembled).not.toContain("IMPORTANT: Every task you undertake must be created with tasks.create");
     expect(assembled).toContain("Brief and create the task");
-    expect(assembled).toContain("Decide direct vs task");
+    expect(assembled).toContain("at most two grounding reads before the task exists");
+  });
+
+  test("speed guidance is taught and the taskId sentence matches the advertised schema", () => {
+    // Speed without losing accuracy: batch reads, text-only observe,
+    // act on the first good observe, light verify.
+    expect(MCP_INSTRUCTIONS).toContain("batch independent grounding reads in one `tools.batch` call");
+    expect(MCP_INSTRUCTIONS).toContain("ask for a screenshot only when refs and text cannot identify the target");
+    expect(MCP_INSTRUCTIONS).toContain("Act on the first good observe");
+    expect(MCP_INSTRUCTIONS).toContain("light re-observe (text and refs)");
+    // taskId is filed by the gateway before validation, so no instruction
+    // may still claim it is schema-invisible, and the wording must not
+    // overclaim it is declared on every tool's input schema.
+    expect(MCP_INSTRUCTIONS).not.toContain("does not appear in any tool's input schema");
+    expect(TASK_REQUIRED_MESSAGE).not.toContain("does not appear in any tool's input schema");
+    expect(TASK_REQUIRED_MESSAGE).toContain("the gateway reads it before validation");
+    expect(TASK_REQUIRED_MESSAGE).not.toContain("declared optional field on every tool's input schema");
   });
 
   test("orderToolsTasksFirst puts tasks.* first with tasks.create first, set unchanged", () => {

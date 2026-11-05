@@ -3,6 +3,7 @@ import { createTestRuntime } from "../libs/testing/index.js";
 import { PROTOCOL_VERSION, TOOL_SCHEMAS, type BridgeHostMessage } from "../libs/tool-contracts/index.js";
 import type { ActivityEvent } from "../libs/activity.js";
 import { HostProtocolHandler, type BridgeTransport } from "../src/host-protocol.js";
+import type { ToolExecutor } from "../libs/browser-engine/index.js";
 
 class FakeTransport implements BridgeTransport {
   readonly messages: BridgeHostMessage[] = [];
@@ -84,6 +85,54 @@ describe("HostProtocolHandler", () => {
     expect(result.results).toHaveLength(2);
     expect(result.results[0]).toMatchObject({ tool: "tabs.list", ok: true });
     expect(result.results[1]).toMatchObject({ tool: "tabs.close", ok: false, error: { code: "PERMISSION_DENIED" } });
+  });
+
+  it("runs batch reads concurrently and returns results in input order", async () => {
+    const { rt, transport } = setup();
+    // First execute call is slow, second is fast: sequential code would
+    // never overlap them, so maxInFlight would stay 1.
+    let callIndex = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const delays = [50, 5];
+    const slowExecutor = {
+      execute: async (options: Parameters<ToolExecutor["execute"]>[0]) => {
+        const delay = delays[callIndex++] ?? 5;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          return await rt.executor.execute(options);
+        } finally {
+          inFlight -= 1;
+        }
+      },
+    };
+    const handler = new HostProtocolHandler({
+      registry: rt.registry,
+      executor: slowExecutor as unknown as ToolExecutor,
+      policy: rt.policy,
+      approvals: rt.approvals,
+      transport,
+      getContext: () => rt.ctx,
+      server: { name: "test-host", version: "1.0.0" },
+      legacyTools: true,
+    });
+    await handler.handle({
+      type: "tool.call.batch",
+      id: "b-parallel",
+      calls: [
+        { tool: "tabs.list", input: {} },
+        { tool: "tabs.list", input: {} },
+      ],
+    });
+    const result = transport.find("tool.batch.result") as {
+      results: { tool: string; ok: boolean }[];
+    };
+    expect(result.results).toHaveLength(2);
+    expect(result.results[0]).toMatchObject({ tool: "tabs.list", ok: true });
+    expect(result.results[1]).toMatchObject({ tool: "tabs.list", ok: true });
+    expect(maxInFlight).toBe(2);
   });
 
   it("runs the full approval lifecycle for a sensitive tool", async () => {
