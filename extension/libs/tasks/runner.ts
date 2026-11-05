@@ -495,6 +495,28 @@ export class TaskRunner {
     return this.deps.store.load();
   }
 
+  /**
+   * Serialises task-store load-modify-save critical sections across
+   * concurrent callers (two clients, or a run loop racing a dashboard
+   * action). Loads return clones, so two interleaved writers each save
+   * a full list built from the same stale snapshot and the second save
+   * silently drops the first writer's changes. The chain survives a
+   * rejected section (it always settles to undefined) so one failure
+   * never blocks later writers. NOT reentrant: lock sections must never
+   * call each other — checkpoint/saveList/saveTask sections contain no
+   * nested lock acquisition by construction.
+   */
+  private storeChain: Promise<void> = Promise.resolve();
+
+  private async withStoreLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.storeChain.then(fn);
+    this.storeChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   private findOrThrow(tasks: TaskRecord[], id: string): TaskRecord {
     const task = tasks.find((t) => t.id === id);
     if (!task) throw new Error(`task not found: ${id}`);
@@ -545,38 +567,44 @@ export class TaskRunner {
    * itself is the durability guarantee.
    */
   private async checkpoint(all: TaskRecord[], working: TaskRecord, audit: RunnerAuditEntry): Promise<TaskRecord> {
-    const freshAll = await this.loadAll();
-    const fresh = freshAll.find((t) => t.id === working.id);
-    let toSave: TaskRecord = working;
-    if (fresh && (fresh.status === "paused" || fresh.status === "cancelled") && working.status === "running") {
-      toSave = {
-        ...working,
-        status: fresh.status,
-        pauseReason: fresh.pauseReason,
-        resumeAfterMs: fresh.resumeAfterMs,
-        completedAt: fresh.completedAt ?? working.completedAt,
-        resultSummary: fresh.status === "cancelled" ? fresh.resultSummary : working.resultSummary,
-      };
-    }
-    // Fresh tail carried over when the prefix matches by index (the
-    // step-runner path only; there is no append API anymore, so this
-    // is dormant for description tasks and kept for step tasks):
-    // a working copy that predates steps added at the end must not
-    // wipe them on a wholesale save. The result summary is left to
-    // the next caller-side
-    // refresh — recomputing here would drop the caller's extra lines
-    // (e.g. a failure note) baked into working.resultSummary.
-    if (fresh && fresh.steps.length > toSave.steps.length) {
-      const prefixMatches = toSave.steps.every((s, i) => fresh.steps[i]?.index === s.index);
-      if (prefixMatches) {
-        toSave = { ...toSave, steps: [...toSave.steps, ...fresh.steps.slice(toSave.steps.length)] };
-      }
-    }
-    const next = freshAll.some((t) => t.id === toSave.id)
-      ? freshAll.map((t) => (t.id === toSave.id ? toSave : t))
-      : [...freshAll, toSave];
     void all;
-    await this.deps.store.save(next);
+    // The fresh reload and the save run inside the store lock, so two
+    // concurrent checkpoints cannot each save a list built from the
+    // same stale snapshot and drop each other's task updates.
+    const toSave = await this.withStoreLock(async () => {
+      const freshAll = await this.loadAll();
+      const fresh = freshAll.find((t) => t.id === working.id);
+      let merged: TaskRecord = working;
+      if (fresh && (fresh.status === "paused" || fresh.status === "cancelled") && working.status === "running") {
+        merged = {
+          ...working,
+          status: fresh.status,
+          pauseReason: fresh.pauseReason,
+          resumeAfterMs: fresh.resumeAfterMs,
+          completedAt: fresh.completedAt ?? working.completedAt,
+          resultSummary: fresh.status === "cancelled" ? fresh.resultSummary : working.resultSummary,
+        };
+      }
+      // Fresh tail carried over when the prefix matches by index (the
+      // step-runner path only; there is no append API anymore, so this
+      // is dormant for description tasks and kept for step tasks):
+      // a working copy that predates steps added at the end must not
+      // wipe them on a wholesale save. The result summary is left to
+      // the next caller-side
+      // refresh — recomputing here would drop the caller's extra lines
+      // (e.g. a failure note) baked into working.resultSummary.
+      if (fresh && fresh.steps.length > merged.steps.length) {
+        const prefixMatches = merged.steps.every((s, i) => fresh.steps[i]?.index === s.index);
+        if (prefixMatches) {
+          merged = { ...merged, steps: [...merged.steps, ...fresh.steps.slice(merged.steps.length)] };
+        }
+      }
+      const next = freshAll.some((t) => t.id === merged.id)
+        ? freshAll.map((t) => (t.id === merged.id ? merged : t))
+        : [...freshAll, merged];
+      await this.deps.store.save(next);
+      return merged;
+    });
     try {
       this.deps.audit(audit);
     } catch {
@@ -599,15 +627,50 @@ export class TaskRunner {
    * the checkpoint's fresh-reload merge. Used only where the caller's
    * list is itself the intended new state: createTask, where the list
    * already reflects the 7-day prune (a fresh reload would resurrect
-   * the pruned tasks), and the run-start transition, where the old
-   * paused state is exactly what this run is resuming from (merging
-   * it back would make a paused task unresumable). Step checkpoints
-   * keep the merging behaviour, so a pause/cancel issued while a
-   * step executes is never overwritten.
+   * the pruned tasks). Callers must hold the store lock from their
+   * load through this save. Run-start transitions use saveTask
+   * instead (fresh load + replace by id, no pause-wins merge, so a
+   * resume is never reverted). Step checkpoints keep the merging
+   * behaviour, so a pause/cancel issued while a step executes is
+   * never overwritten.
    */
   private async saveList(list: TaskRecord[], task: TaskRecord, audit: RunnerAuditEntry): Promise<TaskRecord> {
     const next = list.some((t) => t.id === task.id) ? list : [...list, task];
     await this.deps.store.save(next);
+    try {
+      this.deps.audit(audit);
+    } catch {
+      // Best-effort, as in checkpoint.
+    }
+    try {
+      this.deps.progress(toTaskView(task));
+    } catch {
+      // Best-effort, as in checkpoint.
+    }
+    return task;
+  }
+
+  /**
+   * Save one task record verbatim, replacing it by id in a fresh load
+   * taken inside the store lock. Unlike saveList it preserves concurrent
+   * changes to OTHER tasks, so it is the right save for single-task
+   * transitions (run start / resume) where the caller deletes nothing.
+   * It must not be used where the caller's list itself is the intended
+   * new state (createTask's prune) — that keeps saveList with the load
+   * inside the lock at the call site.
+   */
+  private async saveTask(task: TaskRecord, audit: RunnerAuditEntry): Promise<TaskRecord> {
+    await this.withStoreLock(async () => {
+      const freshAll = await this.loadAll();
+      const fresh = freshAll.find((t) => t.id === task.id);
+      if (fresh && isTerminal(fresh.status) && !isTerminal(task.status)) {
+        throw new Error(`task ${task.id} is ${fresh.status} and cannot be resumed`);
+      }
+      const next = freshAll.some((t) => t.id === task.id)
+        ? freshAll.map((t) => (t.id === task.id ? task : t))
+        : [...freshAll, task];
+      await this.deps.store.save(next);
+    });
     try {
       this.deps.audit(audit);
     } catch {
@@ -735,26 +798,28 @@ export class TaskRunner {
     // Cap enforcement: prune completed tasks older than 7 days (unless
     // pinned) first; if the store is still at the cap, reject rather
     // than silently deleting recent work.
-    let all = await this.loadAll();
-    const pruned = all.filter((t) => {
-      if (!isTerminal(t.status) || t.pinned) return true;
-      const finishedAt = t.completedAt ?? t.createdAt;
-      return now - finishedAt <= PRUNE_COMPLETED_AFTER_MS;
-    });
-    if (pruned.length !== all.length) all = pruned;
-    if (all.length >= MAX_STORED_TASKS) {
-      throw new Error(
-        `task creation rejected: task store is full (${MAX_STORED_TASKS} tasks stored); complete, cancel or delete older tasks first`,
-      );
-    }
-    all = [...all, task];
-    const saved = await this.saveList(all, task, {
-      kind: "task.created",
-      taskId: id,
-      stepIndex: -1,
-      tool: "",
-      decision: "created",
-      outcome: "success",
+    const saved = await this.withStoreLock(async () => {
+      let all = await this.loadAll();
+      const pruned = all.filter((t) => {
+        if (!isTerminal(t.status) || t.pinned) return true;
+        const finishedAt = t.completedAt ?? t.createdAt;
+        return now - finishedAt <= PRUNE_COMPLETED_AFTER_MS;
+      });
+      if (pruned.length !== all.length) all = pruned;
+      if (all.length >= MAX_STORED_TASKS) {
+        throw new Error(
+          `task creation rejected: task store is full (${MAX_STORED_TASKS} tasks stored); complete, cancel or delete older tasks first`,
+        );
+      }
+      all = [...all, task];
+      return this.saveList(all, task, {
+        kind: "task.created",
+        taskId: id,
+        stepIndex: -1,
+        tool: "",
+        decision: "created",
+        outcome: "success",
+      });
     });
     // A description task never enters the runner's step loop: with
     // zero steps the loop would immediately mark it done (every step
@@ -1060,19 +1125,21 @@ export class TaskRunner {
     );
     // Patch parentId onto the child record only. The parent object is
     // never written to; the store save below replaces only the child.
-    const freshAll = await this.loadAll();
-    const child = this.findOrThrow(freshAll, created.id);
-    const patched: TaskRecord = { ...child, parentId: parent.id };
-    const next = freshAll.map((task) => (task.id === patched.id ? patched : task));
-    const saved = await this.saveList(next, patched, {
-      kind: "task.created",
-      taskId: patched.id,
-      stepIndex: -1,
-      tool: "",
-      decision: "created",
-      outcome: "child",
+    const saved = await this.withStoreLock(async () => {
+      const freshAll = await this.loadAll();
+      const child = this.findOrThrow(freshAll, created.id);
+      const patched: TaskRecord = { ...child, parentId: parent.id };
+      const next = freshAll.map((task) => (task.id === patched.id ? patched : task));
+      return this.saveList(next, patched, {
+        kind: "task.created",
+        taskId: patched.id,
+        stepIndex: -1,
+        tool: "",
+        decision: "created",
+        outcome: "child",
+      });
     });
-    if (input.start === true) return this.runTask(patched.id, clientId);
+    if (input.start === true) return this.runTask(saved.id, clientId);
     return toTaskView(saved);
   }
 
@@ -1122,26 +1189,32 @@ export class TaskRunner {
    * task's status or policy snapshot.
    */
   async pruneTask(id: string, clientId: string, options: PruneTaskOutputsOptions = {}): Promise<PruneTaskResult> {
-    const all = await this.loadAll();
-    const task = this.findOrThrow(all, id);
-    this.assertClient(task, clientId);
-    const result = pruneTaskOutputs(task, options);
-    if (!result.applied) {
-      return { view: toTaskView(task), prunedStepIndices: [], reclaimedChars: result.reclaimedChars, applied: false, reason: result.reason };
-    }
-    const next = all.map((entry) => (entry.id === id ? result.task : entry));
-    const saved = await this.saveList(next, result.task, {
-      kind: "task.pruned",
-      taskId: id,
-      stepIndex: -1,
-      tool: "",
-      decision: "pruned",
-      outcome: `${result.prunedStepIndices.length} steps`,
+    const outcome = await this.withStoreLock(async () => {
+      const all = await this.loadAll();
+      const task = this.findOrThrow(all, id);
+      this.assertClient(task, clientId);
+      const result = pruneTaskOutputs(task, options);
+      if (!result.applied) {
+        return { view: toTaskView(task), result };
+      }
+      const next = all.map((entry) => (entry.id === id ? result.task : entry));
+      const saved = await this.saveList(next, result.task, {
+        kind: "task.pruned",
+        taskId: id,
+        stepIndex: -1,
+        tool: "",
+        decision: "pruned",
+        outcome: `${result.prunedStepIndices.length} steps`,
+      });
+      return { view: toTaskView(saved), result };
     });
+    if (!outcome.result.applied) {
+      return { view: outcome.view, prunedStepIndices: [], reclaimedChars: outcome.result.reclaimedChars, applied: false, reason: outcome.result.reason };
+    }
     return {
-      view: toTaskView(saved),
-      prunedStepIndices: result.prunedStepIndices,
-      reclaimedChars: result.reclaimedChars,
+      view: outcome.view,
+      prunedStepIndices: outcome.result.prunedStepIndices,
+      reclaimedChars: outcome.result.reclaimedChars,
       applied: true,
       reason: null,
     };
@@ -1477,11 +1550,11 @@ export class TaskRunner {
       task.resumeAfterMs = null;
       task.updatedAt = this.now();
       this.refreshSummary(task);
-      // saveList, not persistOnly: the checkpoint's pause-wins merge
+      // saveTask, not persistOnly: the checkpoint's pause-wins merge
       // would revert this running copy to the fresh paused record
-      // (the normal start path below uses saveList for the same
+      // (the normal start path below uses saveTask for the same
       // reason — this transition IS the resume, not a race with one).
-      const saved = await this.saveList(all, task, {
+      const saved = await this.saveTask(task, {
         kind: "task.resumed",
         taskId: id,
         stepIndex: -1,
@@ -1531,7 +1604,7 @@ export class TaskRunner {
       task.resumeAfterMs = null;
       task.updatedAt = this.now();
       this.refreshSummary(task);
-      task = await this.saveList(all, task, {
+      task = await this.saveTask(task, {
         kind: "task.started",
         taskId: id,
         stepIndex: -1,

@@ -305,4 +305,22 @@ describe("description tasks (zero steps)", () => {
     expect(resumed.status).toBe("running");
     expect(stepCalls).toEqual([]);
   });
+
+  it("concurrent creates and a concurrent complete lose no update (store lock)", async () => {
+    const { runner } = makeHost();
+    const [a, b] = await Promise.all([
+      runner.createTask({ goal: "First job", description: "Do the first thing.", clientId: CLIENT, browserSessionId: SESSION }, SNAPSHOT),
+      runner.createTask({ goal: "Second job", description: "Do the second thing.", clientId: CLIENT, browserSessionId: SESSION }, SNAPSHOT),
+    ]);
+    const listed = await runner.listTasks(CLIENT, SESSION);
+    expect(listed.map((t) => t.id).sort()).toEqual([a.id, b.id].sort());
+    const [done, c] = await Promise.all([
+      runner.completeTask(a.id, CLIENT, "done"),
+      runner.createTask({ goal: "Third job", description: "Do the third thing.", clientId: CLIENT, browserSessionId: SESSION }, SNAPSHOT),
+    ]);
+    expect(done.status).toBe("done");
+    const after = await runner.listTasks(CLIENT, SESSION);
+    expect(after.map((t) => t.id).sort()).toEqual([a.id, b.id, c.id].sort());
+    expect(after.find((t) => t.id === a.id)?.status).toBe("done");
+  });
 });

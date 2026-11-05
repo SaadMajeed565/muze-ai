@@ -674,6 +674,31 @@ describe("gateway e2e", () => {
     expect(resourceResponse.status).toBe(400);
   });
 
+  test("consent page shows the redirect destination, client id, and the unverified-name warning", async () => {
+    const account = await createAccount();
+    const register = await http("/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "Claude", redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await register.json()) as { client_id: string };
+    const verifier = base64Url(randomBytes(32));
+    const challenge = base64Url(createHash("sha256").update(verifier).digest());
+    const url = new URL(`${serverUrl.origin}/authorize`);
+    url.searchParams.set("client_id", clientId);
+    url.searchParams.set("redirect_uri", REDIRECT_URI);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("state", "xyz");
+    const response = await http(`${url.pathname}${url.search}`, { headers: { cookie: account.cookie } });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain(REDIRECT_URI);
+    expect(html).toContain(clientId);
+    expect(html).toContain("not verified");
+  });
+
   test("tags dashboard approvals with the OAuth client identity", async () => {
     const account = await createAccount();
     const browser = connectFakeHost(account, { requireApproval: true, waitApproval: true });

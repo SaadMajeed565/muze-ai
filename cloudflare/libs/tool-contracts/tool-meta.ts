@@ -77,7 +77,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
   "page.tables": m(["read", "tables", "extract", "structured-data"], { related: ["workflows.extractTable", "page.read"] }),
   "page.networkIdle": m(["wait", "sync", "network-idle", "page-content"], { related: ["observe"] }),
   "page.accessibilityTree": m(["read", "accessibility", "a11y", "page-structure"], { related: ["observe", "dom.find"] }),
-  "page.snapshot": m(["read", "snapshot", "page-content", "page-structure"], { related: ["observe"] }),
+  "page.snapshot": m(["read", "snapshot", "page-content", "page-structure"], { related: ["observe"], requiresNote: "Requires user approval when includeScreenshot is true." }),
   "page.dialogs": m(["read", "dialogs", "page-content", "sensitive-read"], { related: ["page.respondDialog"] }),
   "page.respondDialog": m(["respond", "dialogs", "answer-dialog"], { requires: ["page.dialogs"], related: ["page.dialogs"] }),
   "navigation.open": m(["navigate", "open", "open-url", "page-navigation"], { related: ["observe", "page.networkIdle"] }),

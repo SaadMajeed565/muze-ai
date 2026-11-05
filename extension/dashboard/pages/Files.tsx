@@ -219,18 +219,70 @@ export function FilesPage(): preact.JSX.Element {
       setError(response.error ?? "Could not read the file");
       return false;
     }
-    const removed = await sendRequest({ type: "muze/files/remove", id: file.id });
-    if (!removed.ok) {
-      setError(removed.error ?? "Could not rename the file");
-      return false;
-    }
+    // Attach the new copy FIRST: the old file stays untouched until the new
+    // copy exists, so a failed attach can never lose the file.
     const attached = await sendRequest({
       type: "muze/files/attach",
       file: { name: newName, mimeType: data.mimeType ?? file.mimeType, dataBase64: data.dataBase64 },
     });
-    if (!attached.ok) {
+    const attachedData = (attached as unknown as { data?: { id?: string } }).data;
+    if (!attached.ok || !attachedData?.id) {
       setError(attached.error ?? "Could not rename the file");
       return false;
+    }
+    const removed = await sendRequest({ type: "muze/files/remove", id: file.id });
+    if (!removed.ok) {
+      // Roll back the new copy so a failed rename leaves no duplicate behind.
+      await sendRequest({ type: "muze/files/remove", id: attachedData.id });
+      setError(removed.error ?? "Could not rename the file");
+      return false;
+    }
+    return true;
+  };
+
+  // Folder rename in phases so a mid-rename failure never splits the folder:
+  // read all bytes, attach every new copy, then remove the old copies. Any
+  // failure before the last phase leaves the old files untouched; a failure
+  // while removing restores already-removed files from their staged bytes.
+  // The registry is only rewritten by the caller on full success.
+  const renameFolder = async (oldPath: string, newPath: string): Promise<boolean> => {
+    const contained = files ? filesUnder(files, oldPath) : [];
+    const staged: { file: FileMeta; newName: string; mimeType: string; dataBase64: string }[] = [];
+    for (const file of contained) {
+      const response = await sendRequest({ type: "muze/files/get", id: file.id });
+      const data = (response as unknown as { data?: { dataBase64?: string; mimeType?: string } }).data;
+      if (!response.ok || !data?.dataBase64) {
+        setError(response.error ?? `Could not read ${baseName(file.name)}`);
+        return false;
+      }
+      staged.push({ file, newName: newPath + file.name.slice(oldPath.length), mimeType: data.mimeType ?? file.mimeType, dataBase64: data.dataBase64 });
+    }
+    const attachedIds = new Map<string, string>();
+    for (const item of staged) {
+      const attached = await sendRequest({ type: "muze/files/attach", file: { name: item.newName, mimeType: item.mimeType, dataBase64: item.dataBase64 } });
+      const attachedData = (attached as unknown as { data?: { id?: string } }).data;
+      if (!attached.ok || !attachedData?.id) {
+        for (const newId of attachedIds.values()) await sendRequest({ type: "muze/files/remove", id: newId });
+        setError(attached.error ?? "Could not rename the folder");
+        return false;
+      }
+      attachedIds.set(item.file.id, attachedData.id);
+    }
+    const removedOlds: typeof staged = [];
+    for (const item of staged) {
+      const removed = await sendRequest({ type: "muze/files/remove", id: item.file.id });
+      if (!removed.ok) {
+        for (const done of removedOlds) {
+          await sendRequest({ type: "muze/files/attach", file: { name: done.file.name, mimeType: done.mimeType, dataBase64: done.dataBase64 } });
+          const newId = attachedIds.get(done.file.id);
+          if (newId) await sendRequest({ type: "muze/files/remove", id: newId });
+        }
+        const newId = attachedIds.get(item.file.id);
+        if (newId) await sendRequest({ type: "muze/files/remove", id: newId });
+        setError(removed.error ?? "Could not rename the folder");
+        return false;
+      }
+      removedOlds.push(item);
     }
     return true;
   };
@@ -255,11 +307,8 @@ export function FilesPage(): preact.JSX.Element {
       } else if (renameTarget.type === "folder" && renameTarget.folderPath) {
         const oldPath = renameTarget.folderPath;
         const newPath = joinPath(parentPath(oldPath), cleaned);
-        const contained = files ? filesUnder(files, oldPath) : [];
-        for (const file of contained) {
-          const ok = await renameFile(file, newPath + file.name.slice(oldPath.length));
-          if (!ok) return;
-        }
+        const ok = await renameFolder(oldPath, newPath);
+        if (!ok) return;
         const nextRegistry = registry.map((entry) =>
           entry === oldPath ? newPath : entry.startsWith(`${oldPath}/`) ? newPath + entry.slice(oldPath.length) : entry,
         );

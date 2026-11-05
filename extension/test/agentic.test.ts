@@ -57,6 +57,48 @@ describe("agentic observe/act loop", () => {
     expect(payload.screenshot?.width).toBeGreaterThan(0);
   });
 
+  it("requires approval for a snapshot screenshot, but not for the node snapshot", async () => {
+    document.body.innerHTML = `<button aria-label="Go">Go</button>`;
+    const rt = createTestRuntime();
+    const plain = await rt.executor.execute({ taskId: "task_step",
+      tool: "page.snapshot",
+      input: { maxNodes: 50 },
+      client,
+      ctx: rt.ctx,
+    });
+    expect((plain.result as { screenshot?: unknown }).screenshot).toBeUndefined();
+    const dry = await rt.executor.execute({ taskId: "task_step",
+      tool: "page.snapshot",
+      input: { maxNodes: 50, includeScreenshot: true },
+      client,
+      ctx: rt.ctx,
+      dryRun: true,
+    });
+    expect((dry.result as { requiresApproval?: boolean }).requiresApproval).toBe(true);
+    let code: string | undefined;
+    try {
+      await rt.executor.execute({ taskId: "task_step",
+        tool: "page.snapshot",
+        input: { maxNodes: 50, includeScreenshot: true },
+        client,
+        ctx: rt.ctx,
+      });
+    } catch (error) {
+      code = (error as { code?: string }).code;
+    }
+    expect(code).toBe("APPROVAL_REQUIRED");
+    const approval = rt.approvals.create({ tool: "page.snapshot", risk: "read-only", summary: "snapshot with screenshot", client, input: { maxNodes: 50, maxDepth: 8, includeScreenshot: true, screenshotFormat: "jpeg", screenshotQuality: 60 } });
+    rt.approvals.approve(approval.id);
+    const shot = await rt.executor.execute({ taskId: "task_step",
+      tool: "page.snapshot",
+      input: { maxNodes: 50, includeScreenshot: true },
+      client,
+      ctx: rt.ctx,
+      approvalId: approval.id,
+    });
+    expect((shot.result as { screenshot?: { dataUrl: string } }).screenshot?.dataUrl).toMatch(/^data:image\//);
+  });
+
   it("clicks canvas coordinates without requiring a DOM ref", async () => {
     const canvas = document.createElement("canvas");
     canvas.id = "paint";

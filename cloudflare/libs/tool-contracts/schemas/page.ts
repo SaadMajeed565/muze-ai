@@ -253,10 +253,11 @@ export const pageSnapshot: ToolDefinition = {
   name: "page.snapshot",
   title: "Snapshot page",
   description:
-    "One observe step: interactive accessibility nodes with CSS-viewport bounding boxes, plus viewport metrics. Set includeScreenshot=true to also return a JPEG of the visible viewport in the same call. Node boxes use CSS pixels with dom.clickAt; screenshot pixels are device pixels (set coordinateSpace=screenshot).",
+    "One observe step: interactive accessibility nodes with CSS-viewport bounding boxes, plus viewport metrics. Set includeScreenshot=true to also return a JPEG of the visible viewport in the same call. Node boxes use CSS pixels with dom.clickAt; screenshot pixels are device pixels (set coordinateSpace=screenshot). Screenshots are approval-gated: includeScreenshot=true requires user approval, unlike the node snapshot.",
   category: "page",
   risk: "read-only",
-  requiresApproval: false,
+  requiresApproval: (input) =>
+    (input as { includeScreenshot?: unknown } | null | undefined)?.includeScreenshot === true,
   targetsActiveTab: true,
   input: z
     .object({

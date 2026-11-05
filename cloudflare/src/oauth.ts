@@ -158,7 +158,7 @@ export async function handleAuthorizeGet(request: Request, env: GatewayEnv, user
   });
   if (created.ok === false) return html(errorPage(created.error ?? "Could not start authorization"), 400, { "content-security-policy": AUTHORIZE_CSP });
 
-  return html(authorizePage(client.clientName, String(created.authReqId), scope, sessionId), 200, { "content-security-policy": AUTHORIZE_CSP });
+  return html(authorizePage(client.clientName, String(created.authReqId), scope, sessionId, undefined, clientId, redirectUri), 200, { "content-security-policy": AUTHORIZE_CSP });
 }
 
 /** Authorization endpoint (POST): authorize for the signed-in user.
@@ -276,9 +276,16 @@ function tokenResponse(tokens: Record<string, any>): Record<string, unknown> {
   };
 }
 
-function authorizePage(clientName: string, authReqId: string, scope = "", sessionId = "", error?: string): string {
+function authorizePage(clientName: string, authReqId: string, scope = "", sessionId = "", error?: string, clientId = "", redirectUri = ""): string {
   const errorBlock = error ? `<p class="error">${escapeHtml(error)}</p>` : "";
   const scopeBlock = scope ? `<p>Requested scope: <code>${escapeHtml(scope)}</code></p>` : "";
+  const destinationBlock = redirectUri
+    ? `<p>Authorization code will be sent to: <code>${escapeHtml(redirectUri)}</code></p>`
+    : "";
+  const clientBlock = clientId ? `<p>Client ID: <code>${escapeHtml(clientId)}</code></p>` : "";
+  const unverifiedBlock = redirectUri
+    ? `<p>Client names are not verified: anyone can register a client with any name. Check the destination above before authorizing.</p>`
+    : "";
   const sessionBlock = sessionId
     ? `<p>Browser session being authorized: <code>${escapeHtml(sessionId)}</code></p>`
     : `<p>Browser session being authorized: your signed-in account's session.</p>`;
@@ -301,6 +308,9 @@ function authorizePage(clientName: string, authReqId: string, scope = "", sessio
   <h1>Connect ${escapeHtml(clientName)} to your browser</h1>
   <p>Authorizing this client gives it access to your browser through your signed-in Muze AI account. No token is needed here.</p>
   ${scopeBlock}
+  ${destinationBlock}
+  ${clientBlock}
+  ${unverifiedBlock}
   ${sessionBlock}
   ${errorBlock}
   <form method="post" action="/authorize">

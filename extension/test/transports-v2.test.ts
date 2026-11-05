@@ -93,10 +93,17 @@ describe("GatewaySocketTransport v2 recovery", () => {
     expect(transport.isConnected()).toBe(false);
 
     // No open event: the connect timer fires, closes the socket, and the
-    // close handler schedules the normal backoff reconnect.
+    // close handler schedules the normal backoff reconnect (jittered
+    // 500–1000ms). Step the clock in small increments and stop the
+    // moment the replacement socket exists: a single large advance
+    // would also fire the replacement's own 100ms connect timer
+    // before the test can open it, and its open would then hit the
+    // stale-socket guard.
     vi.advanceTimersByTime(100);
     expect(FakeWebSocket.instances).toHaveLength(1);
-    vi.advanceTimersByTime(1000);
+    for (let i = 0; i < 30 && FakeWebSocket.instances.length < 2; i++) {
+      vi.advanceTimersByTime(50);
+    }
     expect(FakeWebSocket.instances).toHaveLength(2);
 
     FakeWebSocket.instances[1].open();
