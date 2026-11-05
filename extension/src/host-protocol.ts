@@ -828,11 +828,11 @@ export class HostProtocolHandler {
       if (message.startsWith("task not found")) {
         throw new ToolErrorException(
           "TASK_REQUIRED",
-          `Unknown task id "${taskId}": no such task exists. Create a task first with tasks.create (concise action-first title + description of the job) and include the returned task id in tool calls.`,
+          `Unknown task id "${taskId}": no such task exists. Create a task first with tasks.create (concise action-first title + description of the job) and include the returned task id in tool calls as the top-level taskId argument.`,
         );
       }
       if (message.includes("belongs to a different client")) {
-        throw new ToolErrorException("PERMISSION_DENIED", message);
+        throw new ToolErrorException("PERMISSION_DENIED", message + ". Abandon that task id, create a fresh task for the same job, and retry with the new id.");
       }
       throw new ToolErrorException("INTERNAL", message);
     }
@@ -840,7 +840,7 @@ export class HostProtocolHandler {
       if (!isAction) return undefined;
       throw new ToolErrorException(
         "INVALID_INPUT",
-        `Task "${taskId}" is ${view.status} and cannot accept new filings. Create a new task with tasks.create for further work and include its id in tool calls.`,
+        `Task "${taskId}" is ${view.status} and cannot accept new filings. Create a new task with tasks.create for further work and include its id in tool calls as the top-level taskId argument.`,
       );
     }
     return taskId;
