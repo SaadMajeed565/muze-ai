@@ -2,11 +2,11 @@ import { describe, expect, test } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
+  CORE_TOOL_NAMES,
   MCP_INSTRUCTIONS,
   SEARCH_DESCRIPTORS,
   buildLayeredInstructions,
   createGatewayMcpServer,
-  filterDescriptorsByMode,
   orderToolsTasksFirst,
 } from "../src/mcp.js";
 import { TASK_REQUIRED_MESSAGE } from "../libs/tool-contracts/index.js";
@@ -60,7 +60,6 @@ describe("tasks prominence in initialize + ListTools", () => {
     // the agent line rather than a banner.
     const assembled = buildLayeredInstructions({
       mode: "act",
-      visibleDescriptors: filterDescriptorsByMode(SEARCH_DESCRIPTORS, "act"),
       environment: { browserConnected: false, clientType: "unknown", scopePresent: true, discoveredCount: 0 },
       discovered: [],
     });
@@ -68,6 +67,9 @@ describe("tasks prominence in initialize + ListTools", () => {
     expect(assembled).not.toContain("IMPORTANT: Every task you undertake must be created with tasks.create");
     expect(assembled).toContain("Brief and create the task");
     expect(assembled).toContain("at most two grounding reads before the task exists");
+    // The tool-selection layer moved out of initialize (startup-latency
+    // batch): it is served by tools.discover, not assembled here.
+    expect(assembled).not.toContain("GENERATED TOOL SELECTION");
   });
 
   test("speed guidance is taught and the taskId sentence matches the advertised schema", () => {
@@ -116,6 +118,52 @@ describe("tasks prominence in initialize + ListTools", () => {
       const names = tools.map((t) => t.name);
       expect(names[0]).toBe("tasks.create");
       expect(names.slice(0, 7)).toEqual(TASK_SEQUENCE);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test("live ListTools response still contains the full 14-tool core set", async () => {
+    // Moving the tool-selection layer out of initialize must not change
+    // ListTools coverage: common jobs still work without a discover call.
+    const server = createGatewayMcpServer(disconnectedBridge(), undefined, undefined, "read:tools call:tools");
+    const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const { tools } = await client.listTools();
+      const names = new Set(tools.map((t) => t.name));
+      expect(CORE_TOOL_NAMES.size).toBe(14);
+      for (const name of CORE_TOOL_NAMES) expect(names.has(name)).toBe(true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test("live ListTools trims the tasks.create description and the injected taskId text", async () => {
+    // Startup-latency batch: the description was 1,165 chars and the
+    // injected taskId text 224 chars, duplicating what the initialize
+    // instructions already carry. Both stay meaningful, just shorter.
+    const server = createGatewayMcpServer(disconnectedBridge(), undefined, undefined, "read:tools call:tools");
+    const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const { tools } = await client.listTools();
+      const create = tools.find((t) => t.name === "tasks.create");
+      expect(create).toBeDefined();
+      const createDescription = create?.description ?? "";
+      expect(createDescription.length).toBeLessThan(500);
+      expect(createDescription).toContain("exactly ONE task per job");
+      expect(createDescription).toContain("include the returned task id in every later call");
+      const observe = tools.find((t) => t.name === "observe");
+      const schema = observe?.inputSchema as { properties?: { taskId?: { description?: string } } };
+      const taskIdDescription = schema?.properties?.taskId?.description ?? "";
+      expect(taskIdDescription.length).toBeGreaterThan(0);
+      expect(taskIdDescription.length).toBeLessThan(130);
+      expect(taskIdDescription).toContain("include it in every call");
     } finally {
       await client.close();
       await server.close();

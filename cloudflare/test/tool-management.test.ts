@@ -151,18 +151,36 @@ describe("deprecation + generated instructions (Phases 2-3)", () => {
     expect(CORE_TOOL_NAMES.has("tabs")).toBe(false);
   });
 
-  test("server instructions contain the registry-generated tool-selection section", async () => {
+  test("tool-selection layer is served by tools.discover, not by initialize", async () => {
     const { server, client } = await connect(fakeBridge());
     try {
-      // Instructions are visible through the SDK client only via initialize
-      // result in some clients; here we assert the generated module text
-      // directly, which is what the server serves.
-      const { GENERATED_TOOL_SELECTION } = await import("../src/mcp.js");
+      // The generator itself is unchanged: the full-registry selection
+      // text still names the unified tools and the deprecated actions.
+      const { GENERATED_TOOL_SELECTION, buildLayeredInstructions } = await import("../src/mcp.js");
       expect(GENERATED_TOOL_SELECTION).toContain("`tabs`");
       expect(GENERATED_TOOL_SELECTION).toContain("navigate tab/window");
       expect(GENERATED_TOOL_SELECTION).toContain("data devtools/clipboard");
       expect(GENERATED_TOOL_SELECTION).toContain("preview before submit");
       expect(SEARCH_DESCRIPTORS.length).toBeGreaterThanOrEqual(135);
+      // (1) Initialize no longer contains the selection layer.
+      const assembled = buildLayeredInstructions({
+        mode: "act",
+        environment: { browserConnected: false, clientType: "unknown", scopePresent: true, discoveredCount: 0 },
+        discovered: [],
+      });
+      expect(assembled).not.toContain("GENERATED TOOL SELECTION");
+      // (2) tools.discover returns the selection guidance (or equivalent)
+      // for this session's mode-visible tools.
+      const result = (await client.callTool({ name: "tools.discover", arguments: { query: "organise tabs" } })) as {
+        content: Array<{ text: string }>;
+      };
+      const parsed = JSON.parse(result.content[0]!.text) as { selectionGuidance: string };
+      expect(typeof parsed.selectionGuidance).toBe("string");
+      expect(parsed.selectionGuidance).toContain("GENERATED TOOL SELECTION");
+      expect(parsed.selectionGuidance).toContain("`tabs`");
+      expect(parsed.selectionGuidance).toContain("navigate tab/window");
+      expect(parsed.selectionGuidance).toContain("data devtools/clipboard");
+      expect(parsed.selectionGuidance).toContain("preview before submit");
     } finally {
       await client.close();
       await server.close();

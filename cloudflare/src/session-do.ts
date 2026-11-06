@@ -127,6 +127,12 @@ class TaskMirrorBridge implements GatewayBridge {
     return this.inner.isConnected();
   }
 
+  /** Forward the slot's bridge generation so ListTools caching (mcp.ts)
+   * notices a reconnect even when connectedness looks unchanged. */
+  generation(): number {
+    return typeof this.inner.generation === "function" ? this.inner.generation() : 0;
+  }
+
   listTools(): Promise<import("../libs/tool-contracts/index.js").ToolDescriptor[]> {
     return this.inner.listTools();
   }

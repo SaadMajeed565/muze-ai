@@ -20,6 +20,18 @@ export interface BridgeToolResult {
 export interface GatewayBridge {
   isConnected(): boolean;
   /**
+   * Resolves when the bridge handshake (hello) has settled successfully.
+   * Present on DoBridge; a bridge without it is treated as already usable
+   * once isConnected() is true. Used by BridgeSlot's grace wait.
+   */
+  ready?: () => Promise<void>;
+  /**
+   * Monotonic generation bumped every time the slot's bridge is replaced
+   * (BridgeSlot only). Lets ListTools callers notice a reconnect even
+   * when connectedness looks unchanged. Absent on other bridges.
+   */
+  generation?: () => number;
+  /**
    * The tools the extension currently offers. The list is filtered by the
    * user's permission level on the extension side, so it is the authority on
    * what a model may currently call.
@@ -375,26 +387,52 @@ export class DoBridge implements GatewayBridge {
 }
 
 /**
+ * Bounded grace wait before a model-facing call fails with "no browser
+ * connected". A cold bridge fails the first call instead of waiting for
+ * the extension socket that is about to authenticate, so the slot waits
+ * up to this long for a bridge to become usable. Far under the per-client
+ * approval-wait budgets (claude/chatgpt 50 s, unknown 120 s in
+ * tool-meta.ts APPROVAL_WAIT_BUDGET_MS) and never stacked: one wait per
+ * call, on the model-facing paths only.
+ */
+export const BRIDGE_GRACE_WAIT_MS = 3_000;
+
+/**
  * A stable facade over whichever bridge is currently attached. The MCP server
  * is created once per Durable Object, so it must never hold a specific socket's
  * bridge directly (the extension can reconnect at any time).
  */
 export class BridgeSlot implements GatewayBridge {
   private current: GatewayBridge | null = null;
+  private generationCount = 0;
+  private readonly graceWaitMs: number;
+  /** Waiters woken when set() replaces the bridge. */
+  private readonly waiters = new Set<() => void>();
+
+  constructor(options?: { graceWaitMs?: number }) {
+    this.graceWaitMs = options?.graceWaitMs ?? BRIDGE_GRACE_WAIT_MS;
+  }
 
   set(bridge: GatewayBridge | null): void {
     this.current = bridge;
+    this.generationCount += 1;
+    for (const notify of [...this.waiters]) notify();
+  }
+
+  /** Monotonic generation, bumped on every set() (including set(null)). */
+  generation(): number {
+    return this.generationCount;
   }
 
   isConnected(): boolean {
     return this.current?.isConnected() ?? false;
   }
 
-  listTools(): Promise<ToolDescriptor[]> {
-    return this.require().listTools();
+  async listTools(): Promise<ToolDescriptor[]> {
+    return (await this.requireGrace()).listTools();
   }
 
-  callTool(call: {
+  async callTool(call: {
     tool: string;
     input: unknown;
     approvalId?: string;
@@ -402,11 +440,11 @@ export class BridgeSlot implements GatewayBridge {
     client?: ClientIdentity;
     signal?: AbortSignal;
   }): Promise<BridgeToolResult> {
-    return this.require().callTool(call);
+    return (await this.requireGrace(call.signal)).callTool(call);
   }
 
-  callToolBatch(calls: ToolCallBatchItem[], options?: { client?: ClientIdentity; signal?: AbortSignal }): Promise<ToolBatchItemResult[]> {
-    return this.require().callToolBatch(calls, options);
+  async callToolBatch(calls: ToolCallBatchItem[], options?: { client?: ClientIdentity; signal?: AbortSignal }): Promise<ToolBatchItemResult[]> {
+    return (await this.requireGrace(options?.signal)).callToolBatch(calls, options);
   }
 
   createApproval(tool: string, input: unknown, client?: ClientIdentity): Promise<ApprovalRequestInfo> {
@@ -422,9 +460,66 @@ export class BridgeSlot implements GatewayBridge {
   }
 
   private require(): GatewayBridge {
-    if (!this.current || !this.current.isConnected()) {
+    const bridge = this.tryRequire();
+    if (!bridge) {
       throw new ToolErrorException("CONFLICT", "No browser is connected to this session", { retryable: true });
     }
+    return bridge;
+  }
+
+  private tryRequire(): GatewayBridge | null {
+    if (!this.current || !this.current.isConnected()) return null;
     return this.current;
+  }
+
+  /**
+   * Model-facing require: before throwing CONFLICT, wait up to the grace
+   * window for a bridge to become usable — (a) no bridge set yet: wait for
+   * set() to register one; (b) a bridge is set but its hello hasn't
+   * settled: wait for its ready() with the same cap. Approval paths keep
+   * the synchronous fail-fast require() above. The caller's AbortSignal,
+   * when passed, ends the wait immediately.
+   */
+  private async requireGrace(signal?: AbortSignal): Promise<GatewayBridge> {
+    const direct = this.tryRequire();
+    if (direct) return direct;
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new ToolErrorException("CANCELLED", "Operation cancelled");
+    }
+    const deadline = Date.now() + this.graceWaitMs;
+    // Each bridge instance gets exactly one ready() waiter per grace wait:
+    // re-attaching to an already-settled hello would wake the loop in a
+    // tight spin until the deadline.
+    let readyAttachedFor: GatewayBridge | null = null;
+    while (Date.now() < deadline) {
+      const found = this.tryRequire();
+      if (found) return found;
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new ToolErrorException("CANCELLED", "Operation cancelled");
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const current = this.current;
+      await new Promise<void>((resolve) => {
+        let done = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          this.waiters.delete(finish);
+          if (signal) signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        timer = setTimeout(finish, remaining);
+        this.waiters.add(finish);
+        if (signal) signal.addEventListener("abort", finish, { once: true });
+        if (current && current !== readyAttachedFor && typeof current.ready === "function") {
+          readyAttachedFor = current;
+          void current.ready().then(finish, finish);
+        }
+      });
+    }
+    return this.require();
   }
 }

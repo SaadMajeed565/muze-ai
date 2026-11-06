@@ -6,6 +6,7 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
   ElicitResultSchema,
+  type ListToolsResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   asFilingTaskId,
@@ -395,7 +396,7 @@ export function discoveryAllowed(descriptor: ToolDescriptor, scope: string | und
   );
 }
 
-/** Registry-generated tool-selection text, appended to the hand-written instructions. */
+/** Registry-generated tool-selection text. Served on demand by tools.discover as `selectionGuidance`, not appended to the initialize instructions (startup-latency batch). Also kept as the pre-Phase-A `old` baseline in measureInitializePayloads. */
 export const GENERATED_TOOL_SELECTION = generateToolSelectionInstructions(SEARCH_DESCRIPTORS);
 
 /**
@@ -484,11 +485,17 @@ export interface LayeredEnvironment {
 
 /**
  * Phase A layered instruction assembler, in OpenCode's order adapted to
- * Muze: Layer 1 base (how, not what) + Layer 2 mode + Layer 3 tool
- * guidance for the mode's visible tools only + Layer 4 environment
- * snapshot + Layer 5 session entries (discovered tools).
+ * Muze: Layer 1 base (how, not what) + Layer 2 mode + Layer 3 environment
+ * snapshot + Layer 4 session entries (discovered tools).
  *
- * Layer 4 honesty note: the gateway has no bridge query for the active
+ * The registry-generated tool-selection layer is deliberately NOT
+ * assembled here: it is served on demand by tools.discover as
+ * `selectionGuidance`, so the per-turn initialize payload does not pay
+ * ~4k chars for guidance most jobs never need. The 14-tool initial
+ * ListTools set is unchanged, so common jobs still work without a
+ * discover call.
+ *
+ * Layer 3 honesty note: the gateway has no bridge query for the active
  * tab, its URL/domain, the dashboard policy mode, or task counts in
  * Phase A (adding one would be extension work, which Phase A excludes),
  * so those fields are explicitly NOT claimed here. Tab state is always
@@ -496,14 +503,12 @@ export interface LayeredEnvironment {
  */
 export function buildLayeredInstructions(input: {
   mode: AgentMode;
-  visibleDescriptors: ToolDescriptor[];
   environment: LayeredEnvironment;
   discovered: string[];
 }): string {
   const layers = [
     MCP_INSTRUCTIONS,
     `## MODE: ${input.mode}\n${MODE_PROMPTS[input.mode]}`,
-    generateToolSelectionInstructions(input.visibleDescriptors),
     [
       "## ENVIRONMENT SNAPSHOT (gateway, at initialize; re-observe before acting)",
       `- Mode: ${input.mode}`,
@@ -546,7 +551,6 @@ export function measureInitializePayloads(): InitializePayloadSizes {
   for (const mode of AGENT_MODES) {
     sizes[mode] = buildLayeredInstructions({
       mode,
-      visibleDescriptors: filterDescriptorsByMode(SEARCH_DESCRIPTORS, mode),
       environment,
       discovered: [],
     }).length;
@@ -1145,6 +1149,11 @@ export function createGatewayMcpServer(
      * (SessionDO) can persist them. Best-effort: a failing callback must
      * never break a tool call. */
     onSessionStateChange?: (state: GatewaySessionState) => void;
+    /** Assembled-ListTools cache TTL in ms (default 60_000). The extension
+     * permission level has no gateway-side change event, so the TTL is
+     * the bound on how stale a permission change can look; mode and
+     * discovered changes invalidate immediately instead. */
+    listToolsCacheTtlMs?: number;
     /** Gateway-native browsers.list/select handler (SessionDO supplies it
      * via DirectoryDO). Absent in unit-test servers without a directory. */
     browsers?: BrowsersHandler;
@@ -1166,8 +1175,6 @@ export function createGatewayMcpServer(
   // apply to this server instance immediately and to ListTools, discovery,
   // and CallTool from that point on.
   let sessionMode: AgentMode = options?.initialMode ?? "act";
-  const visibleDescriptorsForInstructions = (): ToolDescriptor[] =>
-    filterDescriptorsByMode(SEARCH_DESCRIPTORS, sessionMode);
   const layeredEnvironment = (): LayeredEnvironment => ({
     browserConnected: bridge.isConnected(),
     clientType,
@@ -1195,7 +1202,6 @@ export function createGatewayMcpServer(
       // SDK's initialize instructions text itself is static per server.
       instructions: buildLayeredInstructions({
         mode: sessionMode,
-        visibleDescriptors: visibleDescriptorsForInstructions(),
         environment: {
           browserConnected: bridge.isConnected(),
           clientType,
@@ -1221,6 +1227,27 @@ export function createGatewayMcpServer(
   const LIVE_TOOL_CACHE_TTL_MS = 5_000;
   let liveToolsCache: { tools: ToolDescriptor[]; at: number } | null = null;
 
+  // Assembled ListTools response cache, per MCP server instance. One server
+  // instance serves exactly one MCP session (SessionDO builds a fresh
+  // server per transport), so instance state IS per-session state: no
+  // SessionDO map is needed and different sessions never share an entry.
+  // Cached AFTER the taskId injection, so a hit returns exactly what a
+  // miss would build. Invalidated at every change point of the list
+  // inputs: mode change (GetPrompt) and discovered change
+  // (rememberDiscovered) clear it directly; the extension permission
+  // level has no gateway-side change event - it is only observable
+  // through a fresh registry.list - so the cache also keys on bridge
+  // connectedness + BridgeSlot generation (a reconnect/replace
+  // invalidates) and expires after listToolsCacheTtlMs, bounding
+  // permission-change staleness to 60 s. Call-time scope/policy still
+  // gate every call, so a stale offer can never widen what runs.
+  const LISTTOOLS_CACHE_TTL_MS = options?.listToolsCacheTtlMs ?? 60_000;
+  let listToolsCache: { response: ListToolsResult; connected: boolean; generation: number; at: number } | null = null;
+  const bridgeGeneration = (): number => (typeof bridge.generation === "function" ? bridge.generation() : 0);
+  const invalidateListToolsCache = (): void => {
+    listToolsCache = null;
+  };
+
   // Session-aware discovery (Phase 2): tools this session discovered, and
   // tools a task plan needed, persist in THIS server instance's ListTools
   // until the session closes. This is a session cache only — it is cleared
@@ -1237,7 +1264,10 @@ export function createGatewayMcpServer(
         changed = true;
       }
     }
-    if (changed) emitSessionState();
+    if (changed) {
+      emitSessionState();
+      invalidateListToolsCache();
+    }
   };
 
   /**
@@ -1287,7 +1317,7 @@ export function createGatewayMcpServer(
       taskId: {
         type: "string",
         description:
-          "Filing id from tasks.create for the task this call belongs to. Send it on every call for a job; the gateway reads it before validation and files the execution into the task's timeline. It is not part of the tool's own input.",
+          "Task id from tasks.create for this job; include it in every call — the gateway reads it before validation.",
       },
     };
     return cloned as { type: "object"; [key: string]: unknown };
@@ -1298,8 +1328,19 @@ export function createGatewayMcpServer(
     // already filtered by the user's permission level. When no browser is
     // connected the static list is used so a client can still discover the
     // registry.
+    const connected = bridge.isConnected();
+    const generation = bridgeGeneration();
+    const cached = listToolsCache;
+    if (
+      cached &&
+      cached.connected === connected &&
+      cached.generation === generation &&
+      Date.now() - cached.at <= LISTTOOLS_CACHE_TTL_MS
+    ) {
+      return cached.response;
+    }
     let tools = listExposedDescriptors();
-    if (bridge.isConnected()) {
+    if (connected) {
       try {
         // The live list is authoritative even when it is empty: an empty list
         // means the user's current permission level allows nothing, and the
@@ -1384,7 +1425,7 @@ export function createGatewayMcpServer(
     // Tasks first: the tasks.* family leads the response with
     // tasks.create first; the capped set is unchanged, only the order.
     listed = orderToolsTasksFirst(listed);
-    return {
+    const response: ListToolsResult = {
       tools: listed.map((tool) => ({
         name: tool.name,
         title: tool.title,
@@ -1403,6 +1444,8 @@ export function createGatewayMcpServer(
         },
       })),
     };
+    listToolsCache = { response, connected, generation, at: Date.now() };
+    return response;
   });
 
   server.setRequestHandler(ListPromptsRequestSchema, async () => {
@@ -1452,6 +1495,7 @@ export function createGatewayMcpServer(
         if (requested !== sessionMode) {
           sessionMode = requested;
           emitSessionState();
+          invalidateListToolsCache();
           // Tell clients that re-list to pick up the new visibility set.
           // Best-effort: not all SDK versions expose this, and a client
           // that re-calls ListTools sees the new set regardless.
@@ -1655,6 +1699,12 @@ export function createGatewayMcpServer(
           clientType,
           listToolsCap,
           found,
+          // The tool-selection layer moved out of initialize
+          // (startup-latency batch): every discover call returns the
+          // registry-generated guide for this session's mode-visible
+          // tools, so the model can still find tools it needs without
+          // paying ~4k chars on every turn.
+          selectionGuidance: generateToolSelectionInstructions(filterDescriptorsByMode(SEARCH_DESCRIPTORS, sessionMode)),
           hint:
             found.length > 0
               ? "Call any of these by name directly. Discovered tools now also appear in this session's ListTools, with full schemas there. If you need more specific results, try a different query."

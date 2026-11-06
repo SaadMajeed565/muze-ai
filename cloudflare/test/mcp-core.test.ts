@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { approvalWaitBudgetMsForClientType, TOOL_SCHEMAS, ToolErrorException } from "../libs/tool-contracts/index.js";
-import { CORE_TOOL_NAMES, GENERATED_TOOL_SELECTION, MCP_INSTRUCTIONS, SEARCH_DESCRIPTORS, buildLayeredInstructions, createGatewayMcpServer, filterDescriptorsByMode, measureInitializePayloads, scopeAllowsTool, toMcpContent } from "../src/mcp.js";
+import { CORE_TOOL_NAMES, GENERATED_TOOL_SELECTION, MCP_INSTRUCTIONS, buildLayeredInstructions, createGatewayMcpServer, measureInitializePayloads, scopeAllowsTool, toMcpContent } from "../src/mcp.js";
 import { stripConfirmationFlags } from "../libs/tool-contracts/index.js";
 import type { GatewayBridge } from "../src/bridge.js";
 
@@ -262,11 +262,17 @@ describe("Phase A mode-filtered tool visibility", () => {
 
   test("initialize payload is measured per mode: read is smaller than act and smaller than the old full-registry assembly", () => {
     const env = { browserConnected: false, clientType: "unknown", scopePresent: true, discoveredCount: 0 };
-    const read = buildLayeredInstructions({ mode: "read", visibleDescriptors: filterDescriptorsByMode(SEARCH_DESCRIPTORS, "read"), environment: env, discovered: [] });
-    const act = buildLayeredInstructions({ mode: "act", visibleDescriptors: filterDescriptorsByMode(SEARCH_DESCRIPTORS, "act"), environment: env, discovered: [] });
+    const read = buildLayeredInstructions({ mode: "read", environment: env, discovered: [] });
+    const act = buildLayeredInstructions({ mode: "act", environment: env, discovered: [] });
     const oldAssembly = `${MCP_INSTRUCTIONS}\n\n${GENERATED_TOOL_SELECTION}`;
     expect(read.length).toBeLessThan(act.length);
     expect(read.length).toBeLessThan(oldAssembly.length);
+    // The tool-selection layer moved out of initialize (startup-latency
+    // batch): neither mode's assembled instructions carry it any more,
+    // and act is now smaller than the old full-registry assembly.
+    expect(act.length).toBeLessThan(oldAssembly.length);
+    expect(read).not.toContain("GENERATED TOOL SELECTION");
+    expect(act).not.toContain("GENERATED TOOL SELECTION");
     expect(read).not.toContain("- `act`");
     expect(read).not.toContain("- `form`");
     expect(act).toContain("## MODE: act");
@@ -366,12 +372,19 @@ describe("Phase D initialize payload measurement", () => {
     expect(second).toEqual(first);
     expect(first.read).toBeLessThan(first.act);
     expect(first.read).toBeLessThan(first.old);
+    // The selection layer moved out of initialize, so act is now smaller
+    // than the old assembly too (startup-latency batch).
+    expect(first.act).toBeLessThan(first.old);
     expect(first.plan).toBeLessThan(first.act);
     expect(first.explore).toBeLessThan(first.act);
     // Internal modes carry an empty effective tool set, so they must not
-    // exceed the read-mode surface.
-    expect(first.summary).toBeLessThanOrEqual(first.read);
-    expect(first.compaction).toBeLessThanOrEqual(first.read);
+    // exceed the old assembly either — and with the selection layer out
+    // of initialize, no mode's payload carries a tool surface at all:
+    // sizes now differ only by MODE_PROMPTS wording, so summary's and
+    // compaction's slightly longer prompt texts may exceed read's by a
+    // few chars (summary +13, compaction +22 over read).
+    expect(first.summary).toBeLessThan(first.old);
+    expect(first.compaction).toBeLessThan(first.old);
     console.log(
       `Phase D payload sizes: old=${first.old} act=${first.act} read=${first.read} plan=${first.plan} explore=${first.explore} summary=${first.summary} compaction=${first.compaction}`,
     );

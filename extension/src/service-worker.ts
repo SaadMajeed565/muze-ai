@@ -206,6 +206,17 @@ let onboarding: OnboardingState = { completed: false, step: 1 };
 /** Set when the gateway rejects the stored token; cleared by a new sign-in. */
 let gatewayAuthRequired = false;
 let gatewayAuthToken = "";
+/**
+ * Token used by the last gateway socket that opened. In memory only, never
+ * persisted, never logged, never written to an audit event or dashboard
+ * state — same handling as `gatewayAuthToken` above. A reconnect with this
+ * token skips the HTTPS status preflight (see `connectGateway`): the token
+ * already proved itself on a live socket. After a service-worker restart
+ * this is empty, so the first connect always runs the preflight — correct
+ * and conservative. Cleared by `markGatewayAuthRequired` when the gateway
+ * rejects the token, so a revoked token never keeps its skip.
+ */
+let lastConnectedGatewayToken = "";
 
 /**
  * Persisted live-activity feed (chrome.storage.local, key
@@ -599,6 +610,12 @@ function buildManager(): BridgeManager {
       // on register (before the socket is up) and on disconnect.
       if (!activeSettings.gatewayToken) return;
       if (!manager?.isConnected()) return;
+      // The socket is up with this token, so it has proved itself: a later
+      // reconnect with the same token may skip the HTTPS status preflight
+      // (see `connectGateway`). The gateway still validates the auth frame
+      // and closes with 4401/4403 if the token has since been revoked;
+      // that path clears this record via `markGatewayAuthRequired`.
+      lastConnectedGatewayToken = activeSettings.gatewayToken;
       void refreshBrowsersCache(loadBrowsersDashboard, () => notifyDashboard({ kind: "browsers.changed" })).catch(() => undefined);
     },
     onBrowsersDelta: (delta) => {
@@ -671,6 +688,10 @@ function markGatewayAuthRequired(token: string, reason: string): void {
   // dashboard state, or to any log (the audit redactor would strip a field
   // named "token" anyway, but no such field is ever recorded here).
   gatewayAuthToken = token;
+  // A token the gateway just rejected must not keep its preflight skip:
+  // the next reconnect with it must run the preflight so the user gets the
+  // clear sign-in prompt instead of a bare socket close.
+  if (lastConnectedGatewayToken === token) lastConnectedGatewayToken = "";
   audit.record({
     kind: "client.connect",
     decision: "denied",
@@ -701,6 +722,14 @@ function plainAuthError(error: unknown): string {
  * reconnect loop. Network/preflight outages still attempt the socket, which
  * owns its own backoff. Once auth has failed for a token, repeated keepalive
  * alarms are ignored until the user signs in again.
+ *
+ * Reconnect fast path: the preflight is skipped when the token is unchanged
+ * since the last socket that opened with it (`lastConnectedGatewayToken`) —
+ * that token already proved itself, and the HTTPS round-trip on every
+ * reconnect is what made every request wait before work started. The first
+ * connect after a worker restart, and any connect with a changed token,
+ * still run the preflight. The socket's own auth (4401/4403 close) stays
+ * the backstop, and a rejection there clears the remembered token.
  */
 let connectGatewayInFlight: Promise<void> | null = null;
 /**
@@ -752,8 +781,19 @@ async function connectGateway(settings: BridgeSettings): Promise<void> {
   const url = normalizeGatewayUrl(GATEWAY_URL);
   if (!url) return;
 
+  // Skip the preflight only for a token that already proved itself on a
+  // live socket (see the `lastConnectedGatewayToken` comment above). The
+  // non-empty check is fail-closed: an empty token must never read as
+  // "unchanged". The latch-clear below runs either way: a latch can only
+  // belong to a different token here — this token's own latch
+  // early-returned above — and a successful preflight used to clear it
+  // as a side effect.
+  const skipPreflight =
+    settings.gatewayToken !== "" && settings.gatewayToken === lastConnectedGatewayToken;
   try {
-    await fetchGatewayStatus(url, settings.gatewayToken);
+    if (!skipPreflight) {
+      await fetchGatewayStatus(url, settings.gatewayToken);
+    }
   } catch (error) {
     if (isGatewayAuthError(error)) {
       markGatewayAuthRequired(settings.gatewayToken, error.message);
