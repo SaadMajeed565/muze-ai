@@ -357,15 +357,24 @@ async function listAccountBrowsers(request: Request, env: GatewayEnv): Promise<R
   if (!account) return json({ error: "not signed in" }, 401);
   const clientsResult = await dirCall(env, "clientsForUser", { userId: account.userId });
   const tokenClients = (clientsResult.ok === false ? [] : (clientsResult.clients as Array<Record<string, unknown>> | undefined) ?? []);
+  // Live MCP clients are account-level now (contract C3): one registry
+  // read, matched by client id — not a /mcp-clients read per browser DO,
+  // which no longer hosts MCP sessions. A registry that answers
+  // ok:false (e.g. an older deployment) degrades to all-offline, never
+  // to a failed list.
+  const liveResult = await dirCall(env, "liveClients", { userId: account.userId });
+  const liveEntries = (liveResult.ok === false ? [] : (liveResult.clients as Array<Record<string, unknown>> | undefined) ?? []);
+  const liveByClient = new Map<string, Record<string, unknown>>();
+  for (const entry of liveEntries) {
+    const clientId = String(entry.clientId ?? "");
+    if (clientId && !liveByClient.has(clientId)) liveByClient.set(clientId, entry);
+  }
   const browsers = [];
-  const liveByBrowser = new Map<string, Array<Record<string, unknown>>>();
   for (const browser of account.browsers) {
     const sessionId = String(browser.sessionId ?? "");
     const status = await sessionDoJson(env, sessionId, "/status");
     const connected = Boolean(status?.connected);
     const tabCount = connected ? (await sessionDoJson(env, sessionId, "/browser-tab-count"))?.tabCount ?? null : null;
-    const live = connected ? ((await sessionDoJson(env, sessionId, "/mcp-clients"))?.clients as Array<Record<string, unknown>> | undefined) ?? [] : [];
-    liveByBrowser.set(sessionId, live);
     browsers.push({
       sessionId,
       name: browser.name ?? "Browser",
@@ -383,22 +392,40 @@ async function listAccountBrowsers(request: Request, env: GatewayEnv): Promise<R
   }
   const mcpClients = tokenClients.map((entry) => {
     const sessionId = String(entry.sessionId ?? "");
-    const live = (liveByBrowser.get(sessionId) ?? []).find((item) => String(item.clientId ?? "") === String(entry.clientId ?? ""));
+    const live = liveByClient.get(String(entry.clientId ?? ""));
     return {
       clientId: entry.clientId ?? "",
       clientName: entry.clientName ?? entry.clientId ?? "",
       scope: entry.scope ?? "",
       sessionId,
       live: Boolean(live),
-      // Live transport timestamps when connected; otherwise the honest
+      // Live registry timestamps when connected; otherwise the honest
       // proxies are the authorization date and the last token refresh.
-      connectedSince: live ? Number(live.createdAt ?? 0) || null : null,
+      connectedSince: live ? Number(live.connectedSince ?? 0) || null : null,
       lastActivityAt: live ? Number(live.lastActivityAt ?? 0) || null : null,
       authorizedSince: entry.createdAt ?? null,
       lastRefreshedAt: entry.lastRefreshedAt ?? null,
       expiresAt: entry.expiresAt ?? null,
     };
   });
+  // A live client whose token rows are gone (e.g. its token's browser
+  // was removed) still shows as a live row with null token dates, so
+  // the dashboard never loses a connected client from the list.
+  for (const [clientId, live] of liveByClient) {
+    if (tokenClients.some((entry) => String(entry.clientId ?? "") === clientId)) continue;
+    mcpClients.push({
+      clientId,
+      clientName: live.clientName ?? clientId,
+      scope: live.scope ?? "",
+      sessionId: typeof live.sessionId === "string" ? live.sessionId : "",
+      live: true,
+      connectedSince: Number(live.connectedSince ?? 0) || null,
+      lastActivityAt: Number(live.lastActivityAt ?? 0) || null,
+      authorizedSince: null,
+      lastRefreshedAt: null,
+      expiresAt: null,
+    });
+  }
   return json({
     browsers,
     defaultSessionId: account.defaultSessionId,
@@ -520,10 +547,13 @@ async function removeAccountBrowser(request: Request, env: GatewayEnv): Promise<
   }
   const result = await dirCall(env, "removeBrowser", { userId: account.userId, targetSessionId: target });
   if (result.ok === false) return json({ error: result.error ?? "could not remove browser" }, 400);
-  // Close the removed browser's bridge and live MCP sessions; the
-  // DirectoryDO record and tokens are already gone.
+  // Close the removed browser's bridge only: its socket is that
+  // browser's own, and closing it is required. Its live MCP sessions
+  // are NOT closed — MCP sessions live at the account level now, and
+  // removing a browser must never kill them (there is deliberately no
+  // /purge-mcp-sessions call here anymore). The DirectoryDO record and
+  // tokens are already gone.
   await sessionDoJson(env, target, "/disconnect-bridge", { method: "POST" });
-  await sessionDoJson(env, target, "/purge-mcp-sessions", { method: "POST" });
   // Delta, after removal persisted and the browser torn down, to the
   // REMAINING browsers only (the removed browser has no record left).
   // Any connected=false upsert from its socket close is a no-op: its
@@ -680,19 +710,64 @@ async function mcp(request: Request, env: GatewayEnv, url: URL, requestId: strin
     .filter((item) => item === "read:tools" || item === "call:tools")
     .join(" ");
   const headers = new Headers(request.headers);
-  for (const name of ["x-muze-client-id", "x-muze-client-name", "x-muze-client-version", "x-muze-client-scope", "x-muze-browser-session"]) headers.delete(name);
+  for (const name of ["x-muze-client-id", "x-muze-client-name", "x-muze-client-version", "x-muze-client-scope", "x-muze-browser-session", "x-muze-user-id", "x-muze-mcp-session"]) headers.delete(name);
   const clientId = String(verified.clientId ?? "");
   if (clientId) {
     headers.set("x-muze-client-id", clientId);
     headers.set("x-muze-client-name", String(verified.clientName ?? clientId));
   }
-  // The browser this access token is bound to (after any browsers.select
-  // rebind): SessionDO uses it for browsers.* tools and for routing.
-  headers.set("x-muze-browser-session", String(verified.sessionId));
+  // The account this access token belongs to (contract C1). verifyAccess
+  // resolves it from the token row, falling back to the token's session
+  // for rows minted before userId was stored; the browsersForSession
+  // read below is the last-resort fallback if it still comes back empty.
+  let userId = String(verified.userId ?? "");
+  if (!userId && verified.sessionId) {
+    const account = await dirCall(env, "browsersForSession", { sessionId: String(verified.sessionId) });
+    if (account.ok !== false) userId = String(account.userId ?? "");
+  }
+  if (userId) headers.set("x-muze-user-id", userId);
   if (sanitisedVersion) headers.set("x-muze-client-version", sanitisedVersion);
   if (verifiedScope) headers.set("x-muze-client-scope", verifiedScope);
+  // Unbound routing: the MCP session lives in its OWN Durable Object,
+  // named by the MCP session id — never in a browser's DO. An initialize
+  // (no mcp-session-id header) mints a fresh MCP DO; every later request
+  // routes by the mcp-session-id header, which IS the routing key. The
+  // key is forwarded as x-muze-mcp-session so the DO's transport
+  // generates exactly that id. Non-initialize requests without a session
+  // header still 400, as before. The old x-muze-browser-session forward
+  // is gone entirely: no token is bound to a browser anymore.
+  const headerSession = request.headers.get("mcp-session-id")?.trim();
+  const isInitialize = await isInitializeRequest(request);
+  let routingKey: string;
+  if (isInitialize) {
+    routingKey = `mcp:${crypto.randomUUID()}`;
+  } else {
+    if (!headerSession) return text("Mcp-Session-Id header is required", 400);
+    routingKey = headerSession;
+  }
+  headers.set("x-muze-mcp-session", routingKey);
   const forwarded = new Request(request, { headers });
-  return sessionStub(env, String(verified.sessionId)).fetch(forwarded);
+  return sessionStub(env, routingKey).fetch(forwarded);
+}
+
+/**
+ * Peek at an /mcp POST body to tell an `initialize` (which mints a fresh
+ * MCP session DO) from a call on an existing session. A batch array
+ * counts as initialize when any message is one. An unreadable body is
+ * not an initialize: it routes by header like any other call, and the
+ * DO answers 400 when no session header is present.
+ */
+async function isInitializeRequest(request: Request): Promise<boolean> {
+  if (request.method !== "POST") return false;
+  try {
+    const body = (await request.clone().json()) as unknown;
+    const messages = Array.isArray(body) ? body : [body];
+    return messages.some(
+      (message) => typeof message === "object" && message !== null && (message as { method?: unknown }).method === "initialize",
+    );
+  } catch {
+    return false;
+  }
 }
 
 function sessionStub(env: GatewayEnv, sessionId: string): DurableObjectStub {

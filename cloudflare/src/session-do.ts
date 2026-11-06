@@ -7,7 +7,7 @@ import type {
   ToolBatchItemResult,
   ToolCallBatchItem,
 } from "../libs/tool-contracts/index.js";
-import { BridgeSlot, DoBridge, type BridgeToolResult, type GatewayBridge } from "./bridge.js";
+import { BridgeSlot, DoBridge, ForwardingBridge, type BridgeToolResult, type ForwardTarget, type GatewayBridge } from "./bridge.js";
 import { createGatewayMcpServer } from "./mcp.js";
 import { browsersDeltaBrowser, browsersDeltaClient, dirCall, pushBrowsersDelta } from "./directory-client.js";
 import type { BrowsersDelta } from "../libs/tool-contracts/protocol.js";
@@ -188,6 +188,10 @@ interface PersistedMcpSession {
   mode?: string;
   /** Phase A discovered tools for this MCP session, restored the same way. */
   discovered?: string[];
+  /** Account id for this MCP session (contract C1), restored on cold-DO
+   * rebuild so routing and live presence keep working after hibernation
+   * even if a later request ever arrives without the header. */
+  userId?: string;
 }
 
 /**
@@ -225,8 +229,35 @@ export class SessionDO implements DurableObject {
    */
   private readonly sessionClients = new Map<string, { clientId: string; createdAt: number; lastActivityAt: number }>();
   /** Browser session id this DO serves, when known (set from the bridge
-   * route or the /mcp forward headers; needed for browsers.* tools). */
+   * route; needed for browsers.* tools on browser-role DOs). MCP-role
+   * DOs never set this: the MCP session is bound to the account, and
+   * routing resolves per call through the forwarding bridge. */
   private browserSessionId = "";
+  /**
+   * Account id for this MCP session (contract C1), from the
+   * `x-muze-user-id` header the Worker sets from verifyAccess. Empty on
+   * browser-role DOs and on directly-constructed (test) DOs.
+   */
+  private userId = "";
+  /**
+   * Routing key for this MCP session (the `mcp-session-id`), from the
+   * `x-muze-mcp-session` header the Worker sets when it routes /mcp.
+   * Empty for direct-DO use, which keeps the legacy
+   * `<doId>:<uuid>` session-id scheme.
+   */
+  private mcpRoutingKey = "";
+  /**
+   * One forwarding bridge per live OAuth client in this DO (one per MCP
+   * session's server), for routing and for the live-row target lookup
+   * in emitClientUpsert. Browser-role DOs never populate this.
+   */
+  private readonly routingBridges = new Map<string, ForwardingBridge>();
+  /**
+   * Live-row display fields per MCP session id (client name + OAuth
+   * scope), for the live registry. In-memory only; the stored session
+   * record is the source on a cold rebuild.
+   */
+  private readonly liveClientInfo = new Map<string, { clientName?: string; scope?: string }>();
   /**
    * Client id per task that currently mirrors as running (in-memory
    * only, never persisted in the mirror entry and never served on
@@ -307,6 +338,32 @@ export class SessionDO implements DurableObject {
         return this.purgeMcpSessions();
       case "/browser-tab-count":
         return this.browserTabCount();
+      case "/bridge-call": {
+        // Internal route, called only by an MCP DO's forwarding bridge
+        // (never by a public Worker route). Executes one bridge op over
+        // THIS browser DO's local slot and returns the result, so an MCP
+        // session can act on the browser it is currently routed to.
+        let body: Record<string, unknown> = {};
+        try {
+          body = (await request.json()) as Record<string, unknown>;
+        } catch {
+          body = {};
+        }
+        return this.bridgeCall(body);
+      }
+      case "/task-mirror": {
+        // Internal route, called only by an MCP DO after a tasks.* result
+        // (never by a public Worker route). Records a status-only mirror
+        // entry for a task running on THIS browser, so /session/status
+        // keeps reporting the mirror exactly as before the unbinding.
+        let body: { entry?: unknown } = {};
+        try {
+          body = (await request.json()) as { entry?: unknown };
+        } catch {
+          body = {};
+        }
+        return this.storeMirrorEntry(body.entry);
+      }
       case "/mcp-clients":
         return this.mcpClients();
       case "/disconnect-bridge":
@@ -341,15 +398,24 @@ export class SessionDO implements DurableObject {
 
   private async purgeMcpSessions(): Promise<Response> {
     const count = this.mcpSessions.size;
+    const liveClientIds = [...new Set([...this.sessionClients.values()].map((meta) => meta.clientId))];
     for (const transport of this.mcpSessions.values()) {
       void transport.close().catch(() => undefined);
     }
     this.mcpSessions.clear();
     this.sessionClients.clear();
     this.runningTaskClients.clear();
+    this.liveClientInfo.clear();
+    this.routingBridges.clear();
     await this.state.storage.delete(MCP_SESSIONS_KEY);
     this.taskMirror.clear();
     await this.state.storage.delete(TASK_MIRROR_KEY);
+    // Live rows are account-level (contract C3): a purge must clear them
+    // too, or the dashboard would keep showing a deleted account's
+    // clients as live until the registry's staleness window passes.
+    for (const clientId of liveClientIds) {
+      await this.clearLiveClientRow(clientId);
+    }
     return json({ ok: true, sessions: count });
   }
 
@@ -371,6 +437,126 @@ export class SessionDO implements DurableObject {
     } catch {
       return json({ tabCount: null });
     }
+  }
+
+  /**
+   * Internal /bridge-call route (browser role): execute one bridge op
+   * over this DO's local slot, for an MCP DO's forwarding bridge. The
+   * envelope always carries `connected` so the caller can track
+   * liveness, and `error.executed` so it knows whether a retry on
+   * another browser is safe: false ONLY when the slot was not connected
+   * and nothing ran. Any error raised by the slot itself counts as
+   * executed — it may have run, and a retry could double-execute a
+   * consequential call. Never throws: a malformed body is an
+   * INVALID_INPUT envelope, never a 500.
+   */
+  private async bridgeCall(body: Record<string, unknown>): Promise<Response> {
+    const op = typeof body.op === "string" ? body.op : "";
+    const fail = (code: string, message: string, executed: boolean, retryable = false): Response =>
+      json({
+        ok: false,
+        connected: this.slot.isConnected(),
+        error: { code, message, retryable, executed },
+      });
+    if (!this.slot.isConnected() || !this.bridge) {
+      return fail("CONFLICT", "No browser is connected to this session", false, true);
+    }
+    const client = (body.client && typeof body.client === "object" ? body.client : undefined) as ClientIdentity | undefined;
+    try {
+      switch (op) {
+        case "listTools": {
+          const tools = await this.slot.listTools();
+          return json({ ok: true, connected: true, tools });
+        }
+        case "call": {
+          const outcome = await this.slot.callTool({
+            tool: String(body.tool ?? ""),
+            input: body.input ?? {},
+            ...(typeof body.approvalId === "string" ? { approvalId: body.approvalId } : {}),
+            ...(typeof body.dryRun === "boolean" ? { dryRun: body.dryRun } : {}),
+            ...(client ? { client } : {}),
+            ...(typeof body.taskId === "string" ? { taskId: body.taskId } : {}),
+          });
+          return json({ ok: true, connected: true, ...outcome });
+        }
+        case "batch": {
+          const results = await this.slot.callToolBatch(
+            (Array.isArray(body.calls) ? body.calls : []) as ToolCallBatchItem[],
+            { ...(client ? { client } : {}) },
+          );
+          return json({ ok: true, connected: true, results });
+        }
+        case "approval.request": {
+          const approval = await this.slot.createApproval(String(body.tool ?? ""), body.input ?? {}, client);
+          return json({ ok: true, connected: true, approval });
+        }
+        case "approval.respond": {
+          await this.slot.respondApproval(
+            String(body.approvalId ?? ""),
+            body.approved === true,
+            typeof body.reason === "string" ? body.reason : undefined,
+          );
+          return json({ ok: true, connected: true });
+        }
+        case "approval.wait": {
+          const approved = await this.slot.waitApproval(
+            String(body.approvalId ?? ""),
+            typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
+          );
+          return json({ ok: true, connected: true, approved });
+        }
+        default:
+          return fail("INVALID_INPUT", `unknown bridge op "${op}"`, false);
+      }
+    } catch (error) {
+      // The slot ran (or may have run): never retryable-by-failover.
+      // Preserve the ToolError code/message when the slot raised one so
+      // the MCP layer sees exactly what the extension reported.
+      const code =
+        error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : "CONFLICT";
+      const retryable =
+        error && typeof error === "object" && "retryable" in error ? (error as { retryable: unknown }).retryable === true : true;
+      return fail(code, error instanceof Error ? error.message : String(error), true, retryable);
+    }
+  }
+
+  /**
+   * Internal /task-mirror route (browser role): store one status-only
+   * mirror entry pushed by the MCP DO that ran the task on this browser.
+   * The entry shape is validated exactly like a locally produced one
+   * (taskMirrorFromResult rules): no id or no status means no entry,
+   * and nothing but status/progress is ever retained.
+   */
+  private async storeMirrorEntry(entry: unknown): Promise<Response> {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return json({ ok: false, stored: false });
+    const rec = entry as Record<string, unknown>;
+    if (typeof rec.taskId !== "string" || rec.taskId === "" || typeof rec.status !== "string" || rec.status === "") {
+      return json({ ok: false, stored: false });
+    }
+    const stored: TaskMirrorEntry = {
+      taskId: rec.taskId,
+      status: rec.status,
+      stepIndex: typeof rec.stepIndex === "number" && Number.isFinite(rec.stepIndex) ? rec.stepIndex : 0,
+      totalSteps: typeof rec.totalSteps === "number" && Number.isFinite(rec.totalSteps) ? rec.totalSteps : 0,
+      ...(typeof rec.browserSessionId === "string" && rec.browserSessionId !== "" ? { browserSessionId: rec.browserSessionId } : {}),
+      updatedAt: typeof rec.updatedAt === "number" && Number.isFinite(rec.updatedAt) ? rec.updatedAt : Date.now(),
+    };
+    this.taskMirror.set(stored.taskId, stored);
+    try {
+      const all = await this.loadMirror();
+      all[stored.taskId] = stored;
+      const ids = Object.keys(all).sort((a, b) => (all[a]?.updatedAt ?? 0) - (all[b]?.updatedAt ?? 0));
+      while (ids.length > MAX_MIRROR_ENTRIES) {
+        const oldest = ids.shift();
+        if (oldest) delete all[oldest];
+      }
+      await this.state.storage.put(TASK_MIRROR_KEY, all);
+    } catch {
+      // ignore: mirror persistence is best-effort, never call-breaking
+    }
+    return json({ ok: true, stored: true });
   }
 
   /** Internal route: live MCP transports for the Browsers dashboard. */
@@ -436,6 +622,30 @@ export class SessionDO implements DurableObject {
     }
   }
 
+  /**
+   * Account read for MCP-role delta emission: the account's browser list
+   * via DirectoryDO browsersForUser (contract C1 userId), the same read
+   * listAccountBrowsers uses. Returns null when the DO has no env, no
+   * known user id (e.g. a directly-constructed test DO), or the account
+   * no longer exists — in all cases the caller silently emits nothing.
+   */
+  private async accountBrowsersForUser(): Promise<{
+    browsers: Array<Record<string, unknown>>;
+    defaultSessionId: string;
+  } | null> {
+    if (!this.env || !this.userId) return null;
+    try {
+      const result = await dirCall(this.env, "browsersForUser", { userId: this.userId });
+      if (result.ok === false || !Array.isArray(result.browsers)) return null;
+      return {
+        browsers: result.browsers as Array<Record<string, unknown>>,
+        defaultSessionId: String(result.defaultSessionId ?? ""),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** Emit browser.upsert for this browser to every browser of the account
    * (including this one: pushing to a just-closed socket is a harmless
    * delivered:false no-op). Callers run this fire-and-forget; a failed
@@ -459,8 +669,14 @@ export class SessionDO implements DurableObject {
 
   /**
    * Emit client.upsert for one OAuth client to every browser of the
-   * account. The row comes from DirectoryDO clientsForUser (same source
-   * as listAccountBrowsers) so names/scopes/authorization dates match a
+   * account. Unbound: the MCP session lives at the account level, so the
+   * fan-out list comes from the userId-based account read (not from a
+   * browser session), the token row is matched by client id only (a
+   * token's browser is where it was minted, not where the client is
+   * routed), and the row's sessionId is the browser the client is
+   * currently routed to when known — never the token's mint browser.
+   * The row comes from DirectoryDO clientsForUser (same source as
+   * listAccountBrowsers) so names/scopes/authorization dates match a
    * full fetch; when no token row exists yet the row falls back to the
    * client id as its name with null dates, never invented values.
    */
@@ -470,28 +686,24 @@ export class SessionDO implements DurableObject {
     liveMeta?: { createdAt: number; lastActivityAt: number },
   ): Promise<void> {
     try {
-      if (!this.env || !this.browserSessionId || !clientId) return;
-      const account = await this.accountBrowsersForDelta();
+      if (!this.env || !this.userId || !clientId) return;
+      const account = await this.accountBrowsersForUser();
       if (!account) return;
       let tokenEntry: Record<string, unknown> | undefined;
-      // clientsForUser needs the user id, which browsersForSession
-      // returns; re-read it here (directory-local) rather than threading
-      // it through accountBrowsersForDelta's shape.
       try {
-        const sessionResult = await dirCall(this.env, "browsersForSession", { sessionId: this.browserSessionId });
-        const userId = String(sessionResult.userId ?? "");
-        if (userId) {
-          const clientsResult = await dirCall(this.env, "clientsForUser", { userId });
-          if (clientsResult.ok !== false && Array.isArray(clientsResult.clients)) {
-            tokenEntry = (clientsResult.clients as Array<Record<string, unknown>>).find(
-              (entry) => String(entry.clientId ?? "") === clientId && String(entry.sessionId ?? "") === this.browserSessionId,
-            );
-          }
+        const clientsResult = await dirCall(this.env, "clientsForUser", { userId: this.userId });
+        if (clientsResult.ok !== false && Array.isArray(clientsResult.clients)) {
+          tokenEntry = (clientsResult.clients as Array<Record<string, unknown>>).find(
+            (entry) => String(entry.clientId ?? "") === clientId,
+          );
         }
       } catch {
         tokenEntry = undefined;
       }
-      const row = tokenEntry ?? { clientId, clientName: clientId, scope: "", sessionId: this.browserSessionId };
+      const targetSessionId = this.routingBridges.get(clientId)?.currentTarget()?.sessionId;
+      const row: Record<string, unknown> = tokenEntry ?? { clientId, clientName: clientId, scope: "" };
+      if (targetSessionId) row.sessionId = targetSessionId;
+      else if (typeof row.sessionId !== "string") row.sessionId = "";
       const delta: BrowsersDelta = {
         type: "client.upsert",
         client: browsersDeltaClient(row, live, liveMeta),
@@ -499,6 +711,60 @@ export class SessionDO implements DurableObject {
       await pushBrowsersDelta(this.env, account.browsers.map((entry) => String(entry.sessionId ?? "")), delta);
     } catch {
       // ignore: delta delivery must never break the triggering path
+    }
+  }
+
+  /**
+   * Live registry (contract C3): record one live MCP client in the
+   * DirectoryDO, or clear it. Best-effort and never throwing: a
+   * registry write must never break session open/close. The live row
+   * carries the browser the client is currently routed to when known;
+   * connectedSince is the session's creation time so a re-route or a
+   * target refresh never resets it. Staleness (10-minute window) is
+   * the DirectoryDO's decision.
+   */
+  private async setLiveClientRow(
+    sessionId: string,
+    clientId: string,
+    meta: { createdAt: number; lastActivityAt: number },
+  ): Promise<void> {
+    try {
+      if (!this.env || !this.userId || !clientId) return;
+      const info = this.liveClientInfo.get(sessionId);
+      const targetSessionId = this.routingBridges.get(clientId)?.currentTarget()?.sessionId;
+      await dirCall(this.env, "setLiveClient", {
+        clientId,
+        userId: this.userId,
+        ...(targetSessionId ? { sessionId: targetSessionId } : {}),
+        ...(info?.clientName ? { clientName: info.clientName } : {}),
+        ...(info?.scope ? { scope: info.scope } : {}),
+        connectedSince: meta.createdAt,
+        lastActivityAt: meta.lastActivityAt,
+      });
+    } catch {
+      // ignore: live presence must never break the triggering path
+    }
+  }
+
+  private async clearLiveClientRow(clientId: string): Promise<void> {
+    try {
+      if (!this.env || !this.userId || !clientId) return;
+      await dirCall(this.env, "clearLiveClient", { clientId, userId: this.userId });
+    } catch {
+      // ignore: live presence must never break the triggering path
+    }
+  }
+
+  /**
+   * Refresh the live rows of one client's sessions after its routed
+   * target changed (select, failover, refresh), so the registry keeps
+   * pointing at the browser the client is actually routed to.
+   */
+  private async refreshLiveRowsForClient(clientId: string, _targetSessionId: string): Promise<void> {
+    void _targetSessionId;
+    for (const [sessionId, meta] of [...this.sessionClients.entries()]) {
+      if (meta.clientId !== clientId) continue;
+      await this.setLiveClientRow(sessionId, clientId, meta);
     }
   }
 
@@ -536,6 +802,7 @@ export class SessionDO implements DurableObject {
       const transport = this.mcpSessions.get(sessionId);
       this.mcpSessions.delete(sessionId);
       this.sessionClients.delete(sessionId);
+      this.liveClientInfo.delete(sessionId);
       void transport?.close().catch(() => undefined);
       dropped++;
     }
@@ -548,6 +815,10 @@ export class SessionDO implements DurableObject {
       }
     }
     if (changed) await this.state.storage.put(MCP_SESSIONS_KEY, stored);
+    // A revoked client is no longer live anywhere (contract C3); the
+    // Worker still fans out client.revoked separately, and this route
+    // deliberately emits no live=false delta (see the method comment).
+    if (dropped > 0) await this.clearLiveClientRow(clientId);
     return json({ dropped });
   }
 
@@ -820,13 +1091,18 @@ export class SessionDO implements DurableObject {
 
   private async handleMcp(request: Request): Promise<Response> {
     this.touch();
-    // The Worker forwards the verified browser session id on every /mcp
-    // request (stripped from client input at the Worker boundary); this is
-    // how the DO learns which browser it serves, for browsers.* tools.
-    const forwardedBrowser = request.headers.get("x-muze-browser-session")?.trim();
-    if (forwardedBrowser) this.browserSessionId = forwardedBrowser;
-    const baseSessionId = this.state.id.toString();
+    // The Worker forwards the verified account id on every /mcp request
+    // (contract C1: stripped from client input at the Worker boundary);
+    // this is how the MCP DO learns its account, for browsers.* tools,
+    // routing, and live presence. The old x-muze-browser-session header
+    // is gone: the Worker never sets it, and this DO must never learn a
+    // browser binding from a header.
+    const forwardedUserId = userIdFromHeaders(request);
+    if (forwardedUserId) this.userId = forwardedUserId;
+    const forwardedRoutingKey = request.headers.get("x-muze-mcp-session")?.trim();
+    if (forwardedRoutingKey) this.mcpRoutingKey = forwardedRoutingKey;
     const headerSession = request.headers.get("mcp-session-id");
+
     const initParams = await readInitializeParams(request);
 
     if (initParams) {
@@ -834,10 +1110,11 @@ export class SessionDO implements DurableObject {
     }
 
     if (!headerSession) return text("Mcp-Session-Id header is required", 400);
-    if (headerSession !== baseSessionId && !headerSession.startsWith(`${baseSessionId}:`)) {
-      return text("Session not found", 404);
-    }
 
+    // The session id IS the routing key: the Worker routed this request
+    // to the DO named by it, so the session must live here — in memory
+    // or in storage (cold DO). Anything else is not found here; there is
+    // no browser-session prefix to check against anymore.
     let transport = this.mcpSessions.get(headerSession);
     if (!transport) {
       // Cold DO resuming an existing session: rebuild under the same id and
@@ -845,17 +1122,34 @@ export class SessionDO implements DurableObject {
       const stored = await this.loadSessions();
       const record = stored[headerSession];
       if (!record) return text("Session not found", 404);
-      transport = await this.buildTransport(headerSession, record.params, record.client, undefined, record.scope, {
-        initialMode: record.mode,
-        initialDiscovered: record.discovered,
-        onSessionStateChange: (state) => {
-          void this.persistSessionStateWithRetry(headerSession, state);
+      transport = await this.buildTransport(
+        headerSession,
+        record.params,
+        record.client,
+        undefined,
+        record.scope,
+        {
+          initialMode: record.mode,
+          initialDiscovered: record.discovered,
+          onSessionStateChange: (state) => {
+            void this.persistSessionStateWithRetry(headerSession, state);
+          },
         },
+        record.userId || this.userId || undefined,
+      );
+      this.registerSession(headerSession, transport, record.client?.id, {
+        clientName: record.client?.name,
+        scope: record.scope,
       });
-      this.registerSession(headerSession, transport, record.client?.id);
     } else {
       const meta = this.sessionClients.get(headerSession);
-      if (meta) meta.lastActivityAt = Date.now();
+      if (meta) {
+        meta.lastActivityAt = Date.now();
+        // Liveness is "registered AND lastActivityAt within the window"
+        // (contract C3), so activity refreshes the registry row too —
+        // without it a long-lived session would go stale mid-use.
+        void this.setLiveClientRow(headerSession, meta.clientId, meta);
+      }
     }
     return transport.handleRequest(request);
   }
@@ -863,27 +1157,53 @@ export class SessionDO implements DurableObject {
   private async openMcpSession(request: Request, params: InitializeParams): Promise<Response> {
     const client = this.clientFromHeaders(request);
     const scope = this.scopeFromHeaders(request);
+    const userId = this.userId || undefined;
+    // The session id is the routing key the Worker generated for this
+    // initialize (the DO name); the transport's generator returns it
+    // verbatim, so the mcp-session-id response header IS the routing key
+    // for every later request. Direct-DO use (no header) keeps the
+    // legacy <doId>:<uuid> scheme.
+    const routingKey = this.mcpRoutingKey || undefined;
     let generated: string | undefined;
     let openSessionId: string | undefined;
-    const transport = await this.buildTransport(undefined, undefined, client, () => {
-      generated ??= `${this.state.id.toString()}:${crypto.randomUUID()}`;
-      return generated;
-    }, scope, {
-      onSessionStateChange: (state) => {
-        if (openSessionId) void this.persistSessionStateWithRetry(openSessionId, state);
+    const transport = await this.buildTransport(
+      undefined,
+      undefined,
+      client,
+      () => {
+        if (routingKey) return routingKey;
+        generated ??= `${this.state.id.toString()}:${crypto.randomUUID()}`;
+        return generated;
       },
-    });
+      scope,
+      {
+        onSessionStateChange: (state) => {
+          if (openSessionId) void this.persistSessionStateWithRetry(openSessionId, state);
+        },
+      },
+      userId,
+    );
     const response = await transport.handleRequest(request);
     const sessionId = response.headers.get("mcp-session-id") ?? generated;
     openSessionId = sessionId;
     if (sessionId) {
-      this.registerSession(sessionId, transport, client?.id);
-      await this.persistSession(sessionId, { params, ...(client ? { client } : {}), ...(scope ? { scope } : {}) });
+      this.registerSession(sessionId, transport, client?.id, { clientName: client?.name, scope });
+      await this.persistSession(sessionId, {
+        params,
+        ...(client ? { client } : {}),
+        ...(scope ? { scope } : {}),
+        ...(userId ? { userId } : {}),
+      });
     }
     return response;
   }
 
-  private registerSession(sessionId: string, transport: WebStandardStreamableHTTPServerTransport, clientId?: string): void {
+  private registerSession(
+    sessionId: string,
+    transport: WebStandardStreamableHTTPServerTransport,
+    clientId?: string,
+    liveInfo?: { clientName?: string; scope?: string },
+  ): void {
     this.mcpSessions.set(sessionId, transport);
     if (clientId) {
       const existing = this.sessionClients.get(sessionId);
@@ -892,11 +1212,17 @@ export class SessionDO implements DurableObject {
         createdAt: existing?.createdAt ?? Date.now(),
         lastActivityAt: Date.now(),
       });
+      if (liveInfo && (liveInfo.clientName || liveInfo.scope)) {
+        this.liveClientInfo.set(sessionId, { ...(liveInfo.clientName ? { clientName: liveInfo.clientName } : {}), ...(liveInfo.scope ? { scope: liveInfo.scope } : {}) });
+      }
       // MCP session established (new initialize, or a cold-DO rebuild of
-      // a live session): the client is live on this browser. Anonymous
+      // a live session): the client is live on the account. Anonymous
       // initializes (no clientId) have no dashboard row and emit nothing.
       const meta = this.sessionClients.get(sessionId);
-      if (meta) void this.emitClientUpsert(clientId, true, meta);
+      if (meta) {
+        void this.emitClientUpsert(clientId, true, meta);
+        void this.setLiveClientRow(sessionId, clientId, meta);
+      }
     }
     // Evict the oldest client when a caller keeps opening sessions without
     // closing them, bounding memory and persisted state. Sessions whose
@@ -916,27 +1242,37 @@ export class SessionDO implements DurableObject {
       const evicted = this.sessionClients.get(candidate);
       this.mcpSessions.delete(candidate);
       this.sessionClients.delete(candidate);
+      this.liveClientInfo.delete(candidate);
       void stale?.close().catch(() => undefined);
-      // Eviction closes the session, so it is no longer live on this
-      // browser — same live=false upsert as a normal close.
-      if (evicted) void this.emitClientUpsert(evicted.clientId, false);
+      // Eviction closes the session, so it is no longer live on the
+      // account — same live=false upsert and registry clear as a normal
+      // close. (The transport's onsessionclosed also calls dropSession,
+      // but the meta is already gone by then, so nothing double-fires.)
+      if (evicted) {
+        void this.emitClientUpsert(evicted.clientId, false);
+        void this.clearLiveClientRow(evicted.clientId);
+      }
     }
   }
 
   private async dropSession(sessionId: string): Promise<void> {
     // MCP session closed (transport onsessionclosed): the client is no
-    // longer live on this browser. The row keeps the list shape with
+    // longer live on the account. The row keeps the list shape with
     // live=false (connectedSince/lastActivityAt null, per
     // listAccountBrowsers) — it is NOT a revocation, so no client.revoked.
     const closed = this.sessionClients.get(sessionId);
     this.mcpSessions.delete(sessionId);
     this.sessionClients.delete(sessionId);
+    this.liveClientInfo.delete(sessionId);
     const stored = await this.loadSessions();
     if (stored[sessionId]) {
       delete stored[sessionId];
       await this.state.storage.put(MCP_SESSIONS_KEY, stored);
     }
-    if (closed) await this.emitClientUpsert(closed.clientId, false);
+    if (closed) {
+      await this.emitClientUpsert(closed.clientId, false);
+      await this.clearLiveClientRow(closed.clientId);
+    }
   }
 
   private async loadSessions(): Promise<Record<string, PersistedMcpSession>> {
@@ -967,6 +1303,33 @@ export class SessionDO implements DurableObject {
       await this.state.storage.put(TASK_MIRROR_KEY, stored);
     } catch {
       // ignore: mirror persistence is best-effort, never call-breaking
+    }
+    // The mirror also lives on the browser the task ran on, so
+    // /session/status (addressed by browser id) keeps reporting it
+    // exactly as before the unbinding. Fire-and-forget with a 2 s cap:
+    // a slow or gone browser must never stall the tool call that
+    // produced the result, and the authoritative copy above is already
+    // stored. The entry's browserSessionId comes from the extension's
+    // TaskView; the forwarding bridge's current target is the fallback.
+    const targetBrowser =
+      entry.browserSessionId ??
+      (clientId ? this.routingBridges.get(clientId)?.currentTarget()?.sessionId : undefined);
+    if (this.env && targetBrowser) {
+      try {
+        await Promise.race([
+          this.env.SESSION_DO.get(this.env.SESSION_DO.idFromName(targetBrowser)).fetch(
+            "https://session/task-mirror",
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ entry }),
+            },
+          ),
+          new Promise((resolve) => setTimeout(resolve, 2000)),
+        ]);
+      } catch {
+        // ignore: the authoritative mirror above is already stored
+      }
     }
   }
 
@@ -1069,6 +1432,7 @@ export class SessionDO implements DurableObject {
       initialDiscovered?: string[];
       onSessionStateChange?: (state: { mode: string; discovered: string[] }) => void;
     },
+    userId?: string,
   ): Promise<WebStandardStreamableHTTPServerTransport> {
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: generator ?? (() => fixedSessionId ?? `${this.state.id.toString()}:${crypto.randomUUID()}`),
@@ -1076,10 +1440,30 @@ export class SessionDO implements DurableObject {
         void this.dropSession(sessionId);
       },
     });
-    // The MCP server talks to the bridge through the task-mirror decorator
-    // so tasks.* results update the status mirror; all other bridge
-    // behaviour (including scope enforcement in mcp.ts) is unchanged.
-    const mirroringBridge = new TaskMirrorBridge(this.slot, (entry, clientId) => this.recordTaskMirror(entry, clientId));
+    // Unbound routing: the MCP server talks to the browser through a
+    // forwarding bridge that resolves the target browser per call
+    // (preference, else account default). One bridge per MCP session, so
+    // each client's preference is its own; the task-mirror decorator
+    // still wraps it so tasks.* results update the status mirror.
+    const effectiveUserId = userId || this.userId || "";
+    const forwardingBridge = new ForwardingBridge({
+      ...(this.env ? { env: this.env } : {}),
+      clientId: client?.id ?? "",
+      userId: effectiveUserId,
+      ...(client?.id
+        ? {
+            onTargetChange: (target: ForwardTarget) => {
+              void this.refreshLiveRowsForClient(client.id, target.sessionId);
+            },
+          }
+        : {}),
+    });
+    if (client?.id) this.routingBridges.set(client.id, forwardingBridge);
+    // Eager liveness probe so ListTools and the CallTool pre-check see
+    // the real connection state from the first call (see
+    // ForwardingBridge.probeConnectivity).
+    void forwardingBridge.probeConnectivity();
+    const mirroringBridge = new TaskMirrorBridge(forwardingBridge, (entry, clientId) => this.recordTaskMirror(entry, clientId));
     // Client type is recorded only if the client declared it in initialize
     // (initParams.clientInfo.name); otherwise it stays "unknown".
     const initialMode = sessionState?.initialMode;
@@ -1092,25 +1476,38 @@ export class SessionDO implements DurableObject {
       ...(sessionState?.onSessionStateChange ? { onSessionStateChange: sessionState.onSessionStateChange } : {}),
       browsers: {
         list: async () => {
-          if (!this.browserSessionId) throw new Error("browser session is unknown for this connection");
-          const result = await dirCall(this.env as GatewayEnv, "browsersForSession", { sessionId: this.browserSessionId });
+          if (!effectiveUserId) throw new Error("browser list needs an account for this connection");
+          const result = await dirCall(this.env as GatewayEnv, "browsersForUser", { userId: effectiveUserId });
           if (result.ok === false) throw new Error(String(result.error ?? "could not list browsers"));
+          // The currently-resolved target: resolveRoute's preference-or-
+          // default for this client (cached by the forwarding bridge).
+          const target = await forwardingBridge.resolveTarget();
           return {
             browsers: result.browsers as Array<Record<string, unknown>>,
             defaultSessionId: String(result.defaultSessionId ?? ""),
-            currentSessionId: String(result.currentSessionId ?? this.browserSessionId),
+            currentSessionId: target.sessionId,
           };
         },
-        select: async (targetSessionId: string) => {
+        select: async (target: string) => {
           if (!client?.id) throw new Error("browser selection needs an OAuth client identity");
-          if (!this.browserSessionId) throw new Error("browser session is unknown for this connection");
-          const result = await dirCall(this.env as GatewayEnv, "setClientBrowser", {
+          if (!effectiveUserId && !forwardingBridge.currentTarget()) {
+            throw new Error("browser selection needs the current browser or account");
+          }
+          // The raw target is passed as targetSessionId: the DirectoryDO
+          // tries it as an id first, then as a name. No token row is
+          // touched; only the routing preference is stored.
+          const result = await dirCall(this.env as GatewayEnv, "setRoutingPreference", {
             clientId: client.id,
-            currentSessionId: this.browserSessionId,
-            targetSessionId,
+            ...(effectiveUserId ? { userId: effectiveUserId } : {}),
+            ...(forwardingBridge.currentTarget() ? { currentSessionId: forwardingBridge.currentTarget()?.sessionId ?? "" } : {}),
+            targetSessionId: target,
           });
           if (result.ok === false) throw new Error(String(result.error ?? "could not select browser"));
-          return { sessionId: String(result.sessionId ?? targetSessionId), name: String(result.name ?? "") };
+          const sessionId = String(result.sessionId ?? target);
+          // The NEXT call on this SAME session goes to the new browser:
+          // update the cached target, no re-initialization.
+          forwardingBridge.setTarget(sessionId, String(result.name ?? ""));
+          return { sessionId, name: String(result.name ?? "") };
         },
       },
     });
@@ -1118,6 +1515,16 @@ export class SessionDO implements DurableObject {
     if (initParams) await replayInitialize(transport, initParams);
     return transport;
   }
+}
+
+/**
+ * Verified account id forwarded by the Worker on every /mcp request
+ * (contract C1). The Worker strips any client-supplied value first and
+ * sets it from verifyAccess, so a value here is never spoofed; an
+ * absent value means the caller is not an MCP request (direct-DO use).
+ */
+function userIdFromHeaders(request: Request): string {
+  return request.headers.get("x-muze-user-id")?.trim() ?? "";
 }
 
 /** Parse an MCP `initialize` POST body, returning its params (if any). */

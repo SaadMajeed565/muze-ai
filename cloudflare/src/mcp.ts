@@ -628,10 +628,11 @@ export function searchTools(
  * agent mode. No registry bump and no version bump: the same precedent
  * as the gateway-native handling of tools.discover/tools.batch.
  *
- * Honest limit, stated in the select result: selection rebinds the
- * client's tokens, so it moves FUTURE MCP transports to the new browser.
- * The live transport that called select still talks to the old browser
- * until the client re-initializes there.
+ * Routing is unbound and account-level: the client connects to the
+ * ACCOUNT, and browsers.select only sets this client's routing
+ * preference for the account. The next call goes to the selected
+ * browser — no re-initialization, no token rebind. Clients that never
+ * select use the account default.
  */
 export interface BrowsersHandler {
   list: () => Promise<{
@@ -639,7 +640,14 @@ export interface BrowsersHandler {
     defaultSessionId: string;
     currentSessionId: string;
   }>;
-  select: (sessionId: string) => Promise<{ sessionId: string; name: string }>;
+  /**
+   * Target is a browser sessionId or a browser name (the DirectoryDO
+   * resolves it: exact sessionId match wins, otherwise a trimmed
+   * case-insensitive name match). The implementation passes the raw
+   * target through with the client identity and the current browser
+   * as the account anchor.
+   */
+  select: (target: string) => Promise<{ sessionId: string; name: string }>;
 }
 
 export const BROWSER_TOOL_DESCRIPTORS: ToolDescriptor[] = [
@@ -647,7 +655,7 @@ export const BROWSER_TOOL_DESCRIPTORS: ToolDescriptor[] = [
     name: "browsers.list",
     title: "List browsers",
     description:
-      "List the browsers attached to your account (name, browser/OS/version, created and last-seen dates, default marker). No device tokens are ever returned. Use browsers.select to move this client's future calls to another browser; the live transport keeps talking to its current browser until it re-initializes.",
+      "List the browsers attached to your account (name, browser/OS/version, created and last-seen dates, default marker). No device tokens are ever returned. Use browsers.select to set this client's routing preference to another browser: the next call goes there, with no re-initialization; clients that never select use the account default.",
     inputSchema: { type: "object", properties: {} },
     annotations: { title: "List browsers", readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     category: "system",
@@ -659,13 +667,14 @@ export const BROWSER_TOOL_DESCRIPTORS: ToolDescriptor[] = [
     name: "browsers.select",
     title: "Select browser",
     description:
-      "Move this OAuth client's future MCP calls to another browser of the same account, persisted across reconnects (the client's tokens are rebound to the target browser). The target must belong to the same account. The live transport that calls this still talks to the previous browser until the client re-initializes; dashboard default selection is respected for clients that never select.",
+      "Set this OAuth client's routing preference to another browser of the same account, persisted across reconnects. The next call goes to the selected browser — no re-initialization, no token change. The target must belong to the same account; give a browser name (as the user would say it) or a sessionId from browsers.list. Clients that never select use the account default.",
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string", description: "Browser session id from browsers.list (never a device token)." },
+        sessionId: { type: "string", description: "Browser session id from browsers.list (never a device token). Wins over name when both are given." },
+        name: { type: "string", description: "Browser name from browsers.list, as the user would say it (trimmed, case-insensitive; use sessionId to disambiguate duplicates)." },
       },
-      required: ["sessionId"],
+      required: [],
     },
     annotations: { title: "Select browser", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     category: "system",
@@ -1631,15 +1640,29 @@ export function createGatewayMcpServer(
           const listed = await options.browsers.list();
           return { content: toMcpContent(listed) };
         }
-        const target = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
+        const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
+        const browserName = typeof input.name === "string" ? input.name.trim() : "";
+        // sessionId wins when both are given; otherwise the name is the target.
+        const target = sessionId || browserName;
         if (!target) {
-          throw new ToolErrorException("INVALID_INPUT", "browsers.select needs a sessionId from browsers.list");
+          throw new ToolErrorException("INVALID_INPUT", "browsers.select needs a sessionId or name from browsers.list");
         }
-        const selected = await options.browsers.select(target);
+        let selected: { sessionId: string; name: string };
+        try {
+          selected = await options.browsers.select(target);
+        } catch (error) {
+          // An unknown browser is an input error, naming the available
+          // browsers (names only, never tokens) — the message comes from
+          // the DirectoryDO, which is the only place that knows them.
+          if (error instanceof Error && error.message.startsWith("unknown browser")) {
+            throw new ToolErrorException("INVALID_INPUT", error.message);
+          }
+          throw error;
+        }
         return {
           content: toMcpContent({
             ...selected,
-            note: "Selection is persisted for this OAuth client. This live transport still talks to the previous browser; re-initialize to move to the selected browser.",
+            note: "Routing preference saved for this OAuth client on this account. The next call goes to the selected browser; no re-initialization is needed. Clients that never select use the account default.",
           }),
         };
       }

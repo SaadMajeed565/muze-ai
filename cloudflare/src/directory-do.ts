@@ -95,7 +95,7 @@ interface TokenRow {
   clientId: string;
   scope: string;
   expiresAt: number;
-  /** Owning account, when known (older rows lack it; see setClientBrowser). */
+  /** Owning account, when known (older rows lack it; verifyAccess falls back to the session's account). */
   userId?: string;
   createdAt: number;
   lastRefreshedAt: number;
@@ -109,6 +109,33 @@ interface TokenRow {
    */
   pairedAccessHash?: string;
 }
+interface RoutingPreferenceRow {
+  clientId: string;
+  userId: string;
+  targetSessionId: string;
+  updatedAt: number;
+}
+
+interface LiveClientRow {
+  clientId: string;
+  userId: string;
+  /** Browser the client is currently routed to, when known. */
+  sessionId?: string;
+  clientName?: string;
+  scope?: string;
+  connectedSince: number;
+  lastActivityAt: number;
+}
+
+/**
+ * Live-client liveness window (contract C3): a client counts as live
+ * while it is registered AND its lastActivityAt is within this window.
+ * The MCP side writes only on session open/close/evict — no per-call
+ * writes — so a stale entry from an abnormal termination is possible
+ * but bounded by this window, after which it stops counting as live.
+ */
+const LIVE_CLIENT_WINDOW_MS = 10 * 60 * 1000;
+
 interface ExtensionCodeRow {
   /** Bound browser when adopting an existing one; empty when redeem creates one. */
   sessionId: string;
@@ -254,12 +281,16 @@ export class DirectoryDO implements DurableObject {
         return this.renameBrowser(String(body.userId ?? ""), String(body.targetSessionId ?? ""), String(body.name ?? ""));
       case "removeBrowser":
         return this.removeBrowser(String(body.userId ?? ""), String(body.targetSessionId ?? ""));
-      case "setClientBrowser":
-        return this.setClientBrowser(
-          String(body.clientId ?? ""),
-          String(body.currentSessionId ?? ""),
-          String(body.targetSessionId ?? ""),
-        );
+      case "setRoutingPreference":
+        return this.setRoutingPreference(body);
+      case "resolveRoute":
+        return this.resolveRoute(String(body.clientId ?? ""), String(body.userId ?? ""), String(body.currentSessionId ?? ""));
+      case "setLiveClient":
+        return this.setLiveClient(body);
+      case "clearLiveClient":
+        return this.clearLiveClient(String(body.clientId ?? ""), String(body.userId ?? ""));
+      case "liveClients":
+        return this.liveClients(String(body.userId ?? ""));
       case "revokeClient":
         return this.revokeClient(String(body.userId ?? ""), String(body.clientId ?? ""), String(body.sessionId ?? ""));
       case "sessionExists": {
@@ -501,10 +532,17 @@ export class DirectoryDO implements DurableObject {
     return { userId: account.userId, browsers: this.publicBrowsers(account), defaultSessionId: account.defaultSessionId };
   }
 
-  /** Authorized OAuth clients, deduped by client + target browser. No tokens. */
+  /**
+   * Authorized OAuth clients, deduped by client + target browser. No tokens.
+   * Live rows are enriched from the live-client registry (contract C3):
+   * a row counts as live when a registry entry for the same client is
+   * within the 10-minute window — scoped to the row's browser when the
+   * entry carries one, to every browser of the client when it does not.
+   */
   private async clientsForUser(userId: string): Promise<Record<string, any>> {
     const account = await this.loadAccount(userId);
     if (!account) return { ok: false, error: "unknown account", status: 404 };
+    const liveEntries = await this.loadLiveClients(userId);
     const known = new Set(account.browsers.map((entry) => entry.sessionId));
     const byKey = new Map<string, Record<string, unknown>>();
     for (const prefix of ["at:", "rt:"] as const) {
@@ -516,6 +554,9 @@ export class DirectoryDO implements DurableObject {
         const mapKey = `${row.clientId}:${row.sessionId}`;
         const existing = byKey.get(mapKey);
         if (!existing || (row.createdAt ?? 0) > Number(existing.createdAt ?? 0)) {
+          const live = liveEntries.find(
+            (entry) => entry.clientId === row.clientId && (!entry.sessionId || entry.sessionId === row.sessionId),
+          );
           byKey.set(mapKey, {
             clientId: row.clientId,
             clientName: client?.clientName ?? row.clientId,
@@ -524,6 +565,9 @@ export class DirectoryDO implements DurableObject {
             expiresAt: row.expiresAt,
             createdAt: row.createdAt ?? null,
             lastRefreshedAt: row.lastRefreshedAt ?? null,
+            live: Boolean(live),
+            connectedSince: live ? live.connectedSince : null,
+            lastActivityAt: live ? live.lastActivityAt : null,
           });
         }
       }
@@ -556,10 +600,24 @@ export class DirectoryDO implements DurableObject {
 
   /**
    * Remove one browser and revoke only that browser: its session row, its
-   * device-token index entries, its OAuth tokens, and its pair codes are
-   * deleted; other browsers and their tokens are untouched. The last
-   * browser cannot be removed — deleting the account is the path for that.
-   * The caller (Worker) closes the browser's bridge and live MCP sessions.
+   * device-token index entries, and its pair codes are deleted; other
+   * browsers and their tokens are untouched. The removed browser's OAuth
+   * tokens are NOT deleted — they are re-homed to the new default browser
+   * (the current default when a non-default browser is removed, the first
+   * remaining browser when the default itself is removed) before
+   * revokeSession runs, so the AI client keeps working on the account.
+   * Re-homing (rather than leaving the rows alone) keeps the tokens
+   * revocable: revokeClient with no browser scope skips token rows whose
+   * sessionId is not a known browser, so a stale sessionId would make
+   * them unrevocable account-wide. The last browser cannot be removed —
+   * deleting the account is the path for that.
+   * Removal touches no AI-side state: no MCP session, task, approval, or
+   * client row is closed or deleted, and no other client's routing
+   * preference is changed. A routing preference that pointed at the
+   * removed browser is left stale in storage; resolveRoute falls back
+   * to the account default for it (and clears it lazily). The browser's
+   * own bridge is closed by the caller (Worker); its live MCP sessions
+   * are NOT closed — the AI stays connected to the account.
    */
   private async removeBrowser(userId: string, targetSessionId: string): Promise<Record<string, any>> {
     const account = await this.loadAccount(userId);
@@ -570,43 +628,231 @@ export class DirectoryDO implements DurableObject {
     if (account.browsers.length <= 1) {
       return { ok: false, error: "cannot remove the last browser", status: 400 };
     }
+    const remaining = account.browsers.filter((entry) => entry.sessionId !== targetSessionId);
+    const newDefaultSessionId =
+      account.defaultSessionId === targetSessionId
+        ? remaining[0].sessionId
+        : (account.defaultSessionId ?? remaining[0].sessionId);
+    // Re-home the removed browser's OAuth tokens to the new default
+    // BEFORE revokeSession: its delete filters match on sessionId, so
+    // the re-homed rows survive while the browser's own rows (session
+    // row, device-token index entries, pair codes, extension codes)
+    // still die. Only at:/rt: rows are re-homed.
+    for (const prefix of ["at:", "rt:"] as const) {
+      for (const [key, row] of await this.storage.list<TokenRow>({ prefix })) {
+        if (row.sessionId === targetSessionId) {
+          await this.storage.put(key, { ...row, sessionId: newDefaultSessionId });
+        }
+      }
+    }
     await this.revokeSession(targetSessionId);
-    account.browsers = account.browsers.filter((entry) => entry.sessionId !== targetSessionId);
-    if (account.defaultSessionId === targetSessionId) account.defaultSessionId = account.browsers[0].sessionId;
+    account.browsers = remaining;
+    account.defaultSessionId = newDefaultSessionId;
     await this.storage.put(`acct:${userId}`, account);
     return { removed: targetSessionId, defaultSessionId: account.defaultSessionId };
   }
 
+  // --- Unbound account-level routing (contract C2) -----------------------
+  //
+  // No binding between an AI client and a browser. A client connects to
+  // the ACCOUNT; routing is a per-client, per-account preference
+  // (clientId + account userId -> target browser sessionId) resolved at
+  // call time by resolveRoute. Setting a preference touches NO token row:
+  // tokens keep the browser session they were minted for. The preference
+  // is stored under `rp:<userId>:<clientId>` so one client authorized on
+  // several accounts keeps a separate preference per account.
+
+  private routingPreferenceKey(userId: string, clientId: string): string {
+    return `rp:${userId}:${clientId}`;
+  }
+
+  private liveClientKey(userId: string, clientId: string): string {
+    return `live:${userId}:${clientId}`;
+  }
+
   /**
-   * Move an OAuth client's future MCP routing to another browser of the
-   * same account. The rebind is account-wide, not per-browser: every
-   * access/refresh token for that client on ANY browser of this account
-   * is rebound (predicate below: the token's session is the current
-   * session OR the token row carries this account's userId). That is the
-   * intended behaviour — a client is authorized per account, and leaving
-   * its tokens on other browsers behind would split its routing — but an
-   * earlier comment wrongly claimed other browsers' tokens were left
-   * alone. Live transports on the old browser are NOT moved — the client
-   * re-initializes on the new browser (see browsers.select).
+   * Resolve an account anchor for a routing call: an explicit userId
+   * wins, else the account that owns currentSessionId. Neither given
+   * means the caller supplied no account context at all.
    */
-  private async setClientBrowser(clientId: string, currentSessionId: string, targetSessionId: string): Promise<Record<string, any>> {
+  private async accountForRouting(userId: string, currentSessionId: string): Promise<AccountRow | null> {
+    if (userId) return this.loadAccount(userId);
+    if (currentSessionId) return this.accountForSession(currentSessionId);
+    return null;
+  }
+
+  /**
+   * Resolve a browsers.select target against one account's browsers.
+   * An exact sessionId match wins; otherwise the target is treated as a
+   * browser NAME: trimmed, case-insensitive. When several browsers share
+   * the name, the DEFAULT browser wins if it is among the matches,
+   * otherwise the most-recently-seen (max lastSeenAt, falling back to
+   * createdAt on ties). Returns null when nothing matches.
+   */
+  private resolveBrowserTarget(account: AccountRow, target: string): BrowserSession | null {
+    const trimmed = target.trim();
+    if (!trimmed) return null;
+    const byId = account.browsers.find((entry) => entry.sessionId === trimmed);
+    if (byId) return byId;
+    const lowered = trimmed.toLowerCase();
+    const matches = account.browsers.filter((entry) => entry.name.trim().toLowerCase() === lowered);
+    if (matches.length === 0) return null;
+    const defaultMatch = matches.find((entry) => entry.sessionId === account.defaultSessionId);
+    if (defaultMatch) return defaultMatch;
+    return matches.reduce((best, entry) =>
+      entry.lastSeenAt > best.lastSeenAt ||
+      (entry.lastSeenAt === best.lastSeenAt && entry.createdAt > best.createdAt)
+        ? entry
+        : best,
+    );
+  }
+
+  private unknownBrowserError(account: AccountRow, target: string): Record<string, any> {
+    const names = account.browsers.map((entry) => entry.name);
+    return {
+      ok: false,
+      error: `unknown browser "${target}"; available browsers: ${names.join(", ")}`,
+      status: 404,
+    };
+  }
+
+  /**
+   * Set a client's routing preference (contract C2). Accepts either a
+   * sessionId or a browser name: `targetSessionId` wins when both it and
+   * `name` are given; a `targetSessionId` that matches no browser id is
+   * itself tried as a name, so a raw select string works either way.
+   * A name needs an account anchor (`userId` or `currentSessionId`) —
+   * without one the account whose names to match is unknowable. The
+   * target must belong to the caller's account; a foreign browser id
+   * simply does not match and is reported as unknown. Stores the
+   * preference only — no token row is read or rewritten, so a select
+   * never moves, splits, or invalidates any token.
+   */
+  private async setRoutingPreference(body: Record<string, any>): Promise<Record<string, any>> {
+    const clientId = String(body.clientId ?? "");
     if (!clientId) return { ok: false, error: "client is required", status: 400 };
-    const account = await this.accountForSession(currentSessionId);
+    const targetSessionId = String(body.targetSessionId ?? "").trim();
+    const name = String(body.name ?? "").trim();
+    const target = targetSessionId || name;
+    if (!target) return { ok: false, error: "browsers.select needs a sessionId or name from browsers.list", status: 400 };
+    const account = await this.accountForRouting(String(body.userId ?? ""), String(body.currentSessionId ?? ""));
+    if (!account) {
+      return { ok: false, error: "browser selection needs the current browser or account", status: 400 };
+    }
+    const resolved = this.resolveBrowserTarget(account, target);
+    if (!resolved) return this.unknownBrowserError(account, target);
+    const row: RoutingPreferenceRow = {
+      clientId,
+      userId: account.userId,
+      targetSessionId: resolved.sessionId,
+      updatedAt: nowMs(),
+    };
+    await this.storage.put(this.routingPreferenceKey(account.userId, clientId), row);
+    return { sessionId: resolved.sessionId, name: resolved.name };
+  }
+
+  /**
+   * Resolve the browser a client's next call goes to (contract C2): the
+   * stored preference when it is set AND that browser still exists in
+   * the account, otherwise the account default. Never errors on a stale
+   * preference and never returns a stale id — a preference pointing at
+   * a removed browser is cleared lazily here and the default is used.
+   * The browsers list is the account's list (same shape as
+   * browsersForUser returns) so callers can also resolve names.
+   */
+  private async resolveRoute(clientId: string, userId: string, currentSessionId: string): Promise<Record<string, any>> {
+    const account = await this.accountForRouting(userId, currentSessionId);
     if (!account) return { ok: false, error: "unknown account", status: 404 };
-    const target = account.browsers.find((entry) => entry.sessionId === targetSessionId);
-    if (!target) return { ok: false, error: "unknown browser", status: 404 };
-    let moved = 0;
-    for (const prefix of ["at:", "rt:"] as const) {
-      for (const [key, row] of await this.storage.list<TokenRow>({ prefix })) {
-        const sameAccount = row.sessionId === currentSessionId || (row.userId !== undefined && row.userId === account.userId);
-        if (row.clientId === clientId && sameAccount) {
-          await this.storage.put(key, { ...row, sessionId: targetSessionId });
-          moved++;
+    let sessionId = account.defaultSessionId;
+    if (clientId) {
+      const key = this.routingPreferenceKey(account.userId, clientId);
+      const preference = await this.storage.get<RoutingPreferenceRow>(key);
+      if (preference) {
+        if (account.browsers.some((entry) => entry.sessionId === preference.targetSessionId)) {
+          sessionId = preference.targetSessionId;
+        } else {
+          // Stale preference (browser removed): clear it lazily, use default.
+          await this.storage.delete(key);
         }
       }
     }
-    if (moved === 0) return { ok: false, error: "no tokens for this client on this browser", status: 404 };
-    return { sessionId: targetSessionId, name: target.name };
+    return { sessionId, defaultSessionId: account.defaultSessionId, browsers: this.publicBrowsers(account) };
+  }
+
+  // --- Live-client registry (contract C3) --------------------------------
+  //
+  // Live MCP-client state lives here in the DirectoryDO (not in the
+  // browser SessionDOs) so the dashboard still sees live clients now
+  // that MCP sessions are account-level. The MCP side writes only on
+  // session open (setLiveClient), close, and evict (clearLiveClient);
+  // liveness is "registered AND lastActivityAt within 10 minutes", so
+  // no per-call writes are needed and a stale entry from an abnormal
+  // termination stops counting as live once the window passes.
+
+  /** Live entries for one account, within the window; stale ones are dropped lazily. */
+  private async loadLiveClients(userId: string): Promise<LiveClientRow[]> {
+    const out: LiveClientRow[] = [];
+    const cutoff = nowMs() - LIVE_CLIENT_WINDOW_MS;
+    for (const [key, row] of await this.storage.list<LiveClientRow>({ prefix: "live:" })) {
+      if (row.userId !== userId) continue;
+      if (row.lastActivityAt < cutoff) {
+        await this.storage.delete(key);
+        continue;
+      }
+      out.push(row);
+    }
+    return out;
+  }
+
+  private async setLiveClient(body: Record<string, any>): Promise<Record<string, any>> {
+    const clientId = String(body.clientId ?? "");
+    const userId = String(body.userId ?? "");
+    if (!clientId || !userId) return { ok: false, error: "client and account are required", status: 400 };
+    const now = nowMs();
+    const row: LiveClientRow = {
+      clientId,
+      userId,
+      ...(typeof body.sessionId === "string" && body.sessionId ? { sessionId: String(body.sessionId) } : {}),
+      ...(typeof body.clientName === "string" && body.clientName ? { clientName: String(body.clientName) } : {}),
+      ...(typeof body.scope === "string" && body.scope ? { scope: String(body.scope) } : {}),
+      connectedSince: typeof body.connectedSince === "number" ? body.connectedSince : now,
+      lastActivityAt: typeof body.lastActivityAt === "number" ? body.lastActivityAt : now,
+    };
+    await this.storage.put(this.liveClientKey(userId, clientId), row);
+    return { live: true, clientId, userId, connectedSince: row.connectedSince, lastActivityAt: row.lastActivityAt };
+  }
+
+  private async clearLiveClient(clientId: string, userId: string): Promise<Record<string, any>> {
+    if (!clientId) return { ok: false, error: "client is required", status: 400 };
+    let cleared = false;
+    if (userId) {
+      cleared = await this.storage.delete(this.liveClientKey(userId, clientId));
+    } else {
+      for (const [key, row] of await this.storage.list<LiveClientRow>({ prefix: "live:" })) {
+        if (row.clientId === clientId) {
+          await this.storage.delete(key);
+          cleared = true;
+        }
+      }
+    }
+    return { cleared };
+  }
+
+  private async liveClients(userId: string): Promise<Record<string, any>> {
+    if (!userId) return { ok: false, error: "unknown account", status: 404 };
+    const clients = await this.loadLiveClients(userId);
+    return {
+      clients: clients.map((row) => ({
+        clientId: row.clientId,
+        clientName: row.clientName ?? row.clientId,
+        scope: row.scope ?? "",
+        userId: row.userId,
+        sessionId: row.sessionId ?? null,
+        connectedSince: row.connectedSince,
+        lastActivityAt: row.lastActivityAt,
+        live: true,
+      })),
+    };
   }
 
   /** Revoke one client's tokens, optionally scoped to a single browser. */
@@ -1095,11 +1341,15 @@ export class DirectoryDO implements DurableObject {
     const row = await this.storage.get<TokenRow>(`at:${hash}`);
     if (!row || row.expiresAt < nowMs()) return { ok: false, error: "invalid_token", status: 401 };
     const client = row.clientId ? await this.storage.get<ClientRow>(`c:${row.clientId}`) : undefined;
+    // Contract C1: the owning account, from the token row when present,
+    // else via the session the token was minted for (old rows lack it).
+    const owner = row.userId ?? (await this.accountForSession(row.sessionId))?.userId;
     return {
       sessionId: row.sessionId,
       clientId: row.clientId,
       clientName: client?.clientName ?? row.clientId,
       scope: row.scope,
+      ...(owner ? { userId: owner } : {}),
     };
   }
 

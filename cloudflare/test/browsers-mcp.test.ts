@@ -82,7 +82,8 @@ describe("gateway-native browsers tools", () => {
     };
     const selectedBody = JSON.parse(selected.content[0].text) as { sessionId: string; note: string };
     expect(selectedBody.sessionId).toBe("browser-b");
-    expect(selectedBody.note).toMatch(/re-initialize/);
+    expect(selectedBody.note).toMatch(/no re-initialization is needed/);
+    expect(selectedBody.note).not.toMatch(/re-initialize to move/);
   });
 
   test("read-only scope can list but cannot select; read mode cannot select", async () => {
@@ -100,6 +101,60 @@ describe("gateway-native browsers tools", () => {
       isError?: boolean;
     };
     expect(modeDenied.isError).toBe(true);
+  });
+
+  test("select accepts a browser name, and sessionId wins when both are given", async () => {
+    const seen: string[] = [];
+    const recording = {
+      list: handler.list,
+      select: async (target: string) => {
+        seen.push(target);
+        return { sessionId: target === "Browser B" ? "browser-b" : target, name: "Browser B" };
+      },
+    };
+    const client = await connect({ scope: "read:tools call:tools", browsers: recording });
+    const byName = (await client.callTool({ name: "browsers.select", arguments: { name: "Browser B" } })) as {
+      content: { text: string }[];
+    };
+    expect(JSON.parse(byName.content[0].text).sessionId).toBe("browser-b");
+    const both = (await client.callTool({
+      name: "browsers.select",
+      arguments: { sessionId: "browser-b", name: "Browser A" },
+    })) as { content: { text: string }[] };
+    expect(JSON.parse(both.content[0].text).sessionId).toBe("browser-b");
+    expect(seen).toEqual(["Browser B", "browser-b"]);
+  });
+
+  test("select of an unknown browser is INVALID_INPUT naming the available browsers", async () => {
+    const failing = {
+      list: handler.list,
+      select: async () => {
+        throw new Error('unknown browser "Nope"; available browsers: Browser A, Browser B');
+      },
+    };
+    const client = await connect({ scope: "read:tools call:tools", browsers: failing });
+    const result = (await client.callTool({ name: "browsers.select", arguments: { name: "Nope" } })) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("INVALID_INPUT");
+    expect(body.error.message).toMatch(/unknown browser "Nope"/);
+    expect(body.error.message).toMatch(/Browser A, Browser B/);
+  });
+
+  test("select descriptions state the unbound routing semantics, with no re-init wording", async () => {
+    const list = BROWSER_TOOL_DESCRIPTORS.find((tool) => tool.name === "browsers.list");
+    const select = BROWSER_TOOL_DESCRIPTORS.find((tool) => tool.name === "browsers.select");
+    expect(list?.description).toMatch(/routing preference/);
+    expect(list?.description).toMatch(/no re-initialization/);
+    expect(select?.description).toMatch(/next call goes to the selected browser/);
+    expect(select?.description).toMatch(/browser name/);
+    expect(select?.description).not.toMatch(/rebound|re-initializes/);
+    const properties = (select?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    expect(Object.keys(properties).sort()).toEqual(["name", "sessionId"]);
+    expect((select?.inputSchema as { required?: string[] }).required ?? []).toEqual([]);
   });
 
   test("select without a sessionId is an input error, and batching browsers tools is refused", async () => {
