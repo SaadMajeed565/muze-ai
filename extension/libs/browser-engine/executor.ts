@@ -172,8 +172,13 @@ export class ToolExecutor {
    * in the action-risk table, marked restricted), so they are detected
    * from the parsed input instead. Anything unresolvable falls back to
    * the called tool's own risk, which can only deny, never widen.
+   *
+   * Public because the host batch gate judges its items by this same
+   * function (V2-19): the batch is read-only-only, and a delay item
+   * smuggled in with a taskId must be refused there, not left to a
+   * task-required gate the taskId disables.
    */
-  private taskGateRisk(tool: { name: string; risk: string }, options: ExecuteOptions, input: unknown): string {
+  taskGateRisk(tool: { name: string; risk: string }, options: { canonical?: ExecuteOptions["canonical"] }, input: unknown): string {
     if (options.canonical) {
       const granular = this.deps.registry.get(options.canonical.tool);
       if (granular) return granular.risk;
@@ -456,6 +461,21 @@ export class ToolExecutor {
         details: withCalledAs({ code: toolError.code }),
       });
       this.endActivity(activityId, auditTool, "failed", options.taskId);
+      // V2-18: a consequential call that times out (or conflicts
+      // mid-execution) may already have landed its effect — the click
+      // or submit may have gone through while the confirmation never
+      // came back. Say so in the error itself instead of inviting a
+      // blind retry: the client must verify the page state before
+      // retrying. (The gateway's TIMEOUT recoveryHint still invites a
+      // retry; that text is gateway-owned and needs a matching change
+      // there — this message is the extension-side backstop.)
+      if (tool.risk === "consequential" && (toolError.code === "TIMEOUT" || toolError.code === "CONFLICT")) {
+        throw new ToolErrorException(
+          toolError.code,
+          `${toolError.message} Effect unknown: the action may already have landed — verify the page state before retrying; do not retry blindly.`,
+          { details: ToolErrorException.is(error) ? error.details : undefined, retryable: false },
+        );
+      }
       throw ToolErrorException.is(error) ? error : new ToolErrorException(toolError.code, toolError.message);
     } finally {
       if (timer) clearTimeout(timer);

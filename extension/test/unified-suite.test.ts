@@ -84,6 +84,23 @@ describe("Unified Tools & Approval Summaries", () => {
     expect(actDef?.risk).toBe("reversible");
   });
 
+  it("observe defaults are small and maxNodes is capped at 500 (V2-06)", () => {
+    // Observe cost is capped in code, not just prompt text: a bare
+    // observe used to default to maxChars 8000 / maxNodes 200 and allow
+    // maxNodes up to 2000 (~200k chars per call).
+    const observeDef = UNIFIED_TOOL_SCHEMAS.find((t) => t.name === "observe");
+    expect(observeDef).toBeDefined();
+    const parsed = observeDef!.input.safeParse({ include: ["text"] });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      const data = parsed.data as { maxChars: number; maxNodes: number };
+      expect(data.maxChars).toBe(2000);
+      expect(data.maxNodes).toBe(100);
+    }
+    expect(observeDef!.input.safeParse({ maxNodes: 500 }).success).toBe(true);
+    expect(observeDef!.input.safeParse({ maxNodes: 501 }).success).toBe(false);
+  });
+
   it("runs observe tool with parallel execution of metadata, text, and a11y", async () => {
     document.body.innerHTML = `
       <main>

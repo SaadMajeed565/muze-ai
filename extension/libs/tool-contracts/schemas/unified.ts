@@ -318,8 +318,8 @@ export const observeTool: ToolDefinition = {
     value: z.string().max(512).optional(),
     role: z.string().max(64).optional(),
     name: z.string().max(256).optional(),
-    maxChars: z.number().int().min(1).max(200000).default(8000),
-    maxNodes: z.number().int().min(1).max(2000).default(200),
+    maxChars: z.number().int().min(1).max(200000).default(2000),
+    maxNodes: z.number().int().min(1).max(500).default(100),
     // Deliberately NO default for maxDepth/limit (retest3 observe-defaults
     // fix): observe used to default to maxDepth=8 / limit=100 and forward
     // those to every granular tool, but page.outline caps maxDepth at 6 and

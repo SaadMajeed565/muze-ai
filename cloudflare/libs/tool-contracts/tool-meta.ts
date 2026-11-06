@@ -325,6 +325,28 @@ export const LISTTOOLS_CAPS: Record<string, number> = {
   unknown: 50,
 };
 export const DEFAULT_LISTTOOLS_CAP = 50;
+
+/**
+ * Approval-wait budgets (V2-25). No vendor tool-call timeout is asserted
+ * here: the 50 s budget for known clients is a conservative Muze choice
+ * under the assumption that those clients abandon a tool call at ~60 s
+ * (unverified live — no client-side timeout figure has been measured).
+ * Returning APPROVAL_REQUIRED before the client gives up means the user
+ * approves once, on the re-call, instead of the approval being wasted
+ * after the client has already left. Unknown clients keep the 120 s
+ * bridge approval TTL: nothing is known about their timeout.
+ */
+export const APPROVAL_WAIT_BUDGET_MS: Record<string, number> = {
+  claude: 50_000,
+  chatgpt: 50_000,
+  unknown: 120_000,
+};
+export const DEFAULT_APPROVAL_WAIT_MS = 120_000;
+
+export function approvalWaitBudgetMsForClientType(clientType?: string): number {
+  if (!clientType) return DEFAULT_APPROVAL_WAIT_MS;
+  return APPROVAL_WAIT_BUDGET_MS[clientType] ?? DEFAULT_APPROVAL_WAIT_MS;
+}
 /** Discovery caps live in discovery.ts (single definition, no duplicates). */
 
 /** Record the client type at initialize ONLY if the client declares it. */

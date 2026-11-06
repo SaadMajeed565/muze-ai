@@ -46,6 +46,16 @@ describe("DoBridge cancellation", () => {
     await expect(pending).rejects.toMatchObject({ code: "CANCELLED" });
     expect(sent.some((message) => message.type === "cancel" && message.targetId === wait!.id)).toBe(true);
   });
+
+  it("an approval wait honors the passed timeout instead of the 120 s default", async () => {
+    const { bridge, sent } = setup();
+    const pending = bridge.waitApproval("approval_1", 150);
+    await nextTick();
+    const wait = sent.find((message) => message.type === "approval.wait");
+    expect(wait).toMatchObject({ type: "approval.wait", timeoutMs: 150 });
+    // No host response: the local timer fires at the passed budget, not 120 s.
+    await expect(pending).rejects.toMatchObject({ code: "TIMEOUT" });
+  });
 });
 
 describe("DoBridge batching", () => {

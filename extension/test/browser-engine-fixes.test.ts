@@ -14,7 +14,7 @@ import { describeOperation } from "../libs/browser-engine/summaries.js";
 import { ChromeCdpCapability } from "../src/cdp-controller.js";
 import { systemToolHandlers } from "../libs/browser-engine/tools/system.js";
 import { interactToolHandlers } from "../libs/browser-engine/tools/interact.js";
-import { createTestRuntime } from "../libs/testing/index.js";
+import { createTestRuntime, installCdpTypingSimulation } from "../libs/testing/index.js";
 import { ToolErrorException } from "../libs/tool-contracts/index.js";
 import { HostProtocolHandler, type BridgeTransport } from "../src/host-protocol.js";
 import { PROTOCOL_VERSION } from "../libs/tool-contracts/index.js";
@@ -264,6 +264,126 @@ describe("coordinate typing (dom.typeAt / dom.pressAt)", () => {
     const rt = createTestRuntime();
     const result = await rt.executor.execute({ taskId: "task_step",  tool: "dom.pressAt", input: { x: 20, y: 30, key: "Escape" }, client, ctx: rt.ctx });
     expect(result.result).toMatchObject({ pressed: true, method: "synthetic" });
+  });
+});
+
+describe("dom.clear/dom.fill/dom.type CDP read-back (V2-03/V2-04)", () => {
+  function seedInput(value = "", hidden = false): HTMLInputElement {
+    document.body.innerHTML = `<input id="to" type="text" />`;
+    const input = document.getElementById("to") as HTMLInputElement;
+    input.value = value;
+    if (hidden) input.style.display = "none";
+    stubRect(input, 10, 20, 100, 20);
+    return input;
+  }
+
+  async function refOf(rt: ReturnType<typeof createTestRuntime>): Promise<string> {
+    const found = await rt.executor.execute({ taskId: "task_step", tool: "dom.find", input: { by: "selector", value: "#to" }, client, ctx: rt.ctx });
+    return (found.result as { elements: { ref: string }[] }).elements[0].ref;
+  }
+
+  /**
+   * The mock CDP only records calls: its type/press never touch the
+   * document, so without this the read-back verification (correctly)
+   * reports that nothing landed. The shared simulation makes CDP
+   * insertText / key input behave like a real browser on the focused
+   * element (see libs/testing/mock-context.ts).
+   */
+  function installCdpTyping(rt: ReturnType<typeof createTestRuntime>): void {
+    installCdpTypingSimulation(rt.ctx);
+  }
+
+  it("dom.clear fails fast on a hidden field instead of reporting cleared:true", async () => {
+    seedInput("secret", true);
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const ref = await refOf(rt);
+    await expect(
+      rt.executor.execute({ taskId: "task_step", tool: "dom.clear", input: { ref }, client, ctx: rt.ctx }),
+    ).rejects.toThrow("is hidden");
+  });
+
+  it("dom.clear clears a visible field and reads back empty", async () => {
+    const input = seedInput("secret");
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    installCdpTyping(rt);
+    const ref = await refOf(rt);
+    const result = await rt.executor.execute({ taskId: "task_step", tool: "dom.clear", input: { ref }, client, ctx: rt.ctx });
+    expect(result.result).toMatchObject({ cleared: true });
+    expect(input.value).toBe("");
+  });
+
+  it("dom.clear fails instead of false-succeeding when the CDP keys land nowhere", async () => {
+    seedInput("secret");
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const ref = await refOf(rt);
+    await expect(
+      rt.executor.execute({ taskId: "task_step", tool: "dom.clear", input: { ref }, client, ctx: rt.ctx }),
+    ).rejects.toThrow("still holds text");
+  });
+
+  it("dom.fill fills a visible field and reads back the exact value", async () => {
+    const input = seedInput("old");
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    installCdpTyping(rt);
+    const ref = await refOf(rt);
+    const result = await rt.executor.execute({ taskId: "task_step", tool: "dom.fill", input: { ref, value: "new" }, client, ctx: rt.ctx });
+    expect(result.result).toMatchObject({ filled: true });
+    expect(input.value).toBe("new");
+  });
+
+  it("dom.fill fails instead of false-succeeding when CDP input lands nowhere", async () => {
+    seedInput("old");
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const ref = await refOf(rt);
+    await expect(
+      rt.executor.execute({ taskId: "task_step", tool: "dom.fill", input: { ref, value: "new" }, client, ctx: rt.ctx }),
+    ).rejects.toThrow("did not land");
+  });
+
+  it("dom.type appends and reads back the typed text", async () => {
+    const input = seedInput("hi ");
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    installCdpTyping(rt);
+    const ref = await refOf(rt);
+    const result = await rt.executor.execute({ taskId: "task_step", tool: "dom.type", input: { ref, text: "there" }, client, ctx: rt.ctx });
+    expect(result.result).toMatchObject({ typed: true });
+    expect(input.value).toBe("hi there");
+  });
+
+  it("dom.type fails instead of false-succeeding when CDP input lands nowhere", async () => {
+    seedInput("hi ");
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const ref = await refOf(rt);
+    await expect(
+      rt.executor.execute({ taskId: "task_step", tool: "dom.type", input: { ref, text: "there" }, client, ctx: rt.ctx }),
+    ).rejects.toThrow("did not land");
+  });
+});
+
+describe("consequential TIMEOUT surfaces effect-unknown (V2-18)", () => {
+  it("a timed-out submit says the effect is unknown instead of inviting a blind retry", async () => {
+    document.body.innerHTML = `<form id="f"><button id="go" type="submit">Go</button></form>`;
+    const button = document.getElementById("go") as HTMLButtonElement;
+    stubRect(button, 10, 20, 100, 20);
+    const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    const found = await rt.executor.execute({ taskId: "task_step", tool: "dom.find", input: { by: "selector", value: "#go" }, client, ctx: rt.ctx });
+    const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;
+    // The CDP click never resolves: the submit may have landed while
+    // the confirmation never came back.
+    (rt.ctx.cdp as unknown as Record<string, unknown>).click = async () => new Promise(() => {});
+    const approval = rt.approvals.create({ tool: "dom.submit", risk: "consequential", summary: "submit form", client, input: { ref } });
+    rt.approvals.approve(approval.id);
+    const error = await rt.executor
+      .execute({ taskId: "task_step", tool: "dom.submit", input: { ref }, client, ctx: rt.ctx, approvalId: approval.id, timeoutMs: 50 })
+      .then(
+        () => null,
+        (e: unknown) => e as ToolErrorException,
+      );
+    expect(error).not.toBeNull();
+    expect(error?.code).toBe("TIMEOUT");
+    expect(error?.message).toMatch(/Effect unknown/);
+    expect(error?.message).toMatch(/verify the page state before retrying/);
+    expect(error?.retryable).toBe(false);
   });
 });
 

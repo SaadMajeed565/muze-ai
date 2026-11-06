@@ -118,8 +118,22 @@ export async function handleAuthorizeGet(request: Request, env: GatewayEnv, user
   const codeChallenge = url.searchParams.get("code_challenge") ?? "";
   const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "S256";
   const state = url.searchParams.get("state") ?? "";
-  const requestedScope = (url.searchParams.get("scope") ?? SUPPORTED_SCOPES.join(" ")).split(/\s+/).filter(Boolean);
-  const scope = requestedScope.filter((item) => SUPPORTED_SCOPES.includes(item)).join(" ") || SUPPORTED_SCOPES.join(" ");
+  const scopeParam = url.searchParams.get("scope");
+  const requestedScope = (scopeParam ?? SUPPORTED_SCOPES.join(" ")).split(/\s+/).filter(Boolean);
+  const knownScope = requestedScope.filter((item) => SUPPORTED_SCOPES.includes(item));
+  // An explicitly requested scope that names nothing Muze supports is a
+  // client error, not a silent widening to full scope (V2-02): a typo'd or
+  // invented scope must never quietly grant read:tools + call:tools.
+  // The no-param default (full scope) is unchanged.
+  if (requestedScope.length > 0 && knownScope.length === 0) {
+    return html(
+      errorPage(
+        `Invalid scope requested (invalid_scope): "${scopeParam}". Supported scopes: ${SUPPORTED_SCOPES.join(" ")}.`,
+      ),
+      400,
+    );
+  }
+  const scope = knownScope.join(" ") || SUPPORTED_SCOPES.join(" ");
   const resource = url.searchParams.get("resource") ?? "";
 
   if (!userId) return html(errorPage("Sign in to authorize a client."), 401);

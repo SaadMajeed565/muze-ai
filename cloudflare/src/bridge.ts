@@ -292,9 +292,20 @@ export class DoBridge implements GatewayBridge {
 
   private request<T>(message: BridgeClientMessage, signal?: AbortSignal): Promise<T> {
     const id = (message as { id: string }).id;
-    const timeout = message.type === "approval.request" || message.type === "approval.respond" || message.type === "approval.wait"
-      ? this.approvalTimeoutMs
-      : this.requestTimeoutMs;
+    // An approval wait carries its own per-client budget in the message
+    // (V2-25): the local timer honours it so the budget is enforced even
+    // if the extension ignores the field. Other approval messages keep
+    // the bridge-wide approval timeout.
+    const waitTimeoutMs =
+      message.type === "approval.wait" && typeof (message as { timeoutMs?: unknown }).timeoutMs === "number"
+        ? (message as { timeoutMs: number }).timeoutMs
+        : undefined;
+    const timeout =
+      waitTimeoutMs !== undefined
+        ? waitTimeoutMs
+        : message.type === "approval.request" || message.type === "approval.respond" || message.type === "approval.wait"
+          ? this.approvalTimeoutMs
+          : this.requestTimeoutMs;
     if (signal?.aborted) {
       return Promise.reject(signal.reason instanceof Error ? signal.reason : new ToolErrorException("CANCELLED", "Operation cancelled"));
     }

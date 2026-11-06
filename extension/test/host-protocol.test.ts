@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createTestRuntime } from "../libs/testing/index.js";
 import { PROTOCOL_VERSION, TOOL_SCHEMAS, type BridgeHostMessage } from "../libs/tool-contracts/index.js";
 import type { ActivityEvent } from "../libs/activity.js";
-import { HostProtocolHandler, type BridgeTransport } from "../src/host-protocol.js";
+import { HostProtocolHandler, MAX_BATCH_OUTPUT_CHARS, capBatchResults, type BridgeTransport } from "../src/host-protocol.js";
 import type { ToolExecutor } from "../libs/browser-engine/index.js";
 
 class FakeTransport implements BridgeTransport {
@@ -87,6 +87,82 @@ describe("HostProtocolHandler", () => {
     expect(result.results[1]).toMatchObject({ tool: "tabs.close", ok: false, error: { code: "PERMISSION_DENIED" } });
   });
 
+  it("refuses a delay item in a read-only batch even with a taskId (V2-19)", async () => {
+    const { transport, handler } = setup();
+    await handler.handle({
+      type: "tool.call.batch",
+      id: "b-delay",
+      calls: [
+        { tool: "tabs.list", input: {} },
+        // The delay-with-taskId bypass: the wait descriptor is
+        // read-only, but the executor judges a delay `restricted` —
+        // and that check is disabled by taskId presence. The batch
+        // gate must refuse it regardless of taskId, without refusing
+        // the other (genuinely read-only) wait branches.
+        { tool: "wait", input: { for: "delay", timeoutMs: 50 }, taskId: "task_1" },
+        { tool: "wait", input: { for: "navigation", timeoutMs: 500 } },
+      ],
+    });
+    const result = transport.find("tool.batch.result") as {
+      results: { tool: string; ok: boolean; error?: { code: string } }[];
+    };
+    expect(result.results).toHaveLength(3);
+    expect(result.results[0]).toMatchObject({ tool: "tabs.list", ok: true });
+    expect(result.results[1]).toMatchObject({ tool: "wait", ok: false, error: { code: "PERMISSION_DENIED" } });
+    expect(result.results[2]).toMatchObject({ tool: "wait", ok: true });
+  });
+
+  it("caps aggregate batch output at ~100k chars, truncating per item with a truncated flag (V2-05)", async () => {
+    const { rt, transport } = setup();
+    const bigExecutor = {
+      execute: async () => ({ result: { text: "x".repeat(60_000) }, dryRun: false, durationMs: 0 }),
+      taskGateRisk: (...args: Parameters<ToolExecutor["taskGateRisk"]>) => rt.executor.taskGateRisk(...args),
+    };
+    const handler = new HostProtocolHandler({
+      registry: rt.registry,
+      executor: bigExecutor as unknown as ToolExecutor,
+      policy: rt.policy,
+      approvals: rt.approvals,
+      transport,
+      getContext: () => rt.ctx,
+      server: { name: "test-host", version: "1.0.0" },
+      legacyTools: true,
+    });
+    await handler.handle({
+      type: "tool.call.batch",
+      id: "b-cap",
+      calls: [
+        { tool: "tabs.list", input: {} },
+        { tool: "tabs.list", input: {} },
+      ],
+    });
+    const result = transport.find("tool.batch.result") as {
+      results: { tool: string; ok: boolean; result?: { text?: string; truncated?: boolean; totalChars?: number } }[];
+    };
+    expect(result.results).toHaveLength(2);
+    // First item fits whole; second is replaced by a labelled preview.
+    expect(result.results[0].result?.text).toHaveLength(60_000);
+    expect(result.results[1].result?.truncated).toBe(true);
+    expect(result.results[1].result?.totalChars).toBeGreaterThan(60_000);
+    expect(JSON.stringify(result.results).length).toBeLessThanOrEqual(MAX_BATCH_OUTPUT_CHARS + 1000);
+  });
+
+  it("capBatchResults leaves small batches untouched", () => {
+    const small: { tool: string; ok: boolean; result?: unknown }[] = [{ tool: "tabs.list", ok: true, result: { tabs: [] } }];
+    expect(capBatchResults(small)).toBe(small);
+    const big = [
+      { tool: "a", ok: true, result: { text: "x".repeat(60_000) } },
+      { tool: "b", ok: true, result: { text: "y".repeat(60_000) } },
+      { tool: "c", ok: false, error: { code: "NOT_FOUND" as const, message: "nope", retryable: false } },
+    ];
+    const capped = capBatchResults(big);
+    expect((capped[0].result as { text: string }).text).toHaveLength(60_000);
+    expect((capped[1].result as { truncated: boolean }).truncated).toBe(true);
+    // Error items are kept intact for diagnosis.
+    expect(capped[2]).toMatchObject({ tool: "c", ok: false });
+    expect(JSON.stringify(capped).length).toBeLessThanOrEqual(MAX_BATCH_OUTPUT_CHARS + 1000);
+  });
+
   it("runs batch reads concurrently and returns results in input order", async () => {
     const { rt, transport } = setup();
     // First execute call is slow, second is fast: sequential code would
@@ -107,6 +183,9 @@ describe("HostProtocolHandler", () => {
           inFlight -= 1;
         }
       },
+      // The batch gate judges items by the executor's taskGateRisk;
+      // a stub executor must delegate it to the real one.
+      taskGateRisk: (...args: Parameters<ToolExecutor["taskGateRisk"]>) => rt.executor.taskGateRisk(...args),
     };
     const handler = new HostProtocolHandler({
       registry: rt.registry,

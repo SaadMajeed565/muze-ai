@@ -11,6 +11,7 @@ import {
 import { createZip, crc32 } from "../dashboard/zip.js";
 import { brandKeyForName } from "../dashboard/components/brand-icons.js";
 import { taskProgress, taskStatusWord, timelineIconForStep } from "../dashboard/ui-logic.js";
+import { renameFileViaStore, renameFolderViaStore, type FileStoreRequest } from "../dashboard/file-rename.js";
 import { TOOL_NAMES } from "../libs/tool-contracts/index.js";
 
 const files = [
@@ -261,5 +262,122 @@ describe("timeline family icons", () => {
     for (const [tool, icon] of Object.entries(expected)) {
       expect(timelineIconForStep(tool, "running")).toBe(icon);
     }
+  });
+});
+
+describe("Files rename execution (H2 attach-first + rollback, V2-46)", () => {
+  type Stored = { id: string; name: string; mimeType: string; dataBase64: string };
+
+  function createFakeStore(initial: Stored[]) {
+    const store = new Map(initial.map((f) => [f.id, { ...f }]));
+    let nextId = 100;
+    let attachCalls = 0;
+    // Failure injection: fail the read of these ids, fail the Nth
+    // attach call (1-based), or fail removing these ids.
+    const fail = { getIds: new Set<string>(), attachAt: -1, removeIds: new Set<string>() };
+    const request: FileStoreRequest = async (req: unknown) => {
+      const r = req as { type: string; id?: string; file?: { name: string; mimeType: string; dataBase64: string } };
+      if (r.type === "muze/files/get") {
+        if (fail.getIds.has(r.id!)) return { ok: false, error: "injected read failure" };
+        const file = store.get(r.id!);
+        if (!file) return { ok: false, error: "not found" };
+        return { ok: true, data: { dataBase64: file.dataBase64, mimeType: file.mimeType } };
+      }
+      if (r.type === "muze/files/attach") {
+        attachCalls++;
+        if (attachCalls === fail.attachAt) return { ok: false, error: "injected attach failure" };
+        const id = `new-${nextId++}`;
+        store.set(id, { id, name: r.file!.name, mimeType: r.file!.mimeType, dataBase64: r.file!.dataBase64 });
+        return { ok: true, data: { id } };
+      }
+      if (r.type === "muze/files/remove") {
+        if (fail.removeIds.has(r.id!)) return { ok: false, error: "injected remove failure" };
+        if (!store.delete(r.id!)) return { ok: false, error: "not found" };
+        return { ok: true };
+      }
+      return { ok: false, error: `unknown ${r.type}` };
+    };
+    const names = () => [...store.values()].map((f) => f.name).sort();
+    const byName = (name: string) => [...store.values()].find((f) => f.name === name);
+    return { store, fail, request, names, byName };
+  }
+
+  const fileA = { id: "1", name: "a.txt", mimeType: "text/plain", size: 5 };
+  const fileB = { id: "2", name: "Docs/b.txt", mimeType: "text/plain", size: 5 };
+  const fileC = { id: "3", name: "Docs/c.txt", mimeType: "text/plain", size: 5 };
+
+  it("renames a file: new copy attached first, old copy removed, bytes kept", async () => {
+    const fake = createFakeStore([{ ...fileA, dataBase64: "aGVsbG8=" }]);
+    const result = await renameFileViaStore(fake.request, fileA, "b.txt");
+    expect(result).toEqual({ ok: true });
+    expect(fake.names()).toEqual(["b.txt"]);
+    expect(fake.byName("b.txt")?.dataBase64).toBe("aGVsbG8=");
+  });
+
+  it("a failed attach leaves the old file untouched (no data loss)", async () => {
+    const fake = createFakeStore([{ ...fileA, dataBase64: "aGVsbG8=" }]);
+    fake.fail.attachAt = 1;
+    const result = await renameFileViaStore(fake.request, fileA, "b.txt");
+    expect(result.ok).toBe(false);
+    expect(fake.names()).toEqual(["a.txt"]);
+    expect(fake.byName("a.txt")?.dataBase64).toBe("aGVsbG8=");
+  });
+
+  it("a failed remove rolls back the new copy (no duplicate left behind)", async () => {
+    const fake = createFakeStore([{ ...fileA, dataBase64: "aGVsbG8=" }]);
+    fake.fail.removeIds.add("1");
+    const result = await renameFileViaStore(fake.request, fileA, "b.txt");
+    expect(result.ok).toBe(false);
+    expect(fake.names()).toEqual(["a.txt"]);
+    expect(fake.byName("a.txt")?.dataBase64).toBe("aGVsbG8=");
+  });
+
+  it("a failed read never touches the store", async () => {
+    const fake = createFakeStore([{ ...fileA, dataBase64: "aGVsbG8=" }]);
+    fake.fail.getIds.add("1");
+    const result = await renameFileViaStore(fake.request, fileA, "b.txt");
+    expect(result.ok).toBe(false);
+    expect(fake.names()).toEqual(["a.txt"]);
+  });
+
+  it("renames a whole folder without splitting it", async () => {
+    const fake = createFakeStore([
+      { ...fileB, dataBase64: "Yg==" },
+      { ...fileC, dataBase64: "Yw==" },
+    ]);
+    const result = await renameFolderViaStore(fake.request, [fileB, fileC], "Docs", "Archive");
+    expect(result).toEqual({ ok: true });
+    expect(fake.names()).toEqual(["Archive/b.txt", "Archive/c.txt"]);
+    expect(fake.byName("Archive/b.txt")?.dataBase64).toBe("Yg==");
+    expect(fake.byName("Archive/c.txt")?.dataBase64).toBe("Yw==");
+  });
+
+  it("a failed attach mid-folder leaves the folder untouched", async () => {
+    const fake = createFakeStore([
+      { ...fileB, dataBase64: "Yg==" },
+      { ...fileC, dataBase64: "Yw==" },
+    ]);
+    fake.fail.attachAt = 2;
+    const result = await renameFolderViaStore(fake.request, [fileB, fileC], "Docs", "Archive");
+    expect(result.ok).toBe(false);
+    expect(fake.names()).toEqual(["Docs/b.txt", "Docs/c.txt"]);
+    expect(fake.byName("Docs/b.txt")?.dataBase64).toBe("Yg==");
+    expect(fake.byName("Docs/c.txt")?.dataBase64).toBe("Yw==");
+  });
+
+  it("a failed remove mid-folder restores already-removed files (no split, no loss)", async () => {
+    const fake = createFakeStore([
+      { ...fileB, dataBase64: "Yg==" },
+      { ...fileC, dataBase64: "Yw==" },
+    ]);
+    // Removing the second old file fails after the first was removed:
+    // the first must be restored from its staged bytes and its new
+    // copy removed, and the second's new copy removed too.
+    fake.fail.removeIds.add("3");
+    const result = await renameFolderViaStore(fake.request, [fileB, fileC], "Docs", "Archive");
+    expect(result.ok).toBe(false);
+    expect(fake.names()).toEqual(["Docs/b.txt", "Docs/c.txt"]);
+    expect(fake.byName("Docs/b.txt")?.dataBase64).toBe("Yg==");
+    expect(fake.byName("Docs/c.txt")?.dataBase64).toBe("Yw==");
   });
 });

@@ -21,6 +21,7 @@ import {
 import { resolveUnifiedAction } from "../libs/tool-contracts/action-risk.js";
 import {
   UNIFIED_ACTION_RISK,
+  approvalWaitBudgetMsForClientType,
   classifyClientType,
   discoverTools,
   generateToolSelectionInstructions,
@@ -800,11 +801,20 @@ function stringify(value: unknown): string {
   }
 }
 
-function recoveryHint(code: string): string | undefined {
+function recoveryHint(code: string, options?: { noElicitation?: boolean; toolName?: string; toolInput?: Record<string, unknown> }): string | undefined {
   switch (code) {
     case "STALE_ELEMENT":
       return "Call observe({ include: ['a11y', 'text'] }) to obtain fresh element refs, then retry.";
     case "TIMEOUT":
+      // V2-18: a timeout on a consequential tool means the effect is
+      // unknown — the action may already have landed. Never invite a blind
+      // retry for those; for reads the old hint still applies.
+      if (
+        options?.toolName &&
+        batchItemTaskRisk(options.toolName, options.toolInput ?? {}) === "consequential"
+      ) {
+        return "Effect unknown: the action may already have landed — verify the page state with observe before retrying; do not retry blindly.";
+      }
       return "Wait for page network idle with navigate({ category: 'sync', for: 'network_idle' }), or increase timeoutMs.";
     case "NOT_FOUND":
       return "Call observe or navigate({ category: 'tab', action: 'active' }) to re-ground page state, then retry.";
@@ -813,7 +823,9 @@ function recoveryHint(code: string): string | undefined {
     case "CONFLICT":
       return "Open Muze AI, sign in, and reconnect the gateway.";
     case "APPROVAL_REQUIRED":
-      return "This action requires user approval. Ask the user in chat (elicitation) or wait for a dashboard decision, then re-call this tool with no confirmation flag; the gateway will re-request approval. A 'confirmed' flag in input is stripped and never counts as approval.";
+      return options?.noElicitation
+        ? "This action requires user approval. This client does not show an approval dialog: approve it in the Muze AI extension dashboard, then re-call this tool with no confirmation flag; the gateway will re-request approval. A 'confirmed' flag in input is stripped and never counts as approval."
+        : "This action requires user approval. Ask the user in chat (elicitation) or wait for a dashboard decision, then re-call this tool with no confirmation flag; the gateway will re-request approval. A 'confirmed' flag in input is stripped and never counts as approval.";
     case "APPROVAL_DENIED":
       return "The user declined this operation.";
     case "TASK_REQUIRED":
@@ -1144,6 +1156,11 @@ export function createGatewayMcpServer(
   // tool-meta.ts LISTTOOLS_CAPS), not a claimed vendor limit.
   const clientType = classifyClientType(options?.clientType ?? client?.name);
   const listToolsCap = listToolsCapForClientType(clientType);
+  // Per-client approval-wait budget (V2-25): the dashboard wait in
+  // runWithApproval is bounded by this, not the fixed 120 s, so a
+  // client that abandons the call at ~60 s still gets its
+  // APPROVAL_REQUIRED while it is listening.
+  const approvalWaitMs = approvalWaitBudgetMsForClientType(clientType);
   // Phase A session state. Default "act" is exactly the pre-Phase-A
   // behaviour. Mode changes (via the agent prompt, see GetPrompt below)
   // apply to this server instance immediately and to ListTools, discovery,
@@ -1724,7 +1741,7 @@ export function createGatewayMcpServer(
         const results = await bridge.callToolBatch(calls, { client, signal: extra.signal });
         return { content: toMcpContent({ results }) };
       }
-      const outcome = await runWithApproval(server, bridge, name, input, client, extra.signal, filingTaskId);
+      const outcome = await runWithApproval(server, bridge, name, input, client, extra.signal, filingTaskId, approvalWaitMs);
       // Task-mode tool set (Phase 2): on successful task creation, discover
       // once the tools the plan needs and offer them as this session's task
       // set (they appear in ListTools). Description tasks have no plan,
@@ -1741,7 +1758,10 @@ export function createGatewayMcpServer(
       return { content };
     } catch (error) {
       const toolError = toToolError(error);
-      const hint = recoveryHint(toolError.code);
+      // Elicitation support was recorded at initialize; a client
+      // without it gets dashboard guidance in the hint (V2-29).
+      const callCaps = (server as any).getClientCapabilities?.() as { elicitation?: Record<string, unknown> } | undefined;
+      const hint = recoveryHint(toolError.code, { noElicitation: !callCaps?.elicitation, toolName: name, toolInput: input });
       return {
         isError: true,
         content: [{ type: "text", text: JSON.stringify({ error: { ...toolError, hint } }) }],
@@ -1766,10 +1786,23 @@ export function createGatewayMcpServer(
  *    with that approvalId. Elicitation accept alone, without that minted
  *    approval, never executes the tool.
  *
- * Dashboard wait is 120,000 ms, matching the bridge approval TTL. Note:
- * MCP clients may time out on their side earlier than 120s; a client-side
- * timeout does not approve or deny anything, and the pending approval is
- * resolved as unavailable below.
+ * Dashboard wait is bounded by the per-client approval-wait budget
+ * (V2-25: ~50 s for known clients, 120,000 ms otherwise, matching
+ * the bridge approval TTL). Note: MCP clients may time out on their
+ * side earlier than 120s; a client-side timeout does not approve or
+ * deny anything, and the pending approval is resolved as
+ * unavailable below.
+ *
+ * Elicitation support is recorded by the MCP SDK at initialize
+ * (server.getClientCapabilities()): a client that declares none gets
+ * no dialog, so its approval path is the dashboard wait bounded by
+ * the same budget, and its APPROVAL_REQUIRED names the dashboard
+ * explicitly (V2-29) instead of leaving the model to infer that no
+ * dialog appeared. The wait is kept, not a prompt return: the
+ * extension mints a fresh approval per request with no dedupe or
+ * reuse, so returning before the user can approve would strand
+ * their dashboard approval unconsumed and the re-call would mint
+ * yet another one.
  *
  * The final APPROVAL_REQUIRED error never instructs a re-call with a
  * confirmation flag, and its details deliberately omit the tool input
@@ -1783,6 +1816,7 @@ async function runWithApproval(
   client?: ClientIdentity,
   signal?: AbortSignal,
   taskId?: string,
+  approvalWaitMs = 120_000,
 ): Promise<{ result: unknown }> {
   // Defensive: strip again in case a future caller bypasses CallTool.
   // The filing id is NOT part of the input: it travels as the bridge
@@ -1826,7 +1860,7 @@ async function runWithApproval(
           );
         }
 
-        if (elicitRes.action === "accept") {
+        if (elicitRes.action === "accept" && (elicitRes.content as { confirm?: boolean } | undefined)?.confirm !== false) {
           // Mint a real approval on the extension and record the
           // elicitation decision there before retrying. No flag is added
           // to the input; the approvalId is the only authority.
@@ -1854,7 +1888,7 @@ async function runWithApproval(
     let approved = false;
     let waitSucceeded = false;
     try {
-      approved = await bridge.waitApproval(approval.id, 120_000, signal);
+      approved = await bridge.waitApproval(approval.id, approvalWaitMs, signal);
       waitSucceeded = true;
     } catch {
       await bridge.respondApproval(approval.id, false, signal?.aborted ? "Cancelled" : "Approval channel unavailable").catch(() => undefined);
@@ -1876,7 +1910,9 @@ async function runWithApproval(
     await bridge.respondApproval(approval.id, false, "Pending user decision").catch(() => undefined);
     throw new ToolErrorException(
       "APPROVAL_REQUIRED",
-      `This action requires user approval. Please ask the user for confirmation in chat (elicitation) or via the dashboard, then re-invoke this tool call with no confirmation flag; the gateway will re-request approval.`,
+      (!clientCaps?.elicitation
+        ? `This action requires user approval. This client does not show an approval dialog: approve it in the Muze AI extension dashboard, then re-invoke this tool call with no confirmation flag; the gateway will re-request approval.`
+        : `This action requires user approval. Please ask the user for confirmation in chat (elicitation) or via the dashboard, then re-invoke this tool call with no confirmation flag; the gateway will re-request approval.`),
       { details: { tool: name } },
     );
   }

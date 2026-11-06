@@ -151,6 +151,28 @@ function focusedText(focused: FocusedValue): string | null {
 }
 
 /**
+ * Read-back after CDP input (V2-04): what the focused element actually
+ * holds, checked against what the caller asked for. A CDP write that
+ * went nowhere (hidden 0x0 input, wrong frame, JS-cleared value) is an
+ * error, never a reported success — the same verification dom.typeAt
+ * already does via readFocusedValue + verifyLanded. The value is used
+ * only for the check and is never returned to the caller.
+ */
+async function assertFocusedText(
+  ctx: BrowserContext,
+  tabId: number,
+  frameId: number | undefined,
+  signal: AbortSignal,
+  expected: (text: string | null) => boolean,
+  errorMessage: string,
+): Promise<void> {
+  const after = await readFocusedValue(ctx, tabId, frameId, signal);
+  if (!expected(focusedText(after))) {
+    throw new ToolErrorException("INTERNAL", errorMessage);
+  }
+}
+
+/**
  * Visibility gate for CDP input paths (Gmail recipient-editor failure
  * mode: the recipient editor resolves to a 0x0 hidden input, focus()
  * succeeds on it, CDP insertText goes nowhere, yet the tool reported
@@ -455,6 +477,18 @@ export const interactToolHandlers: RegisteredTool[] = [
       await requireVisibleTarget(ctx, tab.id!, data.ref, data.frameId, signal);
       await cdpClearField(ctx, tab.id!, data.ref, data.frameId, signal);
       if (data.value) await ctx.cdp!.type(tab.id!, data.value);
+      // Verify the value landed (V2-04): CDP insertText to a focused
+      // element that swallowed the input used to report filled:true
+      // with nothing in the field. A cleared-then-filled field must
+      // hold exactly the requested value.
+      await assertFocusedText(
+        ctx,
+        tab.id!,
+        data.frameId,
+        signal,
+        (text) => text === data.value,
+        `dom.fill: the value did not land in ${data.ref} after CDP input — the field's read-back value does not match what was typed; nothing is reported as filled`,
+      );
       return { filled: true as const, ref: data.ref };
     }
     return runPageOp(ctx, tab.id!, { op: "setValue", ref: data.ref, value: data.value }, data.frameId, signal);
@@ -464,7 +498,20 @@ export const interactToolHandlers: RegisteredTool[] = [
     const data = input as { tabId?: number; frameId?: number; ref: string };
     const tab = await requireScriptableTab(ctx, data.tabId, signal);
     if (isCdpAvailable(ctx)) {
+      // Gated like the other CDP input paths (V2-03): focus() succeeds
+      // on a hidden element and the key events go nowhere while the old
+      // code still returned cleared:true. The clear is then read back:
+      // the field must actually be empty (V2-04).
+      await requireVisibleTarget(ctx, tab.id!, data.ref, data.frameId, signal);
       await cdpClearField(ctx, tab.id!, data.ref, data.frameId, signal);
+      await assertFocusedText(
+        ctx,
+        tab.id!,
+        data.frameId,
+        signal,
+        (text) => text === "",
+        `dom.clear: the field ${data.ref} still holds text after CDP clear — nothing is reported as cleared`,
+      );
       return { cleared: true as const, ref: data.ref };
     }
     await runPageOp(ctx, tab.id!, { op: "clear", ref: data.ref }, data.frameId, signal);
@@ -483,6 +530,17 @@ export const interactToolHandlers: RegisteredTool[] = [
     await runPageOp(ctx, tab.id!, { op: "focus", ref: data.ref }, data.frameId, signal);
     if (isCdpAvailable(ctx)) {
       await ctx.cdp!.type(tab.id!, data.text);
+      // Verify the text landed (V2-04), as dom.typeAt does: CDP
+      // insertText to a focused element that swallowed the input used
+      // to report typed:true with nothing in the field.
+      await assertFocusedText(
+        ctx,
+        tab.id!,
+        data.frameId,
+        signal,
+        (text) => data.text === "" || (text !== null && text.includes(data.text)),
+        `dom.type: the text did not land in ${data.ref} after CDP input — the field's read-back value does not contain what was typed; nothing is reported as typed`,
+      );
       await settlePage(ctx, tab.id!, data, data.frameId, signal);
       return { typed: true as const, ref: data.ref, hardware: true, method: "cdp" as const };
     }

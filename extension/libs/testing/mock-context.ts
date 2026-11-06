@@ -49,6 +49,43 @@ function emptyObserverState(): MockObserverState {
   return { enabled: false, requests: [], dialogs: [], defaultAnswer: "dismiss" };
 }
 
+/**
+ * Simulate real CDP text/key input against the jsdom document. The mock
+ * CDP only records calls, so its type/press never touch the document —
+ * which is why the read-back verification in dom.fill/dom.type/dom.clear
+ * (correctly) reports that nothing landed. Tests that exercise the CDP
+ * input happy path install this simulation so typed text and Ctrl+A /
+ * Backspace behave like real browser input on the focused element. The
+ * calls are still recorded in cdpCalls, exactly as the mock does.
+ */
+export function installCdpTypingSimulation(ctx: MockBrowserContext): void {
+  const cdp = ctx.cdp as unknown as Record<string, (...args: never[]) => Promise<void>> | undefined;
+  if (!cdp) return;
+  cdp.type = (async (tabId: number, text: string) => {
+    ctx.cdpCalls.push({ method: "type", args: [tabId, text] });
+    const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+    if (active && typeof active.value === "string") {
+      active.value = `${active.value}${text}`;
+      active.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }) as never;
+  cdp.press = (async (tabId: number, key: string, modifiers: number) => {
+    ctx.cdpCalls.push({ method: "press", args: [tabId, key, modifiers] });
+    const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+    if (!active || typeof active.value !== "string") return;
+    if (key === "a" && modifiers === 2) {
+      active.setSelectionRange(0, active.value.length);
+      return;
+    }
+    if (key === "Backspace") {
+      const start = active.selectionStart ?? active.value.length;
+      const end = active.selectionEnd ?? active.value.length;
+      active.value = active.value.slice(0, start) + active.value.slice(end);
+      active.setSelectionRange(start, start);
+    }
+  }) as never;
+}
+
 export interface MockContextOptions {
   tabs?: MockTabInit[];
   downloads?: DownloadRecord[];

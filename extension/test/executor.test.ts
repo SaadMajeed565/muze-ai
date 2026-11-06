@@ -108,6 +108,24 @@ describe("ToolExecutor pipeline", () => {
     await expectCode(rt.executor.execute({ tool: "navigation.wait", input: { timeoutMs: 60_000 }, client: readClient, ctx: rt.ctx }), "TIMEOUT");
   });
 
+  it("a read-only timeout does not claim an unknown effect (V2-18)", async () => {
+    // A read-only wait that times out has no effect to be unknown
+    // about: the effect-unknown warning is for consequential tools
+    // only, where the click/submit may already have landed.
+    const rt = createTestRuntime({
+      policy: { defaultTimeoutMs: 30 },
+      context: { tabs: [{ url: "https://slow.test/", title: "Slow", active: true, status: "loading" }] },
+    });
+    const error = await rt.executor
+      .execute({ tool: "navigation.wait", input: { timeoutMs: 60_000 }, client: readClient, ctx: rt.ctx })
+      .then(
+        () => null,
+        (e: unknown) => e as ToolErrorException,
+      );
+    expect(error?.code).toBe("TIMEOUT");
+    expect(error?.message).not.toMatch(/Effect unknown/);
+  });
+
   it("honours the emergency stop", async () => {
     const rt = createTestRuntime();
     rt.policy.engageKillSwitch();

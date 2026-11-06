@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { TOOL_SCHEMAS } from "../libs/tool-contracts/index.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { approvalWaitBudgetMsForClientType, TOOL_SCHEMAS, ToolErrorException } from "../libs/tool-contracts/index.js";
 import { CORE_TOOL_NAMES, GENERATED_TOOL_SELECTION, MCP_INSTRUCTIONS, SEARCH_DESCRIPTORS, buildLayeredInstructions, createGatewayMcpServer, filterDescriptorsByMode, measureInitializePayloads, scopeAllowsTool, toMcpContent } from "../src/mcp.js";
 import { stripConfirmationFlags } from "../libs/tool-contracts/index.js";
 import type { GatewayBridge } from "../src/bridge.js";
@@ -374,5 +375,215 @@ describe("Phase D initialize payload measurement", () => {
     console.log(
       `Phase D payload sizes: old=${first.old} act=${first.act} read=${first.read} plan=${first.plan} explore=${first.explore} summary=${first.summary} compaction=${first.compaction}`,
     );
+  });
+});
+
+describe("Elicitation approval confirmation (V2-01)", () => {
+  function approvalBridge(): { bridge: GatewayBridge; approvals: () => number } {
+    let approvalCount = 0;
+    const bridge: GatewayBridge = {
+      isConnected: () => true,
+      listTools: async () => [],
+      callTool: async (call) => {
+        if (!call.approvalId) throw new ToolErrorException("APPROVAL_REQUIRED", "approval required");
+        return { result: { ok: true }, dryRun: false, durationMs: 0 };
+      },
+      callToolBatch: async () => [],
+      createApproval: async () => {
+        approvalCount += 1;
+        return {
+          id: `appr_${approvalCount}`,
+          tool: "observe",
+          title: "t",
+          summary: "s",
+          risk: "read-only",
+          client: { id: "c", name: "c", transport: "remote" },
+          createdAt: 0,
+          expiresAt: 0,
+        };
+      },
+      respondApproval: async () => undefined,
+      waitApproval: async () => true,
+    };
+    return { bridge, approvals: () => approvalCount };
+  }
+
+  async function connectWithElicitation(bridge: GatewayBridge, confirm: boolean) {
+    const server = createGatewayMcpServer(bridge, undefined, undefined, "read:tools call:tools");
+    const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: { elicitation: {} } });
+    client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept", content: { confirm } }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return { client, server };
+  }
+
+  test("elicitation accept with confirm:false denies and mints no approval", async () => {
+    const { bridge, approvals } = approvalBridge();
+    const { client, server } = await connectWithElicitation(bridge, false);
+    const result = (await client.callTool({ name: "observe", arguments: { include: ["text"] } })) as {
+      content: { text: string }[];
+      isError?: boolean;
+    };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("APPROVAL_DENIED");
+    expect(approvals()).toBe(0);
+    await client.close();
+    await server.close();
+  });
+
+  test("elicitation accept with confirm:true mints one approval and executes", async () => {
+    const { bridge, approvals } = approvalBridge();
+    const { client, server } = await connectWithElicitation(bridge, true);
+    const result = (await client.callTool({ name: "observe", arguments: { include: ["text"] } })) as {
+      isError?: boolean;
+    };
+    expect(result.isError).toBeFalsy();
+    expect(approvals()).toBe(1);
+    await client.close();
+    await server.close();
+  });
+});
+
+describe("Per-client approval-wait budget (V2-25, V2-29)", () => {
+  test("known clients get a 50 s budget, unknown clients keep 120 s", () => {
+    expect(approvalWaitBudgetMsForClientType("claude")).toBe(50_000);
+    expect(approvalWaitBudgetMsForClientType("chatgpt")).toBe(50_000);
+    expect(approvalWaitBudgetMsForClientType("unknown")).toBe(120_000);
+    expect(approvalWaitBudgetMsForClientType("something-else")).toBe(120_000);
+    expect(approvalWaitBudgetMsForClientType(undefined)).toBe(120_000);
+  });
+
+  function waitingBridge(onWait: (timeoutMs: number | undefined) => void): GatewayBridge {
+    return {
+      isConnected: () => true,
+      listTools: async () => [],
+      callTool: async () => {
+        throw new ToolErrorException("APPROVAL_REQUIRED", "approval required");
+      },
+      callToolBatch: async () => [],
+      createApproval: async () => ({
+        id: "appr_1",
+        tool: "observe",
+        title: "t",
+        summary: "s",
+        risk: "read-only",
+        client: { id: "c", name: "c", transport: "remote" },
+        createdAt: 0,
+        expiresAt: 0,
+      }),
+      respondApproval: async () => undefined,
+      waitApproval: async (_id, timeoutMs) => {
+        onWait(timeoutMs);
+        throw new Error("approval channel unavailable");
+      },
+    };
+  }
+
+  test("a no-elicitation ChatGPT client waits at most 50 s and gets dashboard guidance", async () => {
+    let waitedMs: number | undefined;
+    const server = createGatewayMcpServer(
+      waitingBridge((timeoutMs) => {
+        waitedMs = timeoutMs;
+      }),
+      { id: "chatgpt", name: "ChatGPT", transport: "remote" },
+      undefined,
+      "read:tools call:tools",
+      { clientType: "ChatGPT" },
+    );
+    const client = new Client({ name: "ChatGPT", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = (await client.callTool({ name: "observe", arguments: { include: ["text"] } })) as {
+      content: { text: string }[];
+      isError?: boolean;
+    };
+    expect(waitedMs).toBe(50_000);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("APPROVAL_REQUIRED");
+    expect(result.content[0].text).toContain("extension dashboard");
+    await client.close();
+    await server.close();
+  });
+
+  test("an unknown client keeps the 120 s dashboard wait", async () => {
+    let waitedMs: number | undefined;
+    const server = createGatewayMcpServer(
+      waitingBridge((timeoutMs) => {
+        waitedMs = timeoutMs;
+      }),
+      undefined,
+      undefined,
+      "read:tools call:tools",
+    );
+    const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = (await client.callTool({ name: "observe", arguments: { include: ["text"] } })) as {
+      content: { text: string }[];
+      isError?: boolean;
+    };
+    expect(waitedMs).toBe(120_000);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("APPROVAL_REQUIRED");
+    await client.close();
+    await server.close();
+  });
+});
+
+describe("TIMEOUT hint for consequential tools (V2-18)", () => {
+  function timeoutBridge(): GatewayBridge {
+    return {
+      isConnected: () => true,
+      listTools: async () => [],
+      callTool: async () => {
+        throw new ToolErrorException("TIMEOUT", "timed out");
+      },
+      callToolBatch: async () => [],
+      createApproval: async () => ({
+        id: "appr_1",
+        tool: "observe",
+        title: "t",
+        summary: "s",
+        risk: "read-only",
+        client: { id: "c", name: "c", transport: "remote" },
+        createdAt: 0,
+        expiresAt: 0,
+      }),
+      respondApproval: async () => undefined,
+      waitApproval: async () => true,
+    };
+  }
+
+  async function callTimedOutTool(name: string, args: Record<string, unknown>) {
+    const server = createGatewayMcpServer(timeoutBridge(), undefined, undefined, "read:tools call:tools");
+    const client = new Client({ name: "test-client", version: "1.0.0" }, { capabilities: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = (await client.callTool({ name, arguments: args })) as {
+      content: { text: string }[];
+      isError?: boolean;
+    };
+    await client.close();
+    await server.close();
+    return result;
+  }
+
+  test("a consequential tool timeout says effect unknown, never invites a blind retry", async () => {
+    const result = await callTimedOutTool("dom.submit", { ref: "r1" });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain("TIMEOUT");
+    expect(text).toContain("Effect unknown");
+    expect(text).toContain("do not retry blindly");
+    expect(text).not.toContain("increase timeoutMs");
+  });
+
+  test("a read-only tool timeout keeps the idle/timeout hint", async () => {
+    const result = await callTimedOutTool("observe", { include: ["text"] });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain("TIMEOUT");
+    expect(text).toContain("increase timeoutMs");
+    expect(text).not.toContain("Effect unknown");
   });
 });

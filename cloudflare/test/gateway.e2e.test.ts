@@ -674,6 +674,45 @@ describe("gateway e2e", () => {
     expect(resourceResponse.status).toBe(400);
   });
 
+  test("rejects an explicitly requested scope that names nothing supported", async () => {
+    const account = await createAccount();
+    const register = await http("/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "Scope Check", redirect_uris: [REDIRECT_URI] }),
+    });
+    const { client_id: clientId } = (await register.json()) as { client_id: string };
+    const verifier = base64Url(randomBytes(32));
+    const challenge = base64Url(createHash("sha256").update(verifier).digest());
+    const authorizeUrl = (scope?: string): string => {
+      const url = new URL(`${serverUrl.origin}/authorize`);
+      url.searchParams.set("client_id", clientId);
+      url.searchParams.set("redirect_uri", REDIRECT_URI);
+      url.searchParams.set("response_type", "code");
+      url.searchParams.set("code_challenge", challenge);
+      url.searchParams.set("code_challenge_method", "S256");
+      url.searchParams.set("state", "xyz");
+      if (scope) url.searchParams.set("scope", scope);
+      return `${url.pathname}${url.search}`;
+    };
+
+    // An invented scope is rejected, not silently widened to full scope.
+    const rejected = await http(authorizeUrl("invented:scope"), { headers: { cookie: account.cookie } });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.text()).toContain("invalid_scope");
+
+    // A known scope still authorizes, and a partly-unknown scope keeps
+    // only its known values instead of rejecting.
+    const known = await http(authorizeUrl("read:tools"), { headers: { cookie: account.cookie } });
+    expect(known.status).toBe(200);
+    expect(await known.text()).toContain("read:tools");
+    const partial = await http(authorizeUrl("read:tools invented:scope"), { headers: { cookie: account.cookie } });
+    expect(partial.status).toBe(200);
+    const partialHtml = await partial.text();
+    expect(partialHtml).toContain("read:tools");
+    expect(partialHtml).not.toContain("invented:scope");
+  });
+
   test("consent page shows the redirect destination, client id, and the unverified-name warning", async () => {
     const account = await createAccount();
     const register = await http("/register", {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { createTestRuntime } from "../libs/testing/index.js";
+import { createTestRuntime, installCdpTypingSimulation } from "../libs/testing/index.js";
 
 const client = { id: "c1", name: "Test", transport: "native" as const };
 
@@ -315,6 +315,11 @@ describe("pointer and keyboard tools", () => {
     (document.getElementById("name") as HTMLElement).getBoundingClientRect = () =>
       ({ x: 10, y: 10, left: 10, top: 10, width: 100, height: 20, right: 110, bottom: 30, toJSON: () => ({}) }) as DOMRect;
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    // The mock CDP only records calls, so CDP type/press never land
+    // text in the document — and the read-back verification in
+    // dom.fill/dom.clear (V2-04) now correctly rejects that. Simulate
+    // real CDP input so the happy path lands.
+    installCdpTypingSimulation(rt.ctx);
     const find = async (selector: string) => {
       const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "selector", value: selector }, client, ctx: rt.ctx });
       return (found.result as { elements: { ref: string }[] }).elements[0].ref;
@@ -357,6 +362,10 @@ describe("pointer and keyboard tools", () => {
     stubVisible(document.getElementById("box") as HTMLElement);
     stubVisible(document.getElementById("name") as HTMLElement);
     const rt = createTestRuntime({ context: { cdpEnabled: true } });
+    // Same CDP-input simulation as the fill/clear test above: the
+    // read-back verification in dom.type (V2-04) rejects input that
+    // never lands, and the recording-only mock CDP never lands it.
+    installCdpTypingSimulation(rt.ctx);
     rt.ctx.mockFrames = [0, 3];
     const found = await rt.executor.execute({ taskId: "task_step",  tool: "dom.find", input: { by: "selector", value: "#box", frameId: 3 }, client, ctx: rt.ctx });
     const ref = (found.result as { elements: { ref: string }[] }).elements[0].ref;

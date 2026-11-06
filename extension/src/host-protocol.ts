@@ -548,6 +548,49 @@ export function resolveUnifiedToolCall(tool: string, input: unknown): UnifiedRes
 }
 
 /**
+ * Aggregate cap on one batch response (V2-05): without it, 8 batched
+ * reads could return ~1.6M chars (~400k tokens) in a single response
+ * and blow the client's context. Single-call outputs are already
+ * bounded by the executor (maxOutputChars); this is the batch-level
+ * equivalent, measured on the real serialized size (including
+ * screenshot data URLs, which the single-call bound strips before
+ * measuring). Items that fit are kept whole, in order; an item that
+ * would push the batch over the cap is replaced by a labelled
+ * truncated preview with a `truncated` flag, and later items get an
+ * empty preview rather than silently disappearing. Error items are
+ * kept intact: they are small and the caller needs the diagnosis.
+ * The gateway forwards the assembled results verbatim
+ * (toMcpContent({ results })), so the cap survives to the client.
+ */
+export const MAX_BATCH_OUTPUT_CHARS = 100_000;
+
+export function capBatchResults(results: ToolBatchItemResult[]): ToolBatchItemResult[] {
+  if (JSON.stringify(results).length <= MAX_BATCH_OUTPUT_CHARS) return results;
+  let remaining = MAX_BATCH_OUTPUT_CHARS;
+  return results.map((item) => {
+    const serialized = JSON.stringify(item);
+    if (serialized.length <= remaining) {
+      remaining -= serialized.length;
+      return item;
+    }
+    if (!item.ok || item.result === undefined) return item;
+    const resultSerialized = JSON.stringify(item.result);
+    const preview = resultSerialized.slice(0, Math.max(0, remaining));
+    remaining = 0;
+    return {
+      ...item,
+      result: {
+        truncated: true,
+        totalChars: resultSerialized.length,
+        reason: `Batch output exceeded ${MAX_BATCH_OUTPUT_CHARS.toLocaleString("en-US")} characters`,
+        preview,
+        note: "Batch output was truncated; re-call with a narrower scope (a smaller limit, maxChars, or a paged offset) to retrieve the full result.",
+      },
+    };
+  });
+}
+
+/**
  * Implements the bridge *host* role: it consumes client protocol messages,
  * runs every tool call through the shared executor (policy + approvals + audit),
  * and emits host protocol messages back over the supplied transport. The gateway
@@ -1124,21 +1167,30 @@ export class HostProtocolHandler {
         // is resolved: the read-only-only rule is judged on the GRANULAR
         // risk, so a unified tabs.list item is allowed while a unified
         // tabs.close item is refused, as before for granular tools.
-        const { stripped: batchStripped, resolved: batchResolved, effDefinition, canonical: batchCanonical } = this.resolveCall(
+        // The judgement is the executor's taskGateRisk, not the parent
+        // descriptor's risk (V2-19): a `wait` delay item looks
+        // read-only on its descriptor, but the executor judges a delay
+        // `restricted` — and that executor-side check is disabled by
+        // taskId presence, so a delay smuggled into a read-only batch
+        // with a taskId would otherwise execute a timer of up to 30 s
+        // per item. Refusing here regardless of taskId closes the
+        // bypass; the executor's gate is the backstop for single calls,
+        // not for batches.
+        const { stripped: batchStripped, resolved: batchResolved, effInput: batchEffInput, canonical: batchCanonical } = this.resolveCall(
           call.tool,
           call.input,
           definition,
         );
-        const effRisk = effDefinition?.risk;
-        if (!effDefinition || effRisk !== "read-only") {
+        const gateRisk = this.deps.executor.taskGateRisk(definition, { canonical: batchCanonical }, batchEffInput);
+        if (gateRisk !== "read-only") {
           return {
             tool: call.tool,
             ok: false,
             error: toToolError(
               new ToolErrorException("PERMISSION_DENIED", "Batch calls are limited to read-only tools", {
                 details: batchResolved
-                  ? { risk: effRisk ?? "unknown", tool: batchResolved.tool, calledAs: call.tool, action: batchResolved.action }
-                  : { risk: definition.risk },
+                  ? { risk: gateRisk, tool: batchResolved.tool, calledAs: call.tool, action: batchResolved.action }
+                  : { risk: gateRisk },
               }),
             ),
           };
@@ -1149,7 +1201,7 @@ export class HostProtocolHandler {
           // non-terminal id files the row under that task.
           const batchClient = message.client ?? this.client;
           const batchClientId = batchClient.id && batchClient.id !== "unknown" ? batchClient.id : batchClient.name;
-          const batchTaskId = await this.resolveFilingTaskId(asFilingTaskId(call.taskId), batchClientId, effRisk);
+          const batchTaskId = await this.resolveFilingTaskId(asFilingTaskId(call.taskId), batchClientId, gateRisk);
           const result = await this.deps.executor.execute({
             tool: call.tool,
             input: batchStripped,
@@ -1178,7 +1230,7 @@ export class HostProtocolHandler {
         }
       };
       const results = await Promise.all(message.calls.map(runItem));
-      this.deps.transport.post({ type: "tool.batch.result", id: message.id, results });
+      this.deps.transport.post({ type: "tool.batch.result", id: message.id, results: capBatchResults(results) });
     } finally {
       this.inflight.delete(message.id);
     }
