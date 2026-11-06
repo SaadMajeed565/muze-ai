@@ -1,5 +1,5 @@
 export const GATEWAY_NAME = "Universal Browser Tools Gateway";
-export const GATEWAY_VERSION = "0.5.0";
+export const GATEWAY_VERSION = "0.6.0";
 
 export interface GatewayEnv {
   /** Per-browser-session Durable Object: holds the extension WebSocket + MCP bridge. */

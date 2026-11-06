@@ -8,7 +8,7 @@ import { MockBrowserContext } from "../libs/testing/mock-context.js";
 describe("MockBrowserContext", () => {
   it("reports the product version 0.3.0", async () => {
     const ctx = new MockBrowserContext();
-    expect((await ctx.getBrowserInfo()).extensionVersion).toBe("0.5.0");
+    expect((await ctx.getBrowserInfo()).extensionVersion).toBe("0.6.0");
   });
 
   it("reports realistic observer state instead of hardcoded values", async () => {

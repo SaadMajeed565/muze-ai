@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 — session prompt v4, audit-v2 Do-now fixes, startup fixes, unbound account-level routing
+
+- Session prompt v4, shared contract helpers, parallel batch reads (4e03f9b).
+- Audit v2 "Do now" fixes: elicitation confirm check, invalid_scope rejection, dom.clear/fill/type verification, batch/observe output caps, per-client approval-wait budget, effect-unknown retry rule (43331a8).
+- Startup fixes #2–#6: bridge grace wait, trimmed task descriptions, skipped preflight on reconnect, tool-selection layer via discover, ListTools cache (e962b84).
+- Unbound account-level routing: the AI connects to the account, per-call routing by browser ID, removing a browser never kills AI sessions (d27b473).
+- Product version 0.5.0 -> 0.6.0. Protocol version unchanged at 2.0.0, registry version unchanged at 2.3.0, tool count still 138.
+
+
 ## Unreleased — bridge session fix + genuine CDP clicks (extension only, not yet live-proven)
 
 - Clipboard self-focus (2026-10-28, user requirement: "it should focus itself instead of me keeping focus for clipboard"). Local code only — NOT pushed, NOT deployed, so nothing here takes effect live until the user pulls, rebuilds, redeploys the Worker and reloads the extension. Previously clipboard.read fell back to the active tab's page context only when the user already had that window focused, and clipboard.write had no page fallback at all. Now, on a focus error only, the tool itself focuses the active tab's window (getActiveTab → updateWindow with focused:true, activating that same tab if needed, then a 200ms settle) before the page-context fallback, and focuses again and retries once if the first fallback read/write still reports not-focused. clipboard.write gains a writeClipboard page op mirroring readClipboard. Output shapes are unchanged ({ text, truncated } for read, { written, chars } for write). Boundaries: self-focus never switches the user to a different tab, and a restricted active tab (chrome://, Extensions, dashboard) is never focused for this purpose — it returns the distinct restricted-page error. Honest limit: on some systems a background service worker's focus request only flashes the window in the taskbar instead of bringing it to the front, so a failed attempt returns an error saying the self-focus attempt did not make the window focused, and never fabricates clipboard content. No manifest permission change: chrome.windows.update is already used by the windows tools and no "windows" permission entry exists. Version stays 0.5.0, tool count 138, risk table 179.

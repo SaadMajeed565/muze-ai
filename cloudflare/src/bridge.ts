@@ -77,7 +77,7 @@ interface Pending {
 export const GATEWAY_CLIENT: ClientIdentity = {
   id: "muze-gateway",
   name: "Universal Browser Tools (remote MCP)",
-  version: "0.5.0",
+  version: "0.6.0",
   transport: "remote",
 };
 

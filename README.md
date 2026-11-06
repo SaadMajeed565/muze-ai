@@ -1,4 +1,4 @@
-# Muze AI — 0.5.0
+# Muze AI — 0.6.0
 
 Muze AI connects a user's Chrome browser to AI clients (for example Claude) over MCP, with the browser itself as the permission authority.
 

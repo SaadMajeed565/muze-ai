@@ -33,7 +33,7 @@ import type { GatewayBridge } from "./bridge.js";
 import type { ClientIdentity } from "../libs/tool-contracts/index.js";
 
 export const SERVER_NAME = "muze-browser-gateway";
-export const SERVER_VERSION = "0.5.0";
+export const SERVER_VERSION = "0.6.0";
 
 /** Curated MCP surface: The 5 Master Tools + Meta Tools. */
 export const CORE_TOOL_NAMES = new Set<string>([
